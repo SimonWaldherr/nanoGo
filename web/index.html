@@ -1,0 +1,1341 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>nanoGo — Advanced WebAssembly Go Playground</title>
+  <link rel="icon" href="assets/logo.svg">
+  <style>
+    :root {
+      --bg: #0a0c10;
+      --panel: #111418;
+      --panel-light: #1a1e24;
+      --panel-elevated: #1f2328;
+      --text: #e6e8eb;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --error: #ef4444;
+      --border: #1f242b;
+      --border-light: #374151;
+      --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
+      --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+      --gradient-bg: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      --code-bg: #0d1117;
+      --glass-bg: rgba(17, 20, 24, 0.8);
+      --glass-border: rgba(255, 255, 255, 0.1);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow-x: hidden;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+
+    /* Header */
+    .header {
+      background: var(--gradient-bg);
+      border-bottom: 1px solid var(--border);
+      box-shadow: var(--shadow);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      backdrop-filter: blur(10px);
+    }
+
+    .header-content {
+      max-width: 1600px;
+      margin: 0 auto;
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-weight: 700;
+      font-size: 1.25rem;
+    }
+
+    .brand img {
+      width: 32px;
+      height: 32px;
+    }
+
+    .brand-subtitle {
+      color: var(--text-muted);
+      font-weight: 400;
+      font-size: 0.875rem;
+      margin-left: 0.5rem;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    /* Main Layout */
+    .main {
+      max-width: 1600px;
+      margin: 0 auto;
+      padding: 2rem;
+      display: grid;
+      grid-template-columns: 300px 1fr 400px;
+      gap: 2rem;
+      min-height: calc(100vh - 120px);
+    }
+
+    /* Sidebar */
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .examples-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      background: var(--panel-light);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 1.25rem;
+      font-weight: 600;
+      font-size: 0.875rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .examples-list {
+      max-height: 500px;
+      overflow-y: auto;
+    }
+
+    .example-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      background: transparent;
+      border: none;
+      width: 100%;
+      text-align: left;
+      color: var(--text);
+    }
+
+    .example-item:hover {
+      background: var(--panel-light);
+    }
+
+    .example-item.active {
+      background: var(--accent);
+      color: white;
+    }
+
+    .example-item:last-child {
+      border-bottom: none;
+    }
+
+    .example-info {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .example-name {
+      font-weight: 500;
+      font-size: 0.875rem;
+    }
+
+    .example-desc {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .example-item.active .example-desc {
+      color: rgba(255, 255, 255, 0.8);
+    }
+
+    .example-badge {
+      background: var(--panel-elevated);
+      color: var(--text-muted);
+      padding: 0.25rem 0.5rem;
+      border-radius: 6px;
+      font-size: 0.7rem;
+      font-weight: 500;
+    }
+
+    .example-item.active .example-badge {
+      background: rgba(255, 255, 255, 0.2);
+      color: white;
+    }
+
+    /* Editor Section */
+    .editor-section {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .editor-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem;
+    }
+
+    .section-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin: 0;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 500;
+      font-size: 0.875rem;
+    }
+
+    .status.loading {
+      color: var(--warning);
+    }
+
+    .status.ready {
+      color: var(--success);
+    }
+
+    .status.error {
+      color: var(--error);
+    }
+
+    .status-indicator {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+
+    .status.loading .status-indicator {
+      background: var(--warning);
+    }
+
+    .status.ready .status-indicator {
+      background: var(--success);
+    }
+
+    .status.error .status-indicator {
+      background: var(--error);
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    /* Buttons and Inputs */
+    button, select, input[type="number"] {
+      background: var(--panel-light);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.875rem;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      font-family: inherit;
+    }
+
+    button:hover, select:hover {
+      background: var(--border-light);
+      border-color: var(--accent);
+    }
+
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+      font-weight: 500;
+    }
+
+    button.primary:hover {
+      background: var(--accent-hover);
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .input-group {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.875rem;
+    }
+
+    /* Editor */
+    .editor-container {
+      position: relative;
+      flex: 1;
+      min-height: 500px;
+    }
+
+    #src {
+      width: 100%;
+      height: 100%;
+      min-height: 500px;
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+      font-size: 14px;
+      line-height: 1.5;
+      background: var(--code-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.25rem;
+      resize: none;
+      outline: none;
+      transition: border-color 0.2s ease;
+    }
+
+    #src:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+    }
+
+    /* Output Section */
+    .output-section {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .output-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      display: none;
+    }
+
+    .output-panel.active {
+      display: block;
+    }
+
+    .output-header {
+      background: var(--panel-light);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 1.25rem;
+      font-weight: 600;
+      font-size: 0.875rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .output-content {
+      padding: 1.25rem;
+      min-height: 200px;
+      max-height: 400px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Canvas Output */
+    .canvas-container {
+      text-align: center;
+      background: var(--code-bg);
+      border-radius: 8px;
+      padding: 1rem;
+    }
+
+    #life {
+      max-width: 100%;
+      height: auto;
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      background: var(--code-bg);
+      image-rendering: pixelated;
+    }
+
+    /* Console Output */
+    #log {
+      background: var(--code-bg);
+      color: var(--text);
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+      font-size: 0.875rem;
+      line-height: 1.4;
+      margin: 0;
+      padding: 0;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      overflow-y: auto;
+      flex: 1;
+      position: relative;
+      border-radius: 8px;
+      padding: 1rem;
+    }
+
+    .log-line {
+      display: block;
+      transition: opacity 0.3s ease;
+      opacity: 1;
+    }
+
+    .log-line.fading {
+      opacity: 0.3;
+    }
+
+    .log-line.old {
+      opacity: 0.15;
+    }
+
+    #log:focus .log-line,
+    #log.focused .log-line {
+      opacity: 1 !important;
+    }
+
+    #log.auto-scroll {
+      scroll-behavior: smooth;
+    }
+
+    /* DOM Output */
+    #output {
+      min-height: 100px;
+      background: var(--code-bg);
+      border-radius: 8px;
+      padding: 1rem;
+    }
+
+    /* Info Panel */
+    .info-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1.25rem;
+      margin-top: auto;
+    }
+
+    .info-title {
+      font-weight: 600;
+      margin: 0 0 0.75rem 0;
+      color: var(--accent);
+      font-size: 0.875rem;
+    }
+
+    .info-content {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    .info-content ul {
+      margin: 0.5rem 0;
+      padding-left: 1.25rem;
+    }
+
+    .info-content li {
+      margin-bottom: 0.25rem;
+    }
+
+    .info-content code {
+      background: var(--code-bg);
+      padding: 0.2rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+    }
+
+    /* Responsive Design */
+    @media (max-width: 1400px) {
+      .main {
+        grid-template-columns: 280px 1fr 350px;
+      }
+    }
+
+    @media (max-width: 1200px) {
+      .main {
+        grid-template-columns: 1fr;
+        gap: 1.5rem;
+      }
+      
+      .sidebar {
+        order: 2;
+      }
+      
+      .output-section {
+        order: 3;
+      }
+    }
+
+    @media (max-width: 768px) {
+      .header-content {
+        padding: 1rem;
+        flex-direction: column;
+        text-align: center;
+      }
+
+      .main {
+        padding: 1rem;
+      }
+
+      #src {
+        min-height: 300px;
+      }
+    }
+
+    /* Light Theme */
+    .light {
+      --bg: #ffffff;
+      --panel: #f8fafc;
+      --panel-light: #f1f5f9;
+      --panel-elevated: #e2e8f0;
+      --text: #0f172a;
+      --text-muted: #475569;
+      --text-dim: #64748b;
+      --border: #e2e8f0;
+      --border-light: #cbd5e1;
+      --code-bg: #ffffff;
+      --gradient-bg: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+      --glass-bg: rgba(248, 250, 252, 0.8);
+      --glass-border: rgba(0, 0, 0, 0.1);
+    }
+
+    /* Scrollbar Styling */
+    ::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: var(--panel);
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border-light);
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--text-dim);
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="header-content">
+      <div class="brand">
+        <img src="assets/logo.svg" alt="nanoGo">
+        <span>nanoGo</span>
+        <span class="brand-subtitle">Advanced WebAssembly Playground</span>
+      </div>
+      <div class="header-actions">
+        <button id="themeBtn" title="Toggle theme">🌗</button>
+        <button id="shareBtn" title="Share code">📤 Share</button>
+        <button id="downloadBtn" title="Download code">💾 Download</button>
+        <a href="https://github.com/SimonWaldherr/nanogo" target="_blank" style="color: var(--accent); text-decoration: none;">
+          📚 GitHub
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="main">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="examples-panel">
+        <div class="panel-header">
+          📚 Examples & Demos
+        </div>
+        <div class="examples-list" id="examplesList">
+          <!-- Examples will be populated by JavaScript -->
+        </div>
+      </div>
+
+      <div class="info-panel">
+        <h4 class="info-title">💡 Current Demo Info</h4>
+        <div class="info-content" id="demoInfo">
+          <p>Select an example to see detailed information about what it demonstrates.</p>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Editor Section -->
+    <section class="editor-section">
+      <div class="editor-header">
+        <h2 class="section-title">
+          📝 Code Editor
+        </h2>
+        <div id="status" class="status loading">
+          <div class="status-indicator"></div>
+          Loading WebAssembly...
+        </div>
+      </div>
+
+      <div class="controls">
+        <button id="runBtn" class="primary" disabled>
+          ▶️ Run Code (Ctrl/⌘+Enter)
+        </button>
+        <button id="clearBtn">🗑️ Clear</button>
+        <div class="input-group">
+          <label for="modeSelect">Mode:</label>
+          <select id="modeSelect">
+            <option value="stream">Stream</option>
+            <option value="deferred">Deferred</option>
+          </select>
+        </div>
+        <div class="input-group">
+          <label for="scale">Canvas Scale:</label>
+          <input id="scale" type="number" value="8" min="1" max="20">
+        </div>
+      </div>
+
+      <div class="editor-container">
+        <textarea id="src" spellcheck="false" placeholder="// Select an example from the sidebar to get started
+// or write your own Go code here...
+
+package main
+
+import &quot;fmt&quot;
+
+func main() {
+    fmt.Println(&quot;Hello, nanoGo!&quot;)
+}"></textarea>
+      </div>
+    </section>
+
+    <!-- Output Section -->
+    <section class="output-section">
+      <!-- Canvas Output -->
+      <div class="output-panel" id="canvasPanel">
+        <div class="output-header">
+          <span>🎨 Canvas Output</span>
+          <span class="example-badge">Visual</span>
+        </div>
+        <div class="output-content">
+          <div class="canvas-container">
+            <canvas id="life" width="320" height="240"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- Console Output -->
+      <div class="output-panel active" id="consolePanel">
+        <div class="output-header">
+          <span>📋 Console Output</span>
+          <span class="example-badge">Text</span>
+        </div>
+        <div class="output-content">
+          <div id="log" tabindex="0" class="auto-scroll">Welcome to nanoGo!
+Select an example from the sidebar to get started! 🚀</div>
+        </div>
+      </div>
+
+      <!-- DOM Output -->
+      <div class="output-panel" id="domPanel">
+        <div class="output-header">
+          <span>🌐 Template Output</span>
+          <span class="example-badge">HTML</span>
+        </div>
+        <div class="output-content">
+          <div id="output">
+            <p style="color: var(--text-muted); font-style: italic;">
+              HTML template outputs will appear here when running template demos.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Scripts -->
+  <script src="wasm_exec.js"></script>
+  <script src="examples.js"></script>
+  <script>
+    (function() {
+      'use strict';
+
+      // Example categorization with output types and descriptions
+      const EXAMPLE_CONFIG = {
+        'Basics': {
+          output: 'console',
+          description: 'Basic Go syntax, fmt package usage',
+          badge: 'Fundamentals'
+        },
+        'Canvas': {
+          output: 'canvas',
+          description: 'Basic canvas drawing and pixel manipulation',
+          badge: 'Graphics'
+        },
+        'Channels': {
+          output: 'console',
+          description: 'Go channels for concurrent communication',
+          badge: 'Concurrency'
+        },
+        'WaitGroup': {
+          output: 'console',
+          description: 'Synchronization with sync.WaitGroup',
+          badge: 'Concurrency'
+        },
+        'Regexp + JSON': {
+          output: 'console',
+          description: 'Regular expressions and JSON handling',
+          badge: 'Data Processing'
+        },
+        'Strings/Sort': {
+          output: 'console',
+          description: 'String manipulation and sorting algorithms',
+          badge: 'Utilities'
+        },
+        'Template + DOM': {
+          output: 'dom',
+          description: 'HTML template rendering to DOM elements',
+          badge: 'Web'
+        },
+        'Random': {
+          output: 'console',
+          description: 'Random number generation with math/rand',
+          badge: 'Math'
+        },
+        'Sleep': {
+          output: 'console',
+          description: 'Time delays and sleep functionality',
+          badge: 'Time'
+        },
+        'Life': {
+          output: 'canvas',
+          description: 'Conway\'s Game of Life animation',
+          badge: 'Simulation'
+        },
+        'HTTP + Storage': {
+          output: 'dom',
+          description: 'HTTP requests and localStorage usage',
+          badge: 'Web APIs'
+        }
+      };
+
+      // Demo information content
+      const DEMO_INFO = {
+        'Basics': `
+          <p><strong>Hello World Demo</strong></p>
+          <p>Demonstrates basic Go program structure and the fmt package for output.</p>
+          <ul>
+            <li>Package declaration</li>
+            <li>Import statements</li>
+            <li>Main function</li>
+            <li>Print statements</li>
+          </ul>
+        `,
+        'Canvas': `
+          <p><strong>Canvas Graphics Demo</strong></p>
+          <p>Shows how to draw pixels on a canvas using browser-specific functions.</p>
+          <ul>
+            <li><code>browser.CanvasSize(w, h)</code> - Set canvas dimensions</li>
+            <li><code>browser.CanvasSet(x, y, on)</code> - Set pixel state</li>
+            <li><code>browser.CanvasFlush()</code> - Update display</li>
+          </ul>
+        `,
+        'Channels': `
+          <p><strong>Go Channels Demo</strong></p>
+          <p>Demonstrates concurrent programming with channels for communication between goroutines.</p>
+          <ul>
+            <li>Channel creation with <code>make(chan type)</code></li>
+            <li>Goroutine communication</li>
+            <li>Channel closing and range loops</li>
+          </ul>
+        `,
+        'WaitGroup': `
+          <p><strong>Concurrency Synchronization</strong></p>
+          <p>Uses sync.WaitGroup to coordinate multiple goroutines.</p>
+          <ul>
+            <li><code>wg.Add(1)</code> - Add goroutine to wait group</li>
+            <li><code>wg.Done()</code> - Signal completion</li>
+            <li><code>wg.Wait()</code> - Wait for all to finish</li>
+          </ul>
+        `,
+        'Regexp + JSON': `
+          <p><strong>Data Processing Demo</strong></p>
+          <p>Combines regular expressions and JSON encoding/decoding.</p>
+          <ul>
+            <li>Regex pattern matching</li>
+            <li>JSON marshalling</li>
+            <li>String manipulation</li>
+          </ul>
+        `,
+        'Strings/Sort': `
+          <p><strong>String and Sorting Utilities</strong></p>
+          <p>Demonstrates built-in string operations and sorting algorithms.</p>
+          <ul>
+            <li><code>strings.Split()</code> and <code>strings.Join()</code></li>
+            <li><code>sort.Ints()</code> for integer sorting</li>
+            <li>Slice manipulation</li>
+          </ul>
+        `,
+        'Template + DOM': `
+          <p><strong>HTML Template Rendering</strong></p>
+          <p>Shows template rendering and DOM manipulation in the browser.</p>
+          <ul>
+            <li><code>template.RenderString()</code> - Render templates</li>
+            <li><code>browser.SetHTML()</code> - Update DOM elements</li>
+            <li>Data binding with maps and slices</li>
+          </ul>
+        `,
+        'Random': `
+          <p><strong>Random Number Generation</strong></p>
+          <p>Demonstrates pseudorandom number generation with seeding.</p>
+          <ul>
+            <li><code>rand.Seed()</code> - Initialize generator</li>
+            <li><code>rand.Intn()</code> - Generate random integers</li>
+            <li>Reproducible randomness</li>
+          </ul>
+        `,
+        'Sleep': `
+          <p><strong>Time and Delays</strong></p>
+          <p>Shows how to add delays and work with time in Go programs.</p>
+          <ul>
+            <li><code>time.Sleep()</code> - Add delays</li>
+            <li>Non-blocking execution</li>
+            <li>Time-based coordination</li>
+          </ul>
+        `,
+        'Life': `
+          <p><strong>Game of Life Simulation</strong></p>
+          <p>Conway's Game of Life - a cellular automaton demonstrating complex behavior from simple rules.</p>
+          <ul>
+            <li>2D grid simulation</li>
+            <li>Animation loops</li>
+            <li>Cellular automaton rules</li>
+            <li>Real-time canvas updates</li>
+          </ul>
+        `,
+        'HTTP + Storage': `
+          <p><strong>Web APIs Integration</strong></p>
+          <p>Demonstrates HTTP requests and browser storage capabilities.</p>
+          <ul>
+            <li><code>http.GetText()</code> - Fetch text content</li>
+            <li><code>storage.SetItem()</code> - Save to localStorage</li>
+            <li>CORS and same-origin policies</li>
+          </ul>
+        `
+      };
+
+      // DOM elements
+      const statusEl = document.getElementById("status");
+      const logEl = document.getElementById("log");
+      const runBtn = document.getElementById("runBtn");
+      const clearBtn = document.getElementById("clearBtn");
+      const srcEl = document.getElementById("src");
+      const scaleEl = document.getElementById("scale");
+      const modeSelect = document.getElementById("modeSelect");
+      const shareBtn = document.getElementById("shareBtn");
+      const downloadBtn = document.getElementById("downloadBtn");
+      const themeBtn = document.getElementById("themeBtn");
+      const examplesList = document.getElementById("examplesList");
+      const demoInfo = document.getElementById("demoInfo");
+
+      // Output panels
+      const canvasPanel = document.getElementById("canvasPanel");
+      const consolePanel = document.getElementById("consolePanel");
+      const domPanel = document.getElementById("domPanel");
+
+      let worker = null;
+      let currentExample = null;
+      let theme = (localStorage.getItem("nanogo_theme") || "dark");
+
+      function setTheme(t) {
+        theme = t;
+        if (t === "light") document.documentElement.classList.add("light");
+        else document.documentElement.classList.remove("light");
+        localStorage.setItem("nanogo_theme", theme);
+        themeBtn.textContent = t === "light" ? '🌙' : '🌗';
+      }
+      setTheme(theme);
+
+      themeBtn.onclick = () => setTheme(theme === "light" ? "dark" : "light");
+
+      function setStatus(message, type = "loading") {
+        statusEl.className = `status ${type}`;
+        statusEl.innerHTML = `<div class="status-indicator"></div>${message}`;
+      }
+
+      let logLines = [];
+      let maxLogLines = 100;
+      let fadeTimeout = 8000; // 8 seconds before starting to fade
+      let isFocused = false;
+
+      // Enhanced logging with fading and auto-scroll
+      function logMessage(message) {
+        const timestamp = new Date().toLocaleTimeString();
+        const logLine = {
+          text: `[${timestamp}] ${message}`,
+          element: null,
+          timestamp: Date.now()
+        };
+
+        // Create log line element
+        const lineElement = document.createElement('div');
+        lineElement.className = 'log-line';
+        lineElement.textContent = logLine.text;
+        logLine.element = lineElement;
+
+        // Add to DOM
+        logEl.appendChild(lineElement);
+        logLines.push(logLine);
+
+        // Remove old lines if too many
+        if (logLines.length > maxLogLines) {
+          const oldLine = logLines.shift();
+          if (oldLine.element && oldLine.element.parentNode) {
+            oldLine.element.parentNode.removeChild(oldLine.element);
+          }
+        }
+
+        // Auto-scroll to bottom - force immediate scroll
+        requestAnimationFrame(() => {
+          logEl.scrollTop = logEl.scrollHeight;
+          // Double-check scroll in case content is still loading
+          setTimeout(() => {
+            logEl.scrollTop = logEl.scrollHeight;
+          }, 50);
+        });
+
+        // Start fade timer if not focused
+        if (!isFocused) {
+          setTimeout(() => startFading(logLine), fadeTimeout);
+        }
+
+        // Update existing lines fade status
+        updateLogLinesFading();
+      }
+
+      function updateLogLinesFading() {
+        if (isFocused) return;
+
+        const now = Date.now();
+        logLines.forEach(line => {
+          if (!line.element) return;
+          
+          const age = now - line.timestamp;
+          if (age > fadeTimeout * 2) {
+            line.element.className = 'log-line old';
+          } else if (age > fadeTimeout) {
+            line.element.className = 'log-line fading';
+          } else {
+            line.element.className = 'log-line';
+          }
+        });
+      }
+
+      function startFading(logLine) {
+        if (isFocused || !logLine.element) return;
+        
+        const age = Date.now() - logLine.timestamp;
+        if (age >= fadeTimeout) {
+          logLine.element.className = 'log-line fading';
+          
+          // Further fade after another interval
+          setTimeout(() => {
+            if (!isFocused && logLine.element) {
+              logLine.element.className = 'log-line old';
+            }
+          }, fadeTimeout);
+        }
+      }
+
+      function clearLog() {
+        logEl.innerHTML = "";
+        logLines = [];
+        
+        // Add initial message
+        const initialLine = document.createElement('div');
+        initialLine.className = 'log-line';
+        initialLine.textContent = "🎯 Output cleared. Ready for new execution!";
+        logEl.appendChild(initialLine);
+        
+        logLines.push({
+          text: "🎯 Output cleared. Ready for new execution!",
+          element: initialLine,
+          timestamp: Date.now()
+        });
+
+        // Force scroll to bottom after clearing
+        setTimeout(() => {
+          logEl.scrollTop = logEl.scrollHeight;
+        }, 50);
+
+        const c = document.getElementById('life');
+        const ctx = c.getContext('2d');
+        ctx.clearRect(0, 0, c.width, c.height);
+        document.getElementById('output').innerHTML = '<p style="color: var(--text-muted); font-style: italic;">Output will appear here...</p>';
+      }
+
+      // Focus management for console
+      logEl.addEventListener('focus', () => {
+        isFocused = true;
+        logEl.classList.add('focused');
+        // Restore all lines to full opacity
+        logLines.forEach(line => {
+          if (line.element) {
+            line.element.className = 'log-line';
+          }
+        });
+      });
+
+      logEl.addEventListener('blur', () => {
+        isFocused = false;
+        logEl.classList.remove('focused');
+        // Restart fading process
+        setTimeout(updateLogLinesFading, 100);
+      });
+
+      // Update fading periodically
+      setInterval(() => {
+        if (!isFocused) {
+          updateLogLinesFading();
+        }
+      }, 1000);
+      clearBtn.onclick = clearLog;
+
+      function showOutputPanel(type) {
+        // Hide all panels
+        canvasPanel.classList.remove('active');
+        consolePanel.classList.remove('active');
+        domPanel.classList.remove('active');
+
+        // Show the appropriate panel
+        switch (type) {
+          case 'canvas':
+            canvasPanel.classList.add('active');
+            break;
+          case 'dom':
+            domPanel.classList.add('active');
+            break;
+          default:
+            consolePanel.classList.add('active');
+        }
+      }
+
+      function drawCell(x, y, alive) {
+        const canvas = document.getElementById('life');
+        const ctx = canvas.getContext('2d');
+        const cs = parseInt(scaleEl.value, 10) || 8;
+        ctx.fillStyle = alive ? '#10b981' : '#0d1117';
+        ctx.fillRect(x * cs, y * cs, cs, cs);
+      }
+
+      function startWasmWorker() {
+        if (worker) return;
+        
+        if (location.protocol === 'file:') {
+          setStatus("Error: Must run on HTTP server, not file://", "error");
+          logMessage("ERROR: WebAssembly requires HTTP/HTTPS protocol.");
+          logMessage("Start a local server: python3 -m http.server 8080");
+          return;
+        }
+
+        worker = new Worker('wasm_worker.js');
+        worker.onmessage = (ev) => {
+          const m = ev.data;
+          if (!m || !m.type) return;
+          switch (m.type) {
+            case 'ready':
+              setStatus('Ready', 'ready');
+              runBtn.disabled = false;
+              logMessage('🎉 WebAssembly loaded and ready!');
+              fillExamples();
+              loadCodeFromURL();
+              break;
+            case 'log':
+              logMessage(String(m.text));
+              break;
+            case 'warn':
+              logMessage('⚠️ WARN: ' + String(m.text));
+              break;
+            case 'error':
+              logMessage('❌ ERROR: ' + String(m.text));
+              setStatus('Runtime error', 'error');
+              break;
+            case 'canvas-size': {
+              const w = Number(m.w), h = Number(m.h);
+              const scale = parseInt(scaleEl.value, 10);
+              const canvas = document.getElementById('life');
+              canvas.width = w * scale;
+              canvas.height = h * scale;
+              break;
+            }
+            case 'canvas-set': {
+              const cx = Number(m.x), cy = Number(m.y), alive = !!m.alive;
+              drawCell(cx, cy, alive);
+              break;
+            }
+            case 'canvas-flush':
+              break;
+            case 'dom-setinner': {
+              const el = document.getElementById(m.id);
+              if (el) el.innerHTML = m.html;
+              logMessage('📄 HTML template rendered');
+              break;
+            }
+            case 'dom-setvalue': {
+              const elv = document.getElementById(m.id);
+              if (elv) elv.value = m.value;
+              break;
+            }
+            case 'dom-addclass': {
+              const ea = document.getElementById(m.id);
+              if (ea) ea.classList.add(m.class);
+              break;
+            }
+            case 'dom-removeclass': {
+              const er = document.getElementById(m.id);
+              if (er) er.classList.remove(m.class);
+              break;
+            }
+            case 'open-window': {
+              try { window.open(m.url, '_blank') } catch (e) { console.warn(e) }
+              break;
+            }
+            case 'alert': {
+              try { window.alert(m.text) } catch (e) { console.warn(e) }
+              break;
+            }
+            case 'done':
+              logMessage('✅ === Execution finished ===');
+              setStatus('Ready', 'ready');
+              break;
+            default:
+              console.log('worker:', m);
+          }
+        };
+        worker.onerror = (e) => {
+          setStatus('Worker error', 'error');
+          logMessage('❌ Worker error: ' + e.message);
+        };
+        worker.postMessage({ type: 'init' });
+      }
+
+      function runCode() {
+        try {
+          if (!worker) throw new Error('worker not initialized');
+          
+          // Show appropriate output panel for current example
+          if (currentExample && EXAMPLE_CONFIG[currentExample]) {
+            showOutputPanel(EXAMPLE_CONFIG[currentExample].output);
+          }
+          
+          const scale = parseInt(scaleEl.value, 10);
+          worker.postMessage({ type: 'set-scale', scale: scale });
+          
+          const c = document.getElementById('life');
+          const ctx = c.getContext('2d');
+          ctx.clearRect(0, 0, c.width, c.height);
+          
+          localStorage.setItem("nanogo_last", srcEl.value);
+          logMessage('🚀 === Running user code ===');
+          setStatus('Running code...', 'loading');
+          const mode = modeSelect.value || 'stream';
+          const t0 = performance.now();
+          worker.postMessage({ type: 'run', source: srcEl.value, mode: mode, t0 });
+        } catch (err) {
+          setStatus('Runtime error', 'error');
+          logMessage('❌ RUNTIME ERROR: ' + err.message);
+        }
+      }
+
+      runBtn.onclick = runCode;
+
+      function fillExamples() {
+        examplesList.innerHTML = "";
+        
+        Object.keys(EXAMPLES).forEach(name => {
+          if (name === 'Empty') return; // Skip empty example
+          
+          const config = EXAMPLE_CONFIG[name] || {
+            output: 'console',
+            description: 'Go programming example',
+            badge: 'Demo'
+          };
+
+          const item = document.createElement('button');
+          item.className = 'example-item';
+          item.onclick = () => selectExample(name);
+
+          item.innerHTML = `
+            <div class="example-info">
+              <div class="example-name">${name}</div>
+              <div class="example-desc">${config.description}</div>
+            </div>
+            <div class="example-badge">${config.badge}</div>
+          `;
+
+          examplesList.appendChild(item);
+        });
+
+        // Initialize enhanced logging
+        initializeEnhancedLogging();
+
+        // Auto-select first example
+        selectExample('Basics');
+      }
+
+      function initializeEnhancedLogging() {
+        // Clear and setup initial log
+        logEl.innerHTML = "";
+        logLines = [];
+        
+        // Create initial welcome message
+        const welcomeLines = [
+          "Welcome to nanoGo!",
+          "Select an example from the sidebar to get started!",
+          ""
+        ];
+
+        welcomeLines.forEach(text => {
+          const lineElement = document.createElement('div');
+          lineElement.className = 'log-line';
+          lineElement.textContent = text;
+          logEl.appendChild(lineElement);
+          
+          logLines.push({
+            text: text,
+            element: lineElement,
+            timestamp: Date.now()
+          });
+        });
+
+        // Ensure initial scroll to bottom
+        setTimeout(() => {
+          logEl.scrollTop = logEl.scrollHeight;
+        }, 100);
+      }
+
+      function selectExample(name) {
+        if (!EXAMPLES[name]) return;
+        
+        currentExample = name;
+        srcEl.value = EXAMPLES[name];
+
+        // Update active state
+        document.querySelectorAll('.example-item').forEach(item => {
+          item.classList.remove('active');
+        });
+        
+        const activeItem = Array.from(document.querySelectorAll('.example-item')).find(
+          item => item.querySelector('.example-name').textContent === name
+        );
+        if (activeItem) activeItem.classList.add('active');
+
+        // Update demo info
+        demoInfo.innerHTML = DEMO_INFO[name] || '<p>No additional information available.</p>';
+
+        // Show appropriate output panel
+        const config = EXAMPLE_CONFIG[name] || { output: 'console' };
+        showOutputPanel(config.output);
+
+        logMessage(`📖 Loaded example: ${name} (${config.output} output)`);
+      }
+
+      // Share functionality
+      shareBtn.onclick = () => {
+        const b64 = btoa(unescape(encodeURIComponent(srcEl.value)));
+        const url = location.origin + location.pathname + "#code=" + b64;
+        navigator.clipboard.writeText(url).then(() => {
+          setStatus("Share URL copied!", "ready");
+          logMessage("📤 Share URL copied to clipboard");
+          shareBtn.textContent = '✅ Copied!';
+          setTimeout(() => shareBtn.textContent = '📤 Share', 2000);
+        }, err => {
+          logMessage("❌ Share copy failed: " + err);
+        });
+      };
+
+      // Download functionality
+      downloadBtn.onclick = () => {
+        const blob = new Blob([srcEl.value], { type: "text/plain" });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = "nanogo-pro-code.go";
+        a.click();
+        URL.revokeObjectURL(a.href);
+        logMessage("💾 Code downloaded");
+      };
+
+      function loadCodeFromURL() {
+        const hash = location.hash.startsWith("#code=") ? location.hash.slice(6) : "";
+        if (hash) {
+          try {
+            srcEl.value = atob(decodeURIComponent(hash));
+            logMessage("📥 Code loaded from URL");
+            showOutputPanel('console'); // Default to console for shared code
+          } catch (e) {
+            logMessage("❌ Failed to load code from URL");
+          }
+        } else {
+          const saved = localStorage.getItem("nanogo_last");
+          if (saved && saved !== EXAMPLES['Basics']) {
+            srcEl.value = saved;
+            logMessage("💾 Restored previous session");
+            showOutputPanel('console');
+          }
+        }
+      }
+
+      // Keyboard shortcuts
+      window.addEventListener('keydown', (ev) => {
+        if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
+          runCode();
+          ev.preventDefault();
+        }
+      });
+
+      // Initialize
+      setStatus('Loading WebAssembly...', 'loading');
+      startWasmWorker();
+    })();
+  </script>
+</body>
+</html>
