@@ -383,6 +383,17 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 	case *ast.ParenExpr:
 		return vm.evalExpr(ex.X, env)
 
+	case *ast.FuncLit:
+		fn := &Function{Name: "<anon>", Body: ex.Body, Env: env}
+		if ex.Type.Params != nil {
+			for _, f := range ex.Type.Params.List {
+				for _, n := range f.Names {
+					fn.Params = append(fn.Params, n.Name)
+				}
+			}
+		}
+		return fn, nil
+
 	default:
 		return nil, NewRuntimeError(fmt.Sprintf("unsupported expr: %T", e))
 	}

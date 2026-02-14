@@ -8,7 +8,7 @@ import (
 	"syscall/js"
 	"time"
 
-	"nanogo/interp"
+	"simonwaldherr.de/go/nanogo/interp"
 )
 
 // ---------------- Console helpers ----------------
@@ -55,9 +55,9 @@ func sendMessage(msg map[string]any) {
 	}
 }
 
-func ConsoleLog(s string)  { sendMessage(map[string]any{"type": "log", "text": s}) }
-func ConsoleWarn(s string) { sendMessage(map[string]any{"type": "warn", "text": s}) }
-func ConsoleError(s string){ sendMessage(map[string]any{"type": "error", "text": s}) }
+func ConsoleLog(s string)   { sendMessage(map[string]any{"type": "log", "text": s}) }
+func ConsoleWarn(s string)  { sendMessage(map[string]any{"type": "warn", "text": s}) }
+func ConsoleError(s string) { sendMessage(map[string]any{"type": "error", "text": s}) }
 
 // ---------------- DOM helpers --------------------
 
@@ -87,7 +87,9 @@ func GetInnerHTML(elementId string) string {
 	el := doc.Call("getElementById", elementId)
 	if el.Truthy() {
 		v := el.Get("innerHTML")
-		if v.Truthy() { return v.String() }
+		if v.Truthy() {
+			return v.String()
+		}
 	}
 	return ""
 }
@@ -100,43 +102,68 @@ func SetValue(elementId, value string) {
 	}
 	doc := js.Global().Get("document")
 	el := doc.Call("getElementById", elementId)
-	if el.Truthy() { el.Set("value", value) }
+	if el.Truthy() {
+		el.Set("value", value)
+	}
 }
 
 func GetValue(elementId string) string {
 	hook := js.Global().Get("nanoGoPostMessage")
-	if hook.Truthy() { return "" }
+	if hook.Truthy() {
+		return ""
+	}
 	doc := js.Global().Get("document")
 	el := doc.Call("getElementById", elementId)
-	if el.Truthy() { v := el.Get("value"); if v.Truthy() { return v.String() } }
+	if el.Truthy() {
+		v := el.Get("value")
+		if v.Truthy() {
+			return v.String()
+		}
+	}
 	return ""
 }
 
 func AddClass(elementId, class string) {
 	hook := js.Global().Get("nanoGoPostMessage")
-	if hook.Truthy() { sendMessage(map[string]any{"type": "dom-addclass", "id": elementId, "class": class}); return }
+	if hook.Truthy() {
+		sendMessage(map[string]any{"type": "dom-addclass", "id": elementId, "class": class})
+		return
+	}
 	doc := js.Global().Get("document")
 	el := doc.Call("getElementById", elementId)
-	if el.Truthy() { el.Call("classList").Call("add", class) }
+	if el.Truthy() {
+		el.Call("classList").Call("add", class)
+	}
 }
 
 func RemoveClass(elementId, class string) {
 	hook := js.Global().Get("nanoGoPostMessage")
-	if hook.Truthy() { sendMessage(map[string]any{"type": "dom-removeclass", "id": elementId, "class": class}); return }
+	if hook.Truthy() {
+		sendMessage(map[string]any{"type": "dom-removeclass", "id": elementId, "class": class})
+		return
+	}
 	doc := js.Global().Get("document")
 	el := doc.Call("getElementById", elementId)
-	if el.Truthy() { el.Call("classList").Call("remove", class) }
+	if el.Truthy() {
+		el.Call("classList").Call("remove", class)
+	}
 }
 
 func OpenWindow(url string) {
 	hook := js.Global().Get("nanoGoPostMessage")
-	if hook.Truthy() { sendMessage(map[string]any{"type": "open-window", "url": url}); return }
+	if hook.Truthy() {
+		sendMessage(map[string]any{"type": "open-window", "url": url})
+		return
+	}
 	js.Global().Get("window").Call("open", url, "_blank")
 }
 
 func Alert(s string) {
 	hook := js.Global().Get("nanoGoPostMessage")
-	if hook.Truthy() { sendMessage(map[string]any{"type": "alert", "text": s}); return }
+	if hook.Truthy() {
+		sendMessage(map[string]any{"type": "alert", "text": s})
+		return
+	}
 	js.Global().Get("window").Call("alert", s)
 }
 
@@ -198,14 +225,20 @@ func HTTPGetText(url string) (string, error) {
 
 func LocalStorageSetItem(key, value string) {
 	ls := js.Global().Get("localStorage")
-	if ls.Truthy() { ls.Call("setItem", key, value) }
+	if ls.Truthy() {
+		ls.Call("setItem", key, value)
+	}
 }
 
 func LocalStorageGetItem(key string) string {
 	ls := js.Global().Get("localStorage")
-	if !ls.Truthy() { return "" }
+	if !ls.Truthy() {
+		return ""
+	}
 	v := ls.Call("getItem", key)
-	if v.Truthy() { return v.String() }
+	if v.Truthy() {
+		return v.String()
+	}
 	return ""
 }
 
@@ -217,63 +250,86 @@ func RegisterHostNatives(vm *interp.Interpreter, canvas *CanvasBinding) {
 
 	// Console
 	vm.RegisterNative("ConsoleLog", func(args []any) (any, error) {
-		if len(args) > 0 { ConsoleLog(interp.ToString(args[0])) }
+		if len(args) > 0 {
+			ConsoleLog(interp.ToString(args[0]))
+		}
 		return nil, nil
 	})
 	vm.RegisterNative("ConsoleWarn", func(args []any) (any, error) {
-		if len(args) > 0 { ConsoleWarn(interp.ToString(args[0])) }
+		if len(args) > 0 {
+			ConsoleWarn(interp.ToString(args[0]))
+		}
 		return nil, nil
 	})
 	vm.RegisterNative("ConsoleError", func(args []any) (any, error) {
-		if len(args) > 0 { ConsoleError(interp.ToString(args[0])) }
+		if len(args) > 0 {
+			ConsoleError(interp.ToString(args[0]))
+		}
 		return nil, nil
 	})
 
 	// DOM
 	vm.RegisterNative("SetInnerHTML", func(args []any) (any, error) {
-		if len(args) >= 2 { SetInnerHTML(interp.ToString(args[0]), interp.ToString(args[1])) }
+		if len(args) >= 2 {
+			SetInnerHTML(interp.ToString(args[0]), interp.ToString(args[1]))
+		}
 		return nil, nil
 	})
 
 	vm.RegisterNative("GetInnerHTML", func(args []any) (any, error) {
-		if len(args) >= 1 { return GetInnerHTML(interp.ToString(args[0])), nil }
+		if len(args) >= 1 {
+			return GetInnerHTML(interp.ToString(args[0])), nil
+		}
 		return "", nil
 	})
 
 	vm.RegisterNative("SetValue", func(args []any) (any, error) {
-		if len(args) >= 2 { SetValue(interp.ToString(args[0]), interp.ToString(args[1])) }
+		if len(args) >= 2 {
+			SetValue(interp.ToString(args[0]), interp.ToString(args[1]))
+		}
 		return nil, nil
 	})
 
 	vm.RegisterNative("GetValue", func(args []any) (any, error) {
-		if len(args) >= 1 { return GetValue(interp.ToString(args[0])), nil }
+		if len(args) >= 1 {
+			return GetValue(interp.ToString(args[0])), nil
+		}
 		return "", nil
 	})
 
 	vm.RegisterNative("AddClass", func(args []any) (any, error) {
-		if len(args) >= 2 { AddClass(interp.ToString(args[0]), interp.ToString(args[1])) }
+		if len(args) >= 2 {
+			AddClass(interp.ToString(args[0]), interp.ToString(args[1]))
+		}
 		return nil, nil
 	})
 
 	vm.RegisterNative("RemoveClass", func(args []any) (any, error) {
-		if len(args) >= 2 { RemoveClass(interp.ToString(args[0]), interp.ToString(args[1])) }
+		if len(args) >= 2 {
+			RemoveClass(interp.ToString(args[0]), interp.ToString(args[1]))
+		}
 		return nil, nil
 	})
 
 	vm.RegisterNative("OpenWindow", func(args []any) (any, error) {
-		if len(args) >= 1 { OpenWindow(interp.ToString(args[0])) }
+		if len(args) >= 1 {
+			OpenWindow(interp.ToString(args[0]))
+		}
 		return nil, nil
 	})
 
 	vm.RegisterNative("Alert", func(args []any) (any, error) {
-		if len(args) >= 1 { Alert(interp.ToString(args[0])) }
+		if len(args) >= 1 {
+			Alert(interp.ToString(args[0]))
+		}
 		return nil, nil
 	})
 
 	// Canvas
 	vm.RegisterNative("CanvasSize", func(args []any) (any, error) {
 		if canvas != nil && canvas.Canvas.Truthy() && len(args) >= 2 {
-			w := interp.ToInt(args[0]); h := interp.ToInt(args[1])
+			w := interp.ToInt(args[0])
+			h := interp.ToInt(args[1])
 			canvas.Size(w, h)
 			return nil, nil
 		}
@@ -285,7 +341,9 @@ func RegisterHostNatives(vm *interp.Interpreter, canvas *CanvasBinding) {
 	})
 	vm.RegisterNative("CanvasSet", func(args []any) (any, error) {
 		if canvas != nil && canvas.Canvas.Truthy() && len(args) >= 3 {
-			x := interp.ToInt(args[0]); y := interp.ToInt(args[1]); alive := interp.ToBool(args[2])
+			x := interp.ToInt(args[0])
+			y := interp.ToInt(args[1])
+			alive := interp.ToBool(args[2])
 			canvas.SetCell(x, y, alive)
 			return nil, nil
 		}
@@ -295,7 +353,10 @@ func RegisterHostNatives(vm *interp.Interpreter, canvas *CanvasBinding) {
 		return nil, nil
 	})
 	vm.RegisterNative("CanvasFlush", func(args []any) (any, error) {
-		if canvas != nil && canvas.Canvas.Truthy() { canvas.Flush(); return nil, nil }
+		if canvas != nil && canvas.Canvas.Truthy() {
+			canvas.Flush()
+			return nil, nil
+		}
 		sendMessage(map[string]any{"type": "canvas-flush"})
 		return nil, nil
 	})
@@ -303,21 +364,27 @@ func RegisterHostNatives(vm *interp.Interpreter, canvas *CanvasBinding) {
 	// Random/Time
 	vm.RegisterNative("RandFloat", func(args []any) (any, error) { return rand.Float64(), nil })
 	vm.RegisterNative("SleepMs", func(args []any) (any, error) {
-		if len(args) > 0 { time.Sleep(time.Duration(interp.ToInt(args[0])) * time.Millisecond) }
+		if len(args) > 0 {
+			time.Sleep(time.Duration(interp.ToInt(args[0])) * time.Millisecond)
+		}
 		return nil, nil
 	})
 	vm.RegisterNative("NowMs", func(args []any) (any, error) { return int(time.Now().UnixMilli()), nil })
 
 	// Misc
 	vm.RegisterNative("ParseInt", func(args []any) (any, error) {
-		if len(args) == 0 { return 0, nil }
+		if len(args) == 0 {
+			return 0, nil
+		}
 		i, _ := strconv.Atoi(interp.ToString(args[0]))
 		return i, nil
 	})
 	vm.RegisterNative("Assert", func(args []any) (any, error) {
 		if len(args) >= 1 && !interp.ToBool(args[0]) {
 			msg := "assertion failed"
-			if len(args) >= 2 { msg = interp.ToString(args[1]) }
+			if len(args) >= 2 {
+				msg = interp.ToString(args[1])
+			}
 			return nil, interp.NewRuntimeError(msg)
 		}
 		return nil, nil
@@ -325,24 +392,34 @@ func RegisterHostNatives(vm *interp.Interpreter, canvas *CanvasBinding) {
 
 	// HTTP & Storage
 	vm.RegisterNative("HTTPGetText", func(args []any) (any, error) {
-		if len(args) == 0 { return "", nil }
+		if len(args) == 0 {
+			return "", nil
+		}
 		return HTTPGetText(interp.ToString(args[0]))
 	})
 	vm.RegisterNative("LocalStorageSetItem", func(args []any) (any, error) {
-		if len(args) >= 2 { LocalStorageSetItem(interp.ToString(args[0]), interp.ToString(args[1])) }
+		if len(args) >= 2 {
+			LocalStorageSetItem(interp.ToString(args[0]), interp.ToString(args[1]))
+		}
 		return nil, nil
 	})
 	vm.RegisterNative("LocalStorageGetItem", func(args []any) (any, error) {
-		if len(args) >= 1 { return LocalStorageGetItem(interp.ToString(args[0])), nil }
+		if len(args) >= 1 {
+			return LocalStorageGetItem(interp.ToString(args[0])), nil
+		}
 		return "", nil
 	})
 
 	// Minimal printf used by fmt.Printf native (we rely on Go's fmt since host is Go).
 	vm.RegisterNative("__hostSprintf", func(args []any) (any, error) {
-		if len(args) == 0 { return "", nil }
+		if len(args) == 0 {
+			return "", nil
+		}
 		format := interp.ToString(args[0])
 		var goArgs []any
-		for _, a := range args[1:] { goArgs = append(goArgs, a) }
+		for _, a := range args[1:] {
+			goArgs = append(goArgs, a)
+		}
 		return fmt.Sprintf(format, goArgs...), nil
 	})
 }

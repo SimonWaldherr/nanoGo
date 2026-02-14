@@ -1,3 +1,3 @@
-module nanogo
+module simonwaldherr.de/go/nanogo
 
-go 1.22
+go 1.25.0

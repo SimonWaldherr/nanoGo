@@ -4,8 +4,8 @@ package main
 import (
 	"syscall/js"
 
-	"nanogo/interp"
-	"nanogo/runtime"
+	"simonwaldherr.de/go/nanogo/interp"
+	"simonwaldherr.de/go/nanogo/runtime"
 )
 
 // activeCanvas holds the currently bound canvas from the host page.
