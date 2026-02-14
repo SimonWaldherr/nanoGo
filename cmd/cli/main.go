@@ -3,7 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"simonwaldherr.de/go/nanogo/interp"
@@ -105,5 +110,65 @@ func registerSafeNatives(vm *interp.Interpreter) {
 			fmtArgs = append(fmtArgs, a)
 		}
 		return fmt.Sprintf(format, fmtArgs...), nil
+	})
+
+	// Host-proxied read-only file access (whitelist).
+	vm.RegisterNative("HostReadFile", func(args []any) (any, error) {
+		if len(args) == 0 { return "", nil }
+		p := interp.ToString(args[0])
+		// Clean and forbid absolute or upward paths
+		clean := filepath.Clean(p)
+		if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("access denied: absolute or parent paths not allowed")
+		}
+		// Whitelist top-level folders/files allowed to be read
+		allowed := []string{"samples", "web", "README.md", "LICENSE"}
+		ok := false
+		for _, a := range allowed {
+			if clean == a || strings.HasPrefix(clean, a+string(filepath.Separator)) {
+				ok = true; break
+			}
+		}
+		if !ok { return nil, fmt.Errorf("access denied: path not in whitelist") }
+		wd, err := os.Getwd()
+		if err != nil { return nil, err }
+		full := filepath.Join(wd, clean)
+		// Ensure the file is inside the repo working directory
+		if !strings.HasPrefix(full, wd) { return nil, fmt.Errorf("access denied") }
+		b, err := os.ReadFile(full)
+		if err != nil { return nil, err }
+		return string(b), nil
+	})
+
+	// Host-proxied HTTP client (simple rate-limited GetText)
+	var httpMu sync.Mutex
+	var lastReq time.Time
+	minInterval := 200 * time.Millisecond
+	vm.RegisterNative("HTTPGetText", func(args []any) (any, error) {
+		if len(args) == 0 { return "", nil }
+		url := interp.ToString(args[0])
+		httpMu.Lock()
+		now := time.Now()
+		if !lastReq.IsZero() {
+			wait := minInterval - now.Sub(lastReq)
+			if wait > 0 {
+				httpMu.Unlock()
+				time.Sleep(wait)
+				httpMu.Lock()
+			}
+		}
+		lastReq = time.Now()
+		httpMu.Unlock()
+
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Get(url)
+		if err != nil { return "", err }
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return "", fmt.Errorf("HTTP status %d", resp.StatusCode)
+		}
+		data, err := io.ReadAll(resp.Body)
+		if err != nil { return "", err }
+		return string(data), nil
 	})
 }

@@ -7,6 +7,11 @@ BUILD_DIR := build
 
 all: build-wasm build-cli
 
+# ---------- REPL ----------
+build-repl:
+	@mkdir -p $(BUILD_DIR)
+	go build -o $(BUILD_DIR)/nanogo-repl ./cmd/repl
+
 # ---------- WASM target (for the web playground) ----------
 WASM_OUT := web/nanogo.wasm
 
@@ -26,8 +31,8 @@ run-demo: build-cli
 	$(CLI_OUT) samples/features_demo.go
 
 # ---------- Tests ----------
-test:
-	go test ./...
+	test:
+	go test ./interp ./cmd/cli
 
 # ---------- Housekeeping ----------
 clean:
