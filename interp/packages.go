@@ -368,6 +368,17 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	}}
 	vm.RegisterPackage("http", httpPkg)
 
+	// --- fs (read-only, host-proxied) ---
+	fsPkg := &Package{Name: "fs", Funcs: map[string]*Function{}}
+	fsPkg.Funcs["ReadFile"] = &Function{Name: "ReadFile", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if n, ok := vm.natives["HostReadFile"]; ok {
+			v, err := n([]any{ToString(args[0])})
+			return v, err
+		}
+		return "", NewRuntimeError("host readfile not available")
+	}}
+	vm.RegisterPackage("fs", fsPkg)
+
 	// --- storage (localStorage: SetItem/GetItem) ---
 	storPkg := &Package{Name: "storage", Funcs: map[string]*Function{}}
 	storPkg.Funcs["SetItem"] = &Function{Name: "SetItem", Params: []string{"key","value"}, Native: func(args []any) (any, error) {
