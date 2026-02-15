@@ -234,5 +234,207 @@ func main() {
   fmt.Println("Wrote snippet to #output")
 }
 `,
-  "Empty": "package main\n\nfunc main() {\n}\n"
-};
+  "FizzBuzz": `package main
+
+import "fmt"
+
+func main() {
+  for i := 1; i <= 30; i++ {
+    if i%15 == 0 { 
+      fmt.Println("FizzBuzz") 
+    } else if i%3 == 0 { 
+      fmt.Println("Fizz") 
+    } else if i%5 == 0 {
+      fmt.Println("Buzz") 
+    } else { 
+      fmt.Println(i) 
+    }
+  }
+}
+`,
+  "Fibonacci": `package main
+
+import "fmt"
+
+func fib(n int) int {
+  if n < 2 { return n }
+  return fib(n-1) + fib(n-2)
+}
+
+func main() {
+  fmt.Println("Fibonacci numbers:")
+  for i := 0; i < 10; i++ { fmt.Println(i, fib(i)) }
+}
+`,
+  "Prime Sieve": `package main
+
+import "fmt"
+
+func sieve(n int) []int {
+  // Use int flags to avoid potential issues with boolean literals in the runtime
+  isPrime := make([]int, n+1)
+  for i := 2; i <= n; i++ {
+    isPrime[i] = 1
+  }
+  for p := 2; p*p <= n; p++ {
+    if isPrime[p] != 0 {
+      for multiple := p*p; multiple <= n; multiple += p {
+        isPrime[multiple] = 0
+      }
+    }
+  }
+  primes := []int{}
+  for i := 2; i <= n; i++ {
+    if isPrime[i] != 0 {
+      primes = append(primes, i)
+    }
+  }
+  return primes
+}
+
+func main() {
+  fmt.Println("Primes up to 100:")
+  fmt.Println(sieve(100))
+}
+`,
+  "Checkerboard": `package main
+
+import "fmt"
+
+func main() {
+  fmt.Println("Checkerboard canvas")
+  w, h := 32, 16
+  browser.CanvasSize(w, h)
+  for y := 0; y < h; y++ {
+    for x := 0; x < w; x++ {
+      browser.CanvasSet(x, y, (x+y)%2==0)
+    }
+  }
+  browser.CanvasFlush()
+}
+`,
+  "Bouncing Ball": `package main
+
+import (
+  "fmt"
+  "time"
+)
+
+func main() {
+  fmt.Println("Bouncing ball demo")
+  w, h := 64, 40
+  browser.CanvasSize(w, h)
+  x, y := 0, 0
+  dx, dy := 1, 1
+  for i := 0; i < 200; i++ {
+    // clear
+    for yy := 0; yy < h; yy++ { for xx := 0; xx < w; xx++ { browser.CanvasSet(xx, yy, 0==1) } }
+    browser.CanvasSet(x, y, 1==1)
+    browser.CanvasFlush()
+    x += dx; y += dy
+    if x <= 0 || x >= w-1 { dx = -dx }
+    if y <= 0 || y >= h-1 { dy = -dy }
+    time.Sleep(30)
+  }
+  fmt.Println("done")
+}
+`,"HTTP Fetch JSON": `package main
+
+import (
+  "fmt"
+  "strings"
+)
+
+func main() {
+  fmt.Println("Fetching examples.js (first 120 chars):")
+  txt := http.GetText("examples.js")
+  if len(txt) == 0 {
+    fmt.Println("fetch failed or CORS blocked")
+    return
+  }
+  sn := strings.TrimSpace(txt)
+  if len(sn) > 120 { sn = sn[:120] + "..." }
+  fmt.Println(sn)
+}
+`,"Pipeline": `package main
+
+import "fmt"
+
+func producer(n int, out chan int) {
+  for i := 1; i <= n; i++ { out <- i }
+  close(out)
+}
+
+func squarer(in chan int, out chan int) {
+  for v := range in { out <- v * v }
+  close(out)
+}
+
+func main() {
+  fmt.Println("Pipeline demo")
+  a := make(chan int)
+  b := make(chan int)
+  go producer(5, a)
+  go squarer(a, b)
+  for v := range b { fmt.Println(v) }
+}
+`,"Structs & Methods": `package main
+
+import "fmt"
+
+type Point struct{ X, Y int }
+
+func (p Point) String() string { return fmt.Sprintf("(%d,%d)", p.X, p.Y) }
+
+func (p *Point) Move(dx, dy int) { p.X += dx; p.Y += dy }
+
+func main() {
+  p := Point{2,3}
+  fmt.Println("start", p)
+  p.Move(1, -1)
+  fmt.Println("moved", p)
+}
+`,"Maps & Ranges": `package main
+
+import "fmt"
+
+func main() {
+  m := map[string]int{"a":1, "b":2, "c":3}
+  fmt.Println("map size:", len(m))
+  for k, v := range m {
+    fmt.Println(k, v)
+  }
+}
+`,"Timer Ticker": `package main
+
+import (
+  "fmt"
+  "time"
+)
+
+func main() {
+  fmt.Println("Timer/Ticker demo (short)")
+  t := time.NewTimer(200)
+  <-t.C
+  fmt.Println("Timer fired")
+  tick := time.NewTicker(100)
+  for i := 0; i < 3; i++ { <-tick.C; fmt.Println("tick", i) }
+  tick.Stop()
+  fmt.Println("done")
+}
+`,"JSON Roundtrip": `package main
+
+import (
+  "fmt"
+  json "encoding/json"
+)
+
+func main() {
+  obj := map[string]any{"name":"nanoGo","v":1}
+  b, _ := json.Marshal(obj)
+  fmt.Println("json:", string(b))
+  var m map[string]any
+  _ = json.Unmarshal(b, &m)
+  fmt.Println("unmarshalled:", m["name"], m["v"])
+}
+`};

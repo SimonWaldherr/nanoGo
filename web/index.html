@@ -137,6 +137,64 @@
       overflow-y: auto;
     }
 
+    .example-search {
+      display: block;
+      width: calc(100% - 24px);
+      margin: 0.75rem 1.25rem;
+      padding: 0.5rem 0.75rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      outline: none;
+    }
+
+    .copy-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-muted);
+      padding: 0.25rem 0.5rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      cursor: pointer;
+    }
+    .copy-btn:hover { color: var(--text); background: var(--panel-light); }
+
+    .tag-filters { display:flex; gap:8px; padding:0.5rem 1.25rem; flex-wrap:wrap }
+    .tag-btn {
+      background: var(--panel-elevated);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      padding: 0.25rem 0.5rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      cursor: pointer;
+    }
+    .tag-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
+
+    /* Theme popup */
+    .theme-popup {
+      position: absolute;
+      right: 0.5rem;
+      top: 3rem;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow-lg);
+      padding: 0.5rem;
+      z-index: 200;
+      min-width: 220px;
+      display: none;
+    }
+    .theme-popup[aria-hidden="false"] { display: block; }
+    .theme-popup-grid { display:flex; flex-wrap:wrap; gap:8px; }
+    .theme-option { flex: 1 1 45%; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--panel-elevated); color:var(--text); cursor:pointer; font-size:0.9rem; display:flex; gap:10px; align-items:center }
+    .theme-option:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
+    .theme-option .swatch { width:36px; height:22px; border-radius:6px; border:2px solid rgba(255,255,255,0.06); box-shadow: inset 0 0 0 1px rgba(0,0,0,0.15); flex: 0 0 auto }
+    .theme-option .label { font-size:0.85rem; color:var(--text); flex:1 1 auto; text-align:left }
+    .theme-option[aria-pressed="true"] { outline: 2px solid var(--accent); }
+
+
     .example-item {
       display: flex;
       align-items: center;
@@ -544,6 +602,121 @@
       --glass-border: rgba(0, 0, 0, 0.1);
     }
 
+    /* Additional themes */
+    .theme-dark { /* default: same as base */ }
+    .theme-solar {
+      --bg: #fdf6e3;
+      --panel: #f6eedb;
+      --panel-light: #f0e8cf;
+      --panel-elevated: #efe6c8;
+      --text: #586e75;
+      --text-muted: #657b83;
+      --text-dim: #708284;
+      --border: #e6dbc4;
+      --border-light: #d6cbb3;
+      --code-bg: #f8f2df;
+      --gradient-bg: linear-gradient(135deg, #f8f2df 0%, #efe6c8 100%);
+    }
+    .theme-high-contrast {
+      --bg: #000000;
+      --panel: #000000;
+      --panel-light: #0a0a0a;
+      --panel-elevated: #111111;
+      --text: #ffffff;
+      --text-muted: #f3f3f3;
+      --text-dim: #e6e6e6;
+      --accent: #ffff00;
+      --accent-hover: #ffd400;
+      --border: #444400;
+      --border-light: #666600;
+      --code-bg: #000000;
+      --gradient-bg: linear-gradient(135deg, #000000 0%, #0a0a0a 100%);
+    }
+    .theme-dracula {
+      --bg: #282a36;
+      --panel: #44475a;
+      --panel-light: #373844;
+      --panel-elevated: #3b3f58;
+      --text: #f8f8f2;
+      --text-muted: #bfbfbf;
+      --accent: #ff79c6;
+      --border: #3b3f58;
+      --code-bg: #21222c;
+      --gradient-bg: linear-gradient(135deg,#282a36 0%,#373844 100%);
+    }
+    .theme-sepia {
+      --bg: #f4ecd8;
+      --panel: #efe6cf;
+      --panel-light: #e9dfc6;
+      --panel-elevated: #e3d7b8;
+      --text: #2b2b21;
+      --text-muted: #67604f;
+      --accent: #b76e11;
+      --border: #e0d6be;
+      --code-bg: #f7f2df;
+      --gradient-bg: linear-gradient(135deg,#f7f2df 0%,#efe6cf 100%);
+    }
+    .theme-monokai {
+      --bg: #272822;
+      --panel: #2b2b2b;
+      --panel-light: #323232;
+      --panel-elevated: #3a3a3a;
+      --text: #f8f8f2;
+      --text-muted: #a0a0a0;
+      --accent: #a6e22e;
+      --border: #333333;
+      --code-bg: #2a2a2a;
+      --gradient-bg: linear-gradient(135deg,#272822 0%,#323232 100%);
+    }
+    .theme-ocean {
+      --bg: #052f4a;
+      --panel: #073848;
+      --panel-light: #0a4456;
+      --panel-elevated: #074b60;
+      --text: #e6f3f7;
+      --text-muted: #bcdbe4;
+      --accent: #2dd4bf;
+      --border: #0b556a;
+      --code-bg: #042733;
+      --gradient-bg: linear-gradient(135deg,#052f4a 0%,#074b60 100%);
+    }
+    .theme-forest {
+      --bg: #06220f;
+      --panel: #0b2e18;
+      --panel-light: #143b27;
+      --panel-elevated: #16442d;
+      --text: #e6f3ea;
+      --text-muted: #9fcfaf;
+      --accent: #10b981;
+      --border: #0f381e;
+      --code-bg: #071913;
+      --gradient-bg: linear-gradient(135deg,#06220f 0%,#143b27 100%);
+    }
+    .theme-midnight {
+      --bg: #0b1220;
+      --panel: #0f1724;
+      --panel-light: #141b2a;
+      --panel-elevated: #181f32;
+      --text: #e6eef8;
+      --text-muted: #9fb3d6;
+      --accent: #60a5fa;
+      --border: #17202b;
+      --code-bg: #071127;
+      --gradient-bg: linear-gradient(135deg,#0b1220 0%,#141b2a 100%);
+    }
+    .theme-pastel {
+      --bg: #fffaf6;
+      --panel: #fff6f0;
+      --panel-light: #fff1e9;
+      --panel-elevated: #ffeee0;
+      --text: #2b2b2b;
+      --text-muted: #6b6b6b;
+      --accent: #f472b6;
+      --border: #f0dede;
+      --code-bg: #fff6f2;
+      --gradient-bg: linear-gradient(135deg,#fffaf6 0%,#fff1e9 100%);
+    }
+
     /* Scrollbar Styling */
     ::-webkit-scrollbar {
       width: 8px;
@@ -562,6 +735,11 @@
       background: var(--text-dim);
     }
   </style>
+  <!-- CodeMirror (simple editor for Go) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/theme/material.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js"></script>
 </head>
 <body>
   <!-- Header -->
@@ -572,8 +750,23 @@
         <span>nanoGo</span>
         <span class="brand-subtitle">Advanced WebAssembly Playground</span>
       </div>
-      <div class="header-actions">
-        <button id="themeBtn" title="Toggle theme">🌗</button>
+      <div class="header-actions" style="position:relative">
+        <button id="themeBtn" title="Choose theme">🌗</button>
+        <div id="themePopup" class="theme-popup" aria-hidden="true">
+          <div class="theme-popup-grid">
+            <button class="theme-option" data-theme="dark">Dark</button>
+            <button class="theme-option" data-theme="light">Light</button>
+            <button class="theme-option" data-theme="solar">Solarized</button>
+            <button class="theme-option" data-theme="dracula">Dracula</button>
+            <button class="theme-option" data-theme="sepia">Sepia</button>
+            <button class="theme-option" data-theme="monokai">Monokai</button>
+            <button class="theme-option" data-theme="ocean">Ocean</button>
+            <button class="theme-option" data-theme="forest">Forest</button>
+            <button class="theme-option" data-theme="midnight">Midnight</button>
+            <button class="theme-option" data-theme="pastel">Pastel</button>
+            <button class="theme-option" data-theme="high-contrast">High Contrast</button>
+          </div>
+        </div>
         <button id="shareBtn" title="Share code">📤 Share</button>
         <button id="downloadBtn" title="Download code">💾 Download</button>
         <a href="https://github.com/SimonWaldherr/nanogo" target="_blank" style="color: var(--accent); text-decoration: none;">
@@ -591,6 +784,8 @@
         <div class="panel-header">
           📚 Examples & Demos
         </div>
+        <input id="exampleSearch" class="example-search" placeholder="Search examples..." aria-label="Search examples" />
+        <div id="tagFilters" style="padding: 0 1.25rem 0.5rem 1.25rem; display:flex; gap:6px; flex-wrap:wrap"></div>
         <div class="examples-list" id="examplesList">
           <!-- Examples will be populated by JavaScript -->
         </div>
@@ -620,6 +815,7 @@
         <button id="runBtn" class="primary" disabled>
           ▶️ Run Code (Ctrl/⌘+Enter)
         </button>
+        <button id="stopBtn" title="Stop running program">⏹️ Stop</button>
         <button id="clearBtn">🗑️ Clear</button>
         <div class="input-group">
           <label for="modeSelect">Mode:</label>
@@ -645,6 +841,7 @@ import &quot;fmt&quot;
 func main() {
     fmt.Println(&quot;Hello, nanoGo!&quot;)
 }"></textarea>
+  <!-- CodeMirror will replace the textarea above -->
       </div>
     </section>
 
@@ -756,6 +953,18 @@ Select an example from the sidebar to get started! 🚀</div>
           description: 'HTTP requests and localStorage usage',
           badge: 'Web APIs'
         }
+        ,
+        'FizzBuzz': { output: 'console', description: 'Classic FizzBuzz printing', badge: 'Algorithms' },
+        'Fibonacci': { output: 'console', description: 'Recursive Fibonacci example', badge: 'Algorithms' },
+        'Prime Sieve': { output: 'console', description: 'Sieve of Eratosthenes', badge: 'Algorithms' },
+        'Checkerboard': { output: 'canvas', description: 'Simple checkerboard canvas demo', badge: 'Graphics' },
+        'Bouncing Ball': { output: 'canvas', description: 'Animated bouncing pixel demo', badge: 'Animation' }
+        , 'HTTP Fetch JSON': { output: 'console', description: 'Fetch text (CORS permitting) and display snippet', badge: 'Web' }
+        , 'Pipeline': { output: 'console', description: 'Simple producer -> squarer pipeline using channels', badge: 'Concurrency' }
+        , 'Structs & Methods': { output: 'console', description: 'Define structs and pointer vs value methods', badge: 'Types' }
+        , 'Maps & Ranges': { output: 'console', description: 'Map creation and range iteration', badge: 'Utilities' }
+        , 'Timer Ticker': { output: 'console', description: 'Timers and tickers for time-based events', badge: 'Time' }
+        , 'JSON Roundtrip': { output: 'console', description: 'Marshal and unmarshal JSON', badge: 'Data' }
       };
 
       // Demo information content
@@ -861,6 +1070,51 @@ Select an example from the sidebar to get started! 🚀</div>
             <li>CORS and same-origin policies</li>
           </ul>
         `
+        ,
+        'FizzBuzz': `
+          <p><strong>FizzBuzz</strong></p>
+          <p>Classic programming warm-up that prints Fizz/Buzz for multiples of 3/5.</p>
+        `,
+        'Fibonacci': `
+          <p><strong>Fibonacci</strong></p>
+          <p>Recursive Fibonacci series calculation (small n to keep runtime reasonable).</p>
+        `,
+        'Prime Sieve': `
+          <p><strong>Prime Sieve</strong></p>
+          <p>Compute primes using the Sieve of Eratosthenes.</p>
+        `,
+        'Checkerboard': `
+          <p><strong>Checkerboard</strong></p>
+          <p>Draws a simple checkerboard pattern on the canvas using <code>browser.CanvasSet</code>.</p>
+        `,
+        'Bouncing Ball': `
+          <p><strong>Bouncing Ball</strong></p>
+          <p>Simple animated bouncing pixel to demonstrate canvas updates & timing.</p>
+        `
+        , 'HTTP Fetch JSON': `
+          <p><strong>HTTP Fetch JSON</strong></p>
+          <p>Fetch a text resource (examples.js) and display a short snippet — subject to CORS.</p>
+        `,
+        'Pipeline': `
+          <p><strong>Pipeline</strong></p>
+          <p>Shows a simple pipeline with producer and squarer goroutines communicating over channels.</p>
+        `,
+        'Structs & Methods': `
+          <p><strong>Structs & Methods</strong></p>
+          <p>Demonstrates defining structs, String() method and pointer receivers.</p>
+        `,
+        'Maps & Ranges': `
+          <p><strong>Maps & Ranges</strong></p>
+          <p>Illustrates map creation, length and iterating with range.</p>
+        `,
+        'Timer Ticker': `
+          <p><strong>Timer & Ticker</strong></p>
+          <p>Demonstrates <code>time.NewTimer</code> and <code>time.NewTicker</code> usage for timed events.</p>
+        `,
+        'JSON Roundtrip': `
+          <p><strong>JSON Roundtrip</strong></p>
+          <p>Marshal a Go value to JSON and unmarshal it back.</p>
+        `
       };
 
       // DOM elements
@@ -874,8 +1128,34 @@ Select an example from the sidebar to get started! 🚀</div>
       const shareBtn = document.getElementById("shareBtn");
       const downloadBtn = document.getElementById("downloadBtn");
       const themeBtn = document.getElementById("themeBtn");
+      const themePopup = document.getElementById("themePopup");
+      const tagFilters = document.getElementById("tagFilters");
       const examplesList = document.getElementById("examplesList");
+      const exampleSearch = document.getElementById("exampleSearch");
       const demoInfo = document.getElementById("demoInfo");
+
+      const stopBtn = document.getElementById("stopBtn");
+
+      // CodeMirror editor (initialized from the textarea)
+      let editor = null;
+      function initEditor() {
+        if (typeof CodeMirror === 'undefined' || !srcEl) return;
+        try {
+          editor = CodeMirror.fromTextArea(srcEl, {
+            mode: 'text/x-go',
+            lineNumbers: true,
+            theme: 'material',
+            indentUnit: 2,
+            tabSize: 2,
+            lineWrapping: true
+          });
+          editor.setSize('100%', '100%');
+        } catch (e) { editor = null; }
+      }
+      initEditor();
+
+      function getSource() { return (editor && typeof editor.getValue === 'function') ? editor.getValue() : (srcEl ? srcEl.value : ''); }
+      function setSource(v) { if (editor && typeof editor.setValue === 'function') editor.setValue(v); if (srcEl) srcEl.value = v; }
 
       // Output panels
       const canvasPanel = document.getElementById("canvasPanel");
@@ -884,18 +1164,106 @@ Select an example from the sidebar to get started! 🚀</div>
 
       let worker = null;
       let currentExample = null;
+      let selectedTag = null;
       let theme = (localStorage.getItem("nanogo_theme") || "dark");
 
       function setTheme(t) {
-        theme = t;
-        if (t === "light") document.documentElement.classList.add("light");
-        else document.documentElement.classList.remove("light");
+        theme = t || 'dark';
+        // remove any existing theme-* classes to avoid leftover conflicts
+        const cls = Array.from(document.documentElement.classList);
+        cls.forEach(c => {
+          if (c.startsWith('theme-')) document.documentElement.classList.remove(c);
+        });
+        // remove legacy 'light' marker
+        document.documentElement.classList.remove('light');
+        // apply new theme class (also keep 'light' for legacy light styles)
+        if (theme === 'light') document.documentElement.classList.add('light');
+        document.documentElement.classList.add('theme-' + (theme === 'light' ? 'light' : theme));
         localStorage.setItem("nanogo_theme", theme);
-        themeBtn.textContent = t === "light" ? '🌙' : '🌗';
+        // update button icon
+        if (themeBtn) {
+          const icons = { dark: '🌗', light: '🌙', solar: '☀️', dracula: '🖤', sepia: '🟤', monokai: '🟩', ocean: '🌊', forest: '🌲', midnight: '🌌', pastel: '🌸', 'high-contrast': '⚫' };
+          themeBtn.textContent = icons[theme] || '🎨';
+        }
       }
       setTheme(theme);
 
-      themeBtn.onclick = () => setTheme(theme === "light" ? "dark" : "light");
+      // Theme popup control
+      function closeThemePopup() {
+        if (!themePopup) return;
+        themePopup.setAttribute('aria-hidden', 'true');
+      }
+      function openThemePopup() {
+        if (!themePopup) return;
+        themePopup.setAttribute('aria-hidden', 'false');
+      }
+      if (themeBtn) themeBtn.onclick = (e) => {
+        if (!themePopup) return;
+        const hidden = themePopup.getAttribute('aria-hidden') !== 'false';
+        if (hidden) openThemePopup(); else closeThemePopup();
+      };
+
+      // Wire theme option buttons and render swatches
+      if (themePopup) {
+        const THEME_META = {
+          dark:    { bg: '#0a0c10', panel: '#111418', accent: '#3b82f6' },
+          light:   { bg: '#ffffff', panel: '#f8fafc', accent: '#2563eb' },
+          solar:   { bg: '#fdf6e3', panel: '#f6eedb', accent: '#b76e11' },
+          dracula: { bg: '#282a36', panel: '#44475a', accent: '#ff79c6' },
+          sepia:   { bg: '#f4ecd8', panel: '#efe6cf', accent: '#b76e11' },
+          monokai: { bg: '#272822', panel: '#2b2b2b', accent: '#a6e22e' },
+          ocean:   { bg: '#052f4a', panel: '#073848', accent: '#2dd4bf' },
+          forest:  { bg: '#06220f', panel: '#0b2e18', accent: '#10b981' },
+          midnight:{ bg: '#0b1220', panel: '#0f1724', accent: '#60a5fa' },
+          pastel:  { bg: '#fffaf6', panel: '#fff6f0', accent: '#f472b6' },
+          'high-contrast': { bg: '#000000', panel: '#000000', accent: '#ffff00' }
+        };
+
+        themePopup.querySelectorAll('.theme-option').forEach(btn => {
+          const t = btn.getAttribute('data-theme');
+          const meta = THEME_META[t] || THEME_META.dark;
+          // render swatch + label
+          btn.innerHTML = '';
+          const sw = document.createElement('span');
+          sw.className = 'swatch';
+          sw.style.background = meta.bg;
+          sw.style.borderColor = meta.accent;
+          sw.title = t;
+          const lbl = document.createElement('span');
+          lbl.className = 'label';
+          lbl.textContent = t.split('-').map(s=>s[0].toUpperCase()+s.slice(1)).join(' ');
+          btn.appendChild(sw);
+          btn.appendChild(lbl);
+
+          // reflect current selection
+          btn.setAttribute('aria-pressed', theme === t ? 'true' : 'false');
+
+          btn.addEventListener('click', (ev) => {
+            setTheme(t);
+            // update aria-pressed on options
+            themePopup.querySelectorAll('.theme-option').forEach(o => o.setAttribute('aria-pressed', 'false'));
+            btn.setAttribute('aria-pressed', 'true');
+            closeThemePopup();
+          });
+        });
+
+        // click outside closes popup
+        document.addEventListener('click', (ev) => {
+          if (!themePopup) return;
+          if (themePopup.getAttribute('aria-hidden') === 'false') {
+            const path = ev.composedPath ? ev.composedPath() : (ev.path || []);
+            if (!path.includes(themePopup) && ev.target !== themeBtn) closeThemePopup();
+          }
+        });
+        // escape closes
+        document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeThemePopup(); });
+      }
+
+      if (exampleSearch) {
+        exampleSearch.addEventListener('input', () => {
+          fillExamples();
+        });
+      }
 
       function setStatus(message, type = "loading") {
         statusEl.className = `status ${type}`;
@@ -1174,12 +1542,12 @@ Select an example from the sidebar to get started! 🚀</div>
           const ctx = c.getContext('2d');
           ctx.clearRect(0, 0, c.width, c.height);
           
-          localStorage.setItem("nanogo_last", srcEl.value);
+          localStorage.setItem("nanogo_last", getSource());
           logMessage('🚀 === Running user code ===');
           setStatus('Running code...', 'loading');
           const mode = modeSelect.value || 'stream';
           const t0 = performance.now();
-          worker.postMessage({ type: 'run', source: srcEl.value, mode: mode, t0 });
+          worker.postMessage({ type: 'run', source: getSource(), mode: mode, t0 });
         } catch (err) {
           setStatus('Runtime error', 'error');
           logMessage('❌ RUNTIME ERROR: ' + err.message);
@@ -1188,38 +1556,112 @@ Select an example from the sidebar to get started! 🚀</div>
 
       runBtn.onclick = runCode;
 
+      if (stopBtn) {
+        stopBtn.onclick = () => {
+          if (!worker) { logMessage('No worker running'); return; }
+          try {
+            worker.terminate();
+          } catch (e) {}
+          worker = null;
+          setStatus('Stopped', 'error');
+          logMessage('⛔ Execution terminated by user');
+          // Reinitialize the worker so user can run again quickly
+          setTimeout(() => startWasmWorker(), 300);
+        };
+      }
+
       function fillExamples() {
+        // Ensure tag filters are rendered once
+        function renderTagFilters() {
+          if (!tagFilters) return;
+          if (tagFilters.dataset.inited) return;
+          // collect unique badges
+          const tags = new Set();
+          Object.keys(EXAMPLE_CONFIG).forEach(k => { if (EXAMPLES[k]) tags.add(EXAMPLE_CONFIG[k].badge || 'Demo'); });
+          // Clear and add 'All'
+          tagFilters.innerHTML = '';
+          const allBtn = document.createElement('button');
+          allBtn.className = 'tag-btn' + (selectedTag ? '' : ' active');
+          allBtn.textContent = 'All';
+          allBtn.onclick = () => { selectedTag = null; document.querySelectorAll('.tag-btn').forEach(b=>b.classList.remove('active')); allBtn.classList.add('active'); fillExamples(); };
+          tagFilters.appendChild(allBtn);
+          tags.forEach(t => {
+            const b = document.createElement('button');
+            b.className = 'tag-btn' + (selectedTag === t ? ' active' : '');
+            b.textContent = t;
+            b.onclick = () => { selectedTag = (selectedTag === t ? null : t); document.querySelectorAll('.tag-btn').forEach(btn=>btn.classList.remove('active')); if (selectedTag) b.classList.add('active'); else allBtn.classList.add('active'); fillExamples(); };
+            tagFilters.appendChild(b);
+          });
+          tagFilters.dataset.inited = '1';
+        }
+
         examplesList.innerHTML = "";
-        
+        renderTagFilters();
+        const filter = exampleSearch && exampleSearch.value ? exampleSearch.value.trim().toLowerCase() : "";
+
         Object.keys(EXAMPLES).forEach(name => {
           if (name === 'Empty') return; // Skip empty example
-          
-          const config = EXAMPLE_CONFIG[name] || {
-            output: 'console',
-            description: 'Go programming example',
-            badge: 'Demo'
+          const config = EXAMPLE_CONFIG[name] || { output: 'console', description: 'Go programming example', badge: 'Demo' };
+
+          // Filter by name or description
+          if (filter) {
+            const hay = (name + ' ' + (config.description || '')).toLowerCase();
+            if (!hay.includes(filter)) return;
+          }
+          // Filter by selected tag
+          if (selectedTag && config.badge !== selectedTag) return;
+
+          const item = document.createElement('div');
+          item.className = 'example-item';
+          item.tabIndex = 0;
+          item.onclick = () => selectExample(name);
+          item.onkeypress = (e) => { if (e.key === 'Enter') selectExample(name); };
+
+          const info = document.createElement('div');
+          info.className = 'example-info';
+          info.innerHTML = `<div class="example-name">${name}</div><div class="example-desc">${config.description}</div>`;
+
+          const badge = document.createElement('div');
+          badge.className = 'example-badge';
+          badge.textContent = config.badge;
+
+          const copyBtn = document.createElement('button');
+          copyBtn.className = 'copy-btn';
+          copyBtn.title = 'Copy example code';
+          copyBtn.textContent = 'Copy';
+          copyBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            navigator.clipboard.writeText(EXAMPLES[name]).then(() => {
+              copyBtn.textContent = 'Copied!';
+              setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+            }, () => {
+              copyBtn.textContent = 'Failed';
+              setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+            });
           };
 
-          const item = document.createElement('button');
-          item.className = 'example-item';
-          item.onclick = () => selectExample(name);
+          const rightCol = document.createElement('div');
+          rightCol.style.display = 'flex';
+          rightCol.style.gap = '8px';
+          rightCol.style.alignItems = 'center';
+          rightCol.appendChild(badge);
+          rightCol.appendChild(copyBtn);
 
-          item.innerHTML = `
-            <div class="example-info">
-              <div class="example-name">${name}</div>
-              <div class="example-desc">${config.description}</div>
-            </div>
-            <div class="example-badge">${config.badge}</div>
-          `;
+          item.appendChild(info);
+          item.appendChild(rightCol);
 
           examplesList.appendChild(item);
         });
 
-        // Initialize enhanced logging
-        initializeEnhancedLogging();
+        // Initialize enhanced logging (only once on first fill)
+        if (!logLines || logLines.length === 0) initializeEnhancedLogging();
 
-        // Auto-select first example
-        selectExample('Basics');
+        // Auto-select first example when nothing is selected and filter yields items
+        const any = examplesList.querySelector('.example-item');
+        if (any && !currentExample) {
+          const firstNameEl = any.querySelector('.example-name');
+          if (firstNameEl) selectExample(firstNameEl.textContent);
+        }
       }
 
       function initializeEnhancedLogging() {
@@ -1257,7 +1699,7 @@ Select an example from the sidebar to get started! 🚀</div>
         if (!EXAMPLES[name]) return;
         
         currentExample = name;
-        srcEl.value = EXAMPLES[name];
+        setSource(EXAMPLES[name]);
 
         // Update active state
         document.querySelectorAll('.example-item').forEach(item => {
@@ -1281,7 +1723,7 @@ Select an example from the sidebar to get started! 🚀</div>
 
       // Share functionality
       shareBtn.onclick = () => {
-        const b64 = btoa(unescape(encodeURIComponent(srcEl.value)));
+        const b64 = btoa(unescape(encodeURIComponent(getSource())));
         const url = location.origin + location.pathname + "#code=" + b64;
         navigator.clipboard.writeText(url).then(() => {
           setStatus("Share URL copied!", "ready");
@@ -1295,7 +1737,7 @@ Select an example from the sidebar to get started! 🚀</div>
 
       // Download functionality
       downloadBtn.onclick = () => {
-        const blob = new Blob([srcEl.value], { type: "text/plain" });
+        const blob = new Blob([getSource()], { type: "text/plain" });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = "nanogo-pro-code.go";
@@ -1308,7 +1750,7 @@ Select an example from the sidebar to get started! 🚀</div>
         const hash = location.hash.startsWith("#code=") ? location.hash.slice(6) : "";
         if (hash) {
           try {
-            srcEl.value = atob(decodeURIComponent(hash));
+            setSource(atob(decodeURIComponent(hash)));
             logMessage("📥 Code loaded from URL");
             showOutputPanel('console'); // Default to console for shared code
           } catch (e) {
@@ -1317,7 +1759,7 @@ Select an example from the sidebar to get started! 🚀</div>
         } else {
           const saved = localStorage.getItem("nanogo_last");
           if (saved && saved !== EXAMPLES['Basics']) {
-            srcEl.value = saved;
+            setSource(saved);
             logMessage("💾 Restored previous session");
             showOutputPanel('console');
           }
