@@ -47,6 +47,11 @@
       line-height: 1.6;
     }
 
+    /* Smooth transitions when switching themes */
+    html, body, .header, .panel, .editor-container, .output-panel, .examples-panel, .example-item, .theme-popup, .CodeMirror {
+      transition: background-color 260ms ease, color 260ms ease, border-color 260ms ease, box-shadow 260ms ease;
+    }
+
     /* Header */
     .header {
       background: var(--gradient-bg);
@@ -193,6 +198,8 @@
     .theme-option .swatch { width:36px; height:22px; border-radius:6px; border:2px solid rgba(255,255,255,0.06); box-shadow: inset 0 0 0 1px rgba(0,0,0,0.15); flex: 0 0 auto }
     .theme-option .label { font-size:0.85rem; color:var(--text); flex:1 1 auto; text-align:left }
     .theme-option[aria-pressed="true"] { outline: 2px solid var(--accent); }
+    .theme-option:focus { outline: 3px solid var(--accent); transform: translateY(-2px); }
+    .theme-option.focused { box-shadow: 0 6px 18px rgba(0,0,0,0.35); }
 
 
     .example-item {
@@ -1196,6 +1203,17 @@ Select an example from the sidebar to get started! 🚀</div>
       function openThemePopup() {
         if (!themePopup) return;
         themePopup.setAttribute('aria-hidden', 'false');
+        // Sync aria-pressed with current theme and focus the selected option for accessibility
+        try {
+          const opts = themePopup.querySelectorAll('.theme-option');
+          opts.forEach(o => o.setAttribute('aria-pressed', o.getAttribute('data-theme') === theme ? 'true' : 'false'));
+          const sel = themePopup.querySelector('.theme-option[aria-pressed="true"]');
+          if (sel) {
+            sel.focus();
+            sel.classList.add('focused');
+            setTimeout(() => sel.classList.remove('focused'), 400);
+          }
+        } catch (e) { /* ignore */ }
       }
       if (themeBtn) themeBtn.onclick = (e) => {
         if (!themePopup) return;
