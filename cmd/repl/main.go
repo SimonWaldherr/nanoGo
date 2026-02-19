@@ -5,14 +5,19 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
 
 	"simonwaldherr.de/go/nanogo/interp"
 )
 
 func main() {
+	vm := interp.NewInterpreter()
+	registerSafeNatives(vm)
+	interp.RegisterBuiltinPackages(vm)
+
 	fmt.Println("nanoGo REPL — enter declarations (func, var, const, type, import) or statements. Ctrl-D to exit.")
 	reader := bufio.NewReader(os.Stdin)
-	decls := strings.Builder{}
+	var importLines []string
 
 	for {
 		fmt.Print("ng> ")
@@ -22,51 +27,118 @@ func main() {
 			return
 		}
 		line = strings.TrimSpace(line)
-		if line == "" {
+		if line == "" || strings.HasPrefix(line, "package ") {
+			continue
+		}
+
+		if strings.HasPrefix(line, "import ") {
+			importLines = append(importLines, line)
+			src := "package main\n" + line + "\nfunc main() {}\n"
+			if err := vm.Run(src); err != nil {
+				fmt.Println("error:", err)
+			}
 			continue
 		}
 
 		if looksLikeDecl(line) {
-			decls.WriteString(line)
-			decls.WriteString("\n")
+			src := buildDeclSource(importLines, line)
+			if err := vm.Run(src); err != nil {
+				fmt.Println("error:", err)
+			}
 			continue
 		}
 
-		src := buildSource(decls.String(), line)
-		if err := runSource(src); err != nil {
+		// Convert simple short-variable declarations (x := expr) to top-level var
+		// declarations so their values persist in the VM's global state.
+		if converted, ok := tryConvertShortVarDecl(line); ok {
+			src := buildDeclSource(importLines, converted)
+			if err := vm.Run(src); err != nil {
+				fmt.Println("error:", err)
+			}
+			continue
+		}
+
+		// Regular statement — executed in main() context with access to all globals.
+		src := buildStmtSource(importLines, line)
+		if err := vm.Run(src); err != nil {
 			fmt.Println("error:", err)
 		}
 	}
 }
 
+// looksLikeDecl reports whether a line is a top-level Go declaration.
 func looksLikeDecl(s string) bool {
 	trim := strings.TrimSpace(s)
-	return strings.HasPrefix(trim, "func ") || strings.HasPrefix(trim, "type ") || strings.HasPrefix(trim, "const ") || strings.HasPrefix(trim, "var ") || strings.HasPrefix(trim, "import ") || strings.HasPrefix(trim, "package ")
+	return strings.HasPrefix(trim, "func ") ||
+		strings.HasPrefix(trim, "type ") ||
+		strings.HasPrefix(trim, "const ") ||
+		strings.HasPrefix(trim, "var ")
 }
 
-func buildSource(decls, stmt string) string {
-	// Build a small program that contains cumulative declarations and a single replMain
-	// function which executes the provided statement.
+// tryConvertShortVarDecl converts a simple "ident := expr" line to "var ident = expr"
+// so the variable is declared at the top level and persists in the VM.
+func tryConvertShortVarDecl(line string) (string, bool) {
+	trim := strings.TrimSpace(line)
+	idx := strings.Index(trim, ":=")
+	if idx <= 0 {
+		return "", false
+	}
+	lhs := strings.TrimSpace(trim[:idx])
+	rhs := strings.TrimSpace(trim[idx+2:])
+	// Only convert when LHS is a single simple identifier.
+	if !isSimpleIdent(lhs) {
+		return "", false
+	}
+	return "var " + lhs + " = " + rhs, true
+}
+
+func isSimpleIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, c := range s {
+		if i == 0 {
+			if !unicode.IsLetter(c) && c != '_' {
+				return false
+			}
+		} else {
+			if !unicode.IsLetter(c) && !unicode.IsDigit(c) && c != '_' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// buildDeclSource wraps a single declaration in a minimal package main with a no-op main().
+func buildDeclSource(imports []string, decl string) string {
 	var b strings.Builder
-	b.WriteString("package main\n\n")
-	if strings.TrimSpace(decls) != "" {
-		b.WriteString(decls)
+	b.WriteString("package main\n")
+	for _, imp := range imports {
+		b.WriteString(imp)
 		b.WriteString("\n")
 	}
-	b.WriteString("func replMain() {\n")
-	b.WriteString(stmt)
-	b.WriteString("\n}\n\nfunc main() { replMain() }\n")
+	b.WriteString(decl)
+	b.WriteString("\nfunc main() {}\n")
 	return b.String()
 }
 
-func runSource(src string) error {
-	vm := interp.NewInterpreter()
-	registerSafeNatives(vm)
-	interp.RegisterBuiltinPackages(vm)
-	return vm.Run(src)
+// buildStmtSource wraps a statement in a package main / main() so it runs in the
+// persistent VM's global context.
+func buildStmtSource(imports []string, stmt string) string {
+	var b strings.Builder
+	b.WriteString("package main\n")
+	for _, imp := range imports {
+		b.WriteString(imp)
+		b.WriteString("\n")
+	}
+	b.WriteString("func main() {\n")
+	b.WriteString(stmt)
+	b.WriteString("\n}\n")
+	return b.String()
 }
 
-// registerSafeNatives mirrors the minimal safe host functions used in the CLI.
+// registerSafeNatives installs the minimal safe host functions.
 func registerSafeNatives(vm *interp.Interpreter) {
 	vm.RegisterNative("ConsoleLog", func(args []any) (any, error) {
 		if len(args) > 0 {

@@ -140,13 +140,12 @@ func registerSafeNatives(vm *interp.Interpreter) {
 		return string(b), nil
 	})
 
-	// Host-proxied HTTP client (simple rate-limited GetText)
+	// Host-proxied HTTP client (simple rate-limited GetText and PostText)
 	var httpMu sync.Mutex
 	var lastReq time.Time
 	minInterval := 200 * time.Millisecond
-	vm.RegisterNative("HTTPGetText", func(args []any) (any, error) {
-		if len(args) == 0 { return "", nil }
-		url := interp.ToString(args[0])
+
+	doHTTP := func(method, url, body string) (string, error) {
 		httpMu.Lock()
 		now := time.Now()
 		if !lastReq.IsZero() {
@@ -161,7 +160,13 @@ func registerSafeNatives(vm *interp.Interpreter) {
 		httpMu.Unlock()
 
 		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Get(url)
+		var resp *http.Response
+		var err error
+		if method == "POST" {
+			resp, err = client.Post(url, "application/json", strings.NewReader(body))
+		} else {
+			resp, err = client.Get(url)
+		}
 		if err != nil { return "", err }
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -170,5 +175,15 @@ func registerSafeNatives(vm *interp.Interpreter) {
 		data, err := io.ReadAll(resp.Body)
 		if err != nil { return "", err }
 		return string(data), nil
+	}
+
+	vm.RegisterNative("HTTPGetText", func(args []any) (any, error) {
+		if len(args) == 0 { return "", nil }
+		return doHTTP("GET", interp.ToString(args[0]), "")
+	})
+
+	vm.RegisterNative("HTTPPostText", func(args []any) (any, error) {
+		if len(args) < 2 { return "", nil }
+		return doHTTP("POST", interp.ToString(args[0]), interp.ToString(args[1]))
 	})
 }
