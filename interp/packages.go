@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	strlib "strings"
+	"strconv"
 	"sync"
 	"text/template"
 	"time"
@@ -71,12 +72,22 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	vm.RegisterPackage("time", timePkg)
 
 	// --- math ---
-	mathPkg := &Package{Name: "math", Funcs: map[string]*Function{}}
+	mathPkg := &Package{Name: "math", Funcs: map[string]*Function{}, Vars: map[string]any{}}
 	mathPkg.Funcs["Sqrt"] = &Function{Name: "Sqrt", Native: func(args []any) (any, error) { return math.Sqrt(ToFloat(args[0])), nil }}
 	mathPkg.Funcs["Pow"] = &Function{Name: "Pow", Native: func(args []any) (any, error) { return math.Pow(ToFloat(args[0]), ToFloat(args[1])), nil }}
 	mathPkg.Funcs["Sin"] = &Function{Name: "Sin", Native: func(args []any) (any, error) { return math.Sin(ToFloat(args[0])), nil }}
 	mathPkg.Funcs["Cos"] = &Function{Name: "Cos", Native: func(args []any) (any, error) { return math.Cos(ToFloat(args[0])), nil }}
 	mathPkg.Funcs["Abs"] = &Function{Name: "Abs", Native: func(args []any) (any, error) { return math.Abs(ToFloat(args[0])), nil }}
+	mathPkg.Funcs["Floor"] = &Function{Name: "Floor", Native: func(args []any) (any, error) { return math.Floor(ToFloat(args[0])), nil }}
+	mathPkg.Funcs["Ceil"] = &Function{Name: "Ceil", Native: func(args []any) (any, error) { return math.Ceil(ToFloat(args[0])), nil }}
+	mathPkg.Funcs["Round"] = &Function{Name: "Round", Native: func(args []any) (any, error) { return math.Round(ToFloat(args[0])), nil }}
+	mathPkg.Funcs["Max"] = &Function{Name: "Max", Native: func(args []any) (any, error) { return math.Max(ToFloat(args[0]), ToFloat(args[1])), nil }}
+	mathPkg.Funcs["Min"] = &Function{Name: "Min", Native: func(args []any) (any, error) { return math.Min(ToFloat(args[0]), ToFloat(args[1])), nil }}
+	mathPkg.Funcs["Log"] = &Function{Name: "Log", Native: func(args []any) (any, error) { return math.Log(ToFloat(args[0])), nil }}
+	mathPkg.Funcs["Log2"] = &Function{Name: "Log2", Native: func(args []any) (any, error) { return math.Log2(ToFloat(args[0])), nil }}
+	mathPkg.Funcs["Log10"] = &Function{Name: "Log10", Native: func(args []any) (any, error) { return math.Log10(ToFloat(args[0])), nil }}
+	mathPkg.Vars["Pi"] = math.Pi
+	mathPkg.Vars["E"] = math.E
 	vm.RegisterPackage("math", mathPkg)
 
 	// --- math/rand --- (small facade)
@@ -87,6 +98,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	}}
 	randPkg.Funcs["Seed"] = &Function{Name: "Seed", Params: []string{"seed"}, Native: func(args []any) (any, error) {
 		mrand.Seed(int64(ToInt(args[0]))); return nil, nil
+	}}
+	randPkg.Funcs["Float64"] = &Function{Name: "Float64", Native: func(args []any) (any, error) {
+		return mrand.Float64(), nil
 	}}
 	vm.RegisterPackage("math/rand", randPkg)
 
@@ -130,19 +144,80 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	stringsPkg.Funcs["ReplaceAll"] = &Function{Name: "ReplaceAll", Params: []string{"s","old","new"}, Native: func(args []any) (any, error) {
 		return strlib.ReplaceAll(ToString(args[0]), ToString(args[1]), ToString(args[2])), nil
 	}}
+	stringsPkg.Funcs["Replace"] = &Function{Name: "Replace", Params: []string{"s","old","new","n"}, Native: func(args []any) (any, error) {
+		return strlib.Replace(ToString(args[0]), ToString(args[1]), ToString(args[2]), ToInt(args[3])), nil
+	}}
 	stringsPkg.Funcs["ToUpper"] = &Function{Name: "ToUpper", Params: []string{"s"}, Native: func(args []any) (any, error) { return strlib.ToUpper(ToString(args[0])), nil }}
 	stringsPkg.Funcs["ToLower"] = &Function{Name: "ToLower", Params: []string{"s"}, Native: func(args []any) (any, error) { return strlib.ToLower(ToString(args[0])), nil }}
 	stringsPkg.Funcs["TrimSpace"] = &Function{Name: "TrimSpace", Params: []string{"s"}, Native: func(args []any) (any, error) { return strlib.TrimSpace(ToString(args[0])), nil }}
+	stringsPkg.Funcs["Trim"] = &Function{Name: "Trim", Params: []string{"s","cutset"}, Native: func(args []any) (any, error) { return strlib.Trim(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["TrimPrefix"] = &Function{Name: "TrimPrefix", Params: []string{"s","prefix"}, Native: func(args []any) (any, error) { return strlib.TrimPrefix(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["TrimSuffix"] = &Function{Name: "TrimSuffix", Params: []string{"s","suffix"}, Native: func(args []any) (any, error) { return strlib.TrimSuffix(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["HasPrefix"] = &Function{Name: "HasPrefix", Params: []string{"s","prefix"}, Native: func(args []any) (any, error) { return strlib.HasPrefix(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["HasSuffix"] = &Function{Name: "HasSuffix", Params: []string{"s","suffix"}, Native: func(args []any) (any, error) { return strlib.HasSuffix(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["Count"] = &Function{Name: "Count", Params: []string{"s","sub"}, Native: func(args []any) (any, error) { return strlib.Count(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["Index"] = &Function{Name: "Index", Params: []string{"s","sub"}, Native: func(args []any) (any, error) { return strlib.Index(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["Repeat"] = &Function{Name: "Repeat", Params: []string{"s","count"}, Native: func(args []any) (any, error) { return strlib.Repeat(ToString(args[0]), ToInt(args[1])), nil }}
 	vm.RegisterPackage("strings", stringsPkg)
 
-	// --- sort --- (Ints only, in-place)
+	// --- sort --- (Ints, Strings, Float64s in-place)
 	sortPkg := &Package{Name: "sort", Funcs: map[string]*Function{}}
 	sortPkg.Funcs["Ints"] = &Function{Name: "Ints", Params: []string{"slice"}, Native: func(args []any) (any, error) {
 		s, ok := args[0].(*SliceVal); if !ok || s == nil { return nil, nil }
 		sort.Slice(s.Data, func(i, j int) bool { return ToInt(s.Data[i]) < ToInt(s.Data[j]) })
 		return nil, nil
 	}}
+	sortPkg.Funcs["Strings"] = &Function{Name: "Strings", Params: []string{"slice"}, Native: func(args []any) (any, error) {
+		s, ok := args[0].(*SliceVal); if !ok || s == nil { return nil, nil }
+		sort.Slice(s.Data, func(i, j int) bool { return ToString(s.Data[i]) < ToString(s.Data[j]) })
+		return nil, nil
+	}}
+	sortPkg.Funcs["Float64s"] = &Function{Name: "Float64s", Params: []string{"slice"}, Native: func(args []any) (any, error) {
+		s, ok := args[0].(*SliceVal); if !ok || s == nil { return nil, nil }
+		sort.Slice(s.Data, func(i, j int) bool { return ToFloat(s.Data[i]) < ToFloat(s.Data[j]) })
+		return nil, nil
+	}}
 	vm.RegisterPackage("sort", sortPkg)
+
+	// --- strconv ---
+	strconvPkg := &Package{Name: "strconv", Funcs: map[string]*Function{}}
+	strconvPkg.Funcs["Itoa"] = &Function{Name: "Itoa", Params: []string{"i"}, Native: func(args []any) (any, error) {
+		return strconv.Itoa(ToInt(args[0])), nil
+	}}
+	strconvPkg.Funcs["Atoi"] = &Function{Name: "Atoi", Params: []string{"s"}, Native: func(args []any) (any, error) {
+		n, err := strconv.Atoi(ToString(args[0]))
+		if err != nil { return 0, err }
+		return n, nil
+	}}
+	strconvPkg.Funcs["FormatFloat"] = &Function{Name: "FormatFloat", Params: []string{"f","fmt","prec","bitSize"}, Native: func(args []any) (any, error) {
+		if len(args) < 4 { return "", NewRuntimeError("FormatFloat: need 4 args") }
+		// Accept a string format character (e.g., "f", "e", "g") or an int ASCII value.
+		var fmtByte byte = 'f'
+		switch fv := args[1].(type) {
+		case string:
+			if len(fv) > 0 { fmtByte = fv[0] }
+		default:
+			fmtByte = byte(ToInt(args[1]) & 0xFF)
+		}
+		return strconv.FormatFloat(ToFloat(args[0]), fmtByte, ToInt(args[2]), ToInt(args[3])), nil
+	}}
+	strconvPkg.Funcs["ParseFloat"] = &Function{Name: "ParseFloat", Params: []string{"s","bitSize"}, Native: func(args []any) (any, error) {
+		bitSize := 64; if len(args) >= 2 { bitSize = ToInt(args[1]) }
+		f, err := strconv.ParseFloat(ToString(args[0]), bitSize)
+		return f, err
+	}}
+	strconvPkg.Funcs["FormatBool"] = &Function{Name: "FormatBool", Params: []string{"b"}, Native: func(args []any) (any, error) {
+		return strconv.FormatBool(ToBool(args[0])), nil
+	}}
+	strconvPkg.Funcs["ParseBool"] = &Function{Name: "ParseBool", Params: []string{"s"}, Native: func(args []any) (any, error) {
+		b, err := strconv.ParseBool(ToString(args[0]))
+		return b, err
+	}}
+	strconvPkg.Funcs["FormatInt"] = &Function{Name: "FormatInt", Params: []string{"i","base"}, Native: func(args []any) (any, error) {
+		if len(args) < 2 { return "", NewRuntimeError("FormatInt: need 2 args") }
+		return strconv.FormatInt(int64(ToInt(args[0])), ToInt(args[1])), nil
+	}}
+	vm.RegisterPackage("strconv", strconvPkg)
 
 	// --- sync.WaitGroup ---
 	// We expose a struct type WaitGroup with methods Add/Done/Wait, backed by Go's sync.WaitGroup.
@@ -357,11 +432,23 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	}}
 	vm.RegisterPackage("text/template", tplPkg)
 
-	// --- http (very simple: GetText) ---
+	// --- http (very simple: GetText, PostText) ---
 	httpPkg := &Package{Name: "http", Funcs: map[string]*Function{}}
 	httpPkg.Funcs["GetText"] = &Function{Name: "GetText", Params: []string{"url"}, Native: func(args []any) (any, error) {
 		if n, ok := vm.natives["HTTPGetText"]; ok {
 			v, err := n([]any{ToString(args[0])})
+			return v, err
+		}
+		return "", nil
+	}}
+	httpPkg.Funcs["PostText"] = &Function{Name: "PostText", IsVariadic: true, Native: func(args []any) (any, error) {
+		// PostText(url, body [, contentType])
+		// contentType defaults to "application/json" when omitted.
+		if len(args) < 2 { return "", nil }
+		contentType := "application/json"
+		if len(args) >= 3 { contentType = ToString(args[2]) }
+		if n, ok := vm.natives["HTTPPostText"]; ok {
+			v, err := n([]any{ToString(args[0]), ToString(args[1]), contentType})
 			return v, err
 		}
 		return "", nil
@@ -457,6 +544,9 @@ func (vm *Interpreter) installImportedPackage(alias, path string) {
 	case "sort":
 		if _, ok := vm.packages["sort"]; !ok { RegisterBuiltinPackages(vm) }
 		vm.globals.Vars[alias] = vm.packages["sort"]
+	case "strconv":
+		if _, ok := vm.packages["strconv"]; !ok { RegisterBuiltinPackages(vm) }
+		vm.globals.Vars[alias] = vm.packages["strconv"]
 	case "sync":
 		if _, ok := vm.packages["sync"]; !ok { RegisterBuiltinPackages(vm) }
 		vm.globals.Vars[alias] = vm.packages["sync"]
@@ -475,6 +565,9 @@ func (vm *Interpreter) installImportedPackage(alias, path string) {
 	case "storage":
 		if _, ok := vm.packages["storage"]; !ok { RegisterBuiltinPackages(vm) }
 		vm.globals.Vars[alias] = vm.packages["storage"]
+	case "fs":
+		if _, ok := vm.packages["fs"]; !ok { RegisterBuiltinPackages(vm) }
+		vm.globals.Vars[alias] = vm.packages["fs"]
 	default:
 		_ = fmt.Sprintf("unknown import: %s", path)
 	}
