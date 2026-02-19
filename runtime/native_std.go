@@ -223,10 +223,10 @@ func HTTPGetText(url string) (string, error) {
 	return "", fmt.Errorf("HTTP status %d", status)
 }
 
-func HTTPPostText(url, body string) (string, error) {
+func HTTPPostText(url, body, contentType string) (string, error) {
 	xhr := js.Global().Get("XMLHttpRequest").New()
 	xhr.Call("open", "POST", url, false)
-	xhr.Call("setRequestHeader", "Content-Type", "application/json")
+	xhr.Call("setRequestHeader", "Content-Type", contentType)
 	xhr.Call("send", body)
 	status := xhr.Get("status").Int()
 	if status >= 200 && status < 300 {
@@ -413,7 +413,9 @@ func RegisterHostNatives(vm *interp.Interpreter, canvas *CanvasBinding) {
 		if len(args) < 2 {
 			return "", nil
 		}
-		return HTTPPostText(interp.ToString(args[0]), interp.ToString(args[1]))
+		contentType := "application/json"
+		if len(args) >= 3 { contentType = interp.ToString(args[2]) }
+		return HTTPPostText(interp.ToString(args[0]), interp.ToString(args[1]), contentType)
 	})
 	vm.RegisterNative("LocalStorageSetItem", func(args []any) (any, error) {
 		if len(args) >= 2 {

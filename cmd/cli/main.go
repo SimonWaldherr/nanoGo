@@ -145,7 +145,7 @@ func registerSafeNatives(vm *interp.Interpreter) {
 	var lastReq time.Time
 	minInterval := 200 * time.Millisecond
 
-	doHTTP := func(method, url, body string) (string, error) {
+	doHTTP := func(method, url, body, contentType string) (string, error) {
 		httpMu.Lock()
 		now := time.Now()
 		if !lastReq.IsZero() {
@@ -163,7 +163,7 @@ func registerSafeNatives(vm *interp.Interpreter) {
 		var resp *http.Response
 		var err error
 		if method == "POST" {
-			resp, err = client.Post(url, "application/json", strings.NewReader(body))
+			resp, err = client.Post(url, contentType, strings.NewReader(body))
 		} else {
 			resp, err = client.Get(url)
 		}
@@ -179,11 +179,13 @@ func registerSafeNatives(vm *interp.Interpreter) {
 
 	vm.RegisterNative("HTTPGetText", func(args []any) (any, error) {
 		if len(args) == 0 { return "", nil }
-		return doHTTP("GET", interp.ToString(args[0]), "")
+		return doHTTP("GET", interp.ToString(args[0]), "", "")
 	})
 
 	vm.RegisterNative("HTTPPostText", func(args []any) (any, error) {
 		if len(args) < 2 { return "", nil }
-		return doHTTP("POST", interp.ToString(args[0]), interp.ToString(args[1]))
+		contentType := "application/json"
+		if len(args) >= 3 { contentType = interp.ToString(args[2]) }
+		return doHTTP("POST", interp.ToString(args[0]), interp.ToString(args[1]), contentType)
 	})
 }

@@ -191,7 +191,15 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	}}
 	strconvPkg.Funcs["FormatFloat"] = &Function{Name: "FormatFloat", Params: []string{"f","fmt","prec","bitSize"}, Native: func(args []any) (any, error) {
 		if len(args) < 4 { return "", NewRuntimeError("FormatFloat: need 4 args") }
-		return strconv.FormatFloat(ToFloat(args[0]), byte(ToInt(args[1])), ToInt(args[2]), ToInt(args[3])), nil
+		// Accept a string format character (e.g., "f", "e", "g") or an int ASCII value.
+		var fmtByte byte = 'f'
+		switch fv := args[1].(type) {
+		case string:
+			if len(fv) > 0 { fmtByte = fv[0] }
+		default:
+			fmtByte = byte(ToInt(args[1]) & 0xFF)
+		}
+		return strconv.FormatFloat(ToFloat(args[0]), fmtByte, ToInt(args[2]), ToInt(args[3])), nil
 	}}
 	strconvPkg.Funcs["ParseFloat"] = &Function{Name: "ParseFloat", Params: []string{"s","bitSize"}, Native: func(args []any) (any, error) {
 		bitSize := 64; if len(args) >= 2 { bitSize = ToInt(args[1]) }
@@ -433,10 +441,14 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		}
 		return "", nil
 	}}
-	httpPkg.Funcs["PostText"] = &Function{Name: "PostText", Params: []string{"url","body"}, Native: func(args []any) (any, error) {
+	httpPkg.Funcs["PostText"] = &Function{Name: "PostText", IsVariadic: true, Native: func(args []any) (any, error) {
+		// PostText(url, body [, contentType])
+		// contentType defaults to "application/json" when omitted.
 		if len(args) < 2 { return "", nil }
+		contentType := "application/json"
+		if len(args) >= 3 { contentType = ToString(args[2]) }
 		if n, ok := vm.natives["HTTPPostText"]; ok {
-			v, err := n([]any{ToString(args[0]), ToString(args[1])})
+			v, err := n([]any{ToString(args[0]), ToString(args[1]), contentType})
 			return v, err
 		}
 		return "", nil
