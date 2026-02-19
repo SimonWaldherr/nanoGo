@@ -16,19 +16,81 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: nanogo-cli <file.go> [timeout-seconds]")
+		printUsage()
 		os.Exit(1)
 	}
 
-	src, err := os.ReadFile(os.Args[1])
+	switch os.Args[1] {
+	case "fmt":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: nanogo-cli fmt <file.go>")
+			os.Exit(1)
+		}
+		runFmt(os.Args[2])
+	case "vet":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: nanogo-cli vet <file.go>")
+			os.Exit(1)
+		}
+		runVet(os.Args[2])
+	default:
+		// Original behaviour: nanogo-cli <file.go> [timeout-seconds]
+		runFile(os.Args[1], os.Args[2:])
+	}
+}
+
+func printUsage() {
+	fmt.Fprintln(os.Stderr, "usage: nanogo-cli <file.go> [timeout-seconds]")
+	fmt.Fprintln(os.Stderr, "       nanogo-cli fmt <file.go>")
+	fmt.Fprintln(os.Stderr, "       nanogo-cli vet <file.go>")
+}
+
+// runFmt prints the gofmt-formatted version of file to stdout.
+func runFmt(path string) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "read error:", err)
+		os.Exit(1)
+	}
+	formatted, err := interp.FormatSource(string(src))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "format error:", err)
+		os.Exit(1)
+	}
+	fmt.Print(formatted)
+}
+
+// runVet prints vet issues for file and exits with code 1 if any are found.
+func runVet(path string) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "read error:", err)
+		os.Exit(1)
+	}
+	issues, err := interp.VetSource(string(src))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "parse error:", err)
+		os.Exit(1)
+	}
+	for _, issue := range issues {
+		fmt.Printf("%s:%s\n", path, issue)
+	}
+	if len(issues) > 0 {
+		os.Exit(1)
+	}
+}
+
+// runFile executes a Go source file in the interpreter (original behaviour).
+func runFile(path string, extraArgs []string) {
+	src, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "read error:", err)
 		os.Exit(1)
 	}
 
 	timeout := 10 * time.Second
-	if len(os.Args) >= 3 {
-		d, err := time.ParseDuration(os.Args[2] + "s")
+	if len(extraArgs) >= 1 {
+		d, err := time.ParseDuration(extraArgs[0] + "s")
 		if err == nil {
 			timeout = d
 		}
