@@ -60,10 +60,11 @@ func NewVFS() *VFS {
 }
 
 // cleanPath resolves a path to an absolute, cleaned path.
-// Relative paths are resolved against the current working directory.
-func (fs *VFS) cleanPath(p string) string {
+// Relative paths are resolved against cwd.
+// The caller is responsible for reading fs.cwd under the appropriate lock.
+func cleanPath(p, cwd string) string {
 	if !path.IsAbs(p) {
-		p = fs.cwd + "/" + p
+		p = cwd + "/" + p
 	}
 	return path.Clean(p)
 }
@@ -79,7 +80,7 @@ func (fs *VFS) Getwd() string {
 func (fs *VFS) Chdir(p string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	abs := fs.cleanPath(p)
+	abs := cleanPath(p, fs.cwd)
 	node, ok := fs.nodes[abs]
 	if !ok {
 		return fmt.Errorf("chdir %s: no such file or directory", p)
@@ -95,7 +96,7 @@ func (fs *VFS) Chdir(p string) error {
 func (fs *VFS) ReadFile(p string) ([]byte, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
-	abs := fs.cleanPath(p)
+	abs := cleanPath(p, fs.cwd)
 	node, ok := fs.nodes[abs]
 	if !ok {
 		return nil, fmt.Errorf("open %s: no such file or directory", p)
@@ -113,7 +114,7 @@ func (fs *VFS) ReadFile(p string) ([]byte, error) {
 func (fs *VFS) WriteFile(p string, data []byte, mode int) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	abs := fs.cleanPath(p)
+	abs := cleanPath(p, fs.cwd)
 	parent := path.Dir(abs)
 	if _, ok := fs.nodes[parent]; !ok {
 		return fmt.Errorf("open %s: no such file or directory", p)
@@ -137,7 +138,7 @@ func (fs *VFS) WriteFile(p string, data []byte, mode int) error {
 func (fs *VFS) Mkdir(p string, mode int) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	abs := fs.cleanPath(p)
+	abs := cleanPath(p, fs.cwd)
 	parent := path.Dir(abs)
 	if _, ok := fs.nodes[parent]; !ok {
 		return fmt.Errorf("mkdir %s: no such file or directory", p)
@@ -156,7 +157,7 @@ func (fs *VFS) Mkdir(p string, mode int) error {
 func (fs *VFS) MkdirAll(p string, mode int) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	abs := fs.cleanPath(p)
+	abs := cleanPath(p, fs.cwd)
 	if mode == 0 {
 		mode = 0755
 	}
@@ -178,7 +179,7 @@ func (fs *VFS) MkdirAll(p string, mode int) error {
 func (fs *VFS) Remove(p string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	abs := fs.cleanPath(p)
+	abs := cleanPath(p, fs.cwd)
 	node, ok := fs.nodes[abs]
 	if !ok {
 		return fmt.Errorf("remove %s: no such file or directory", p)
@@ -198,7 +199,7 @@ func (fs *VFS) Remove(p string) error {
 func (fs *VFS) RemoveAll(p string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	abs := fs.cleanPath(p)
+	abs := cleanPath(p, fs.cwd)
 	if _, ok := fs.nodes[abs]; !ok {
 		return nil // not an error per os.RemoveAll contract
 	}
@@ -214,7 +215,7 @@ func (fs *VFS) RemoveAll(p string) error {
 func (fs *VFS) Stat(p string) (*VFSFileInfo, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
-	abs := fs.cleanPath(p)
+	abs := cleanPath(p, fs.cwd)
 	node, ok := fs.nodes[abs]
 	if !ok {
 		return nil, fmt.Errorf("stat %s: no such file or directory", p)
@@ -232,7 +233,7 @@ func (fs *VFS) Stat(p string) (*VFSFileInfo, error) {
 func (fs *VFS) ReadDir(p string) ([]*VFSFileInfo, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
-	abs := fs.cleanPath(p)
+	abs := cleanPath(p, fs.cwd)
 	if _, ok := fs.nodes[abs]; !ok {
 		return nil, fmt.Errorf("open %s: no such file or directory", p)
 	}
