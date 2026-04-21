@@ -24,7 +24,7 @@ WASM_OUT := web/nanogo.wasm
 
 build-wasm:
 	@mkdir -p $(dir $(WASM_OUT))
-	GOOS=js GOARCH=wasm go build -o $(WASM_OUT) ./cmd/wasm
+	GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o web/nanogo.wasm ./cmd/wasm
 
 # ---------- Native CLI demo (safe interpreter) ----------
 CLI_OUT := $(BUILD_DIR)/nanogo-cli
