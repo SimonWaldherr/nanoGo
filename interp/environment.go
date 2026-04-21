@@ -1,7 +1,9 @@
 // interp/environment.go
 package interp
 
-import "sync"
+import (
+	"sync"
+)
 
 // Env is a lexical scope chaining to a parent environment.
 type Env struct {
@@ -27,6 +29,13 @@ type Interpreter struct {
 	natives  map[string]func(args []any) (any, error)
 	packages map[string]*Package
 
+	// VFS is the virtual filesystem used by the os package and other file-aware builtins.
+	// If nil, a fresh VFS is created automatically on first use.
+	VFS *VFS
+
+	// Args are the command-line arguments exposed as os.Args.
+	Args []string
+
 	// frames is a stack of call frames for defer/panic handling.
 	frames []*callFrame
 
@@ -35,6 +44,16 @@ type Interpreter struct {
 }
 
 func NewInterpreter() *Interpreter {
+	return NewInterpreterWithVFS(NewVFS())
+}
+
+// NewInterpreterWithVFS creates an Interpreter that shares the given VFS.
+// This allows multiple Interpreter instances (e.g. across MCP tool calls)
+// to operate on the same in-memory filesystem.
+func NewInterpreterWithVFS(vfs *VFS) *Interpreter {
+	if vfs == nil {
+		vfs = NewVFS()
+	}
 	return &Interpreter{
 		globals:  NewEnv(nil),
 		types:    map[string]*TypeDef{},
@@ -42,6 +61,8 @@ func NewInterpreter() *Interpreter {
 		natives:  map[string]func(args []any) (any, error){},
 		packages: map[string]*Package{},
 		frames:   []*callFrame{},
+		VFS:      vfs,
+		Args:     []string{"nanogo"},
 	}
 }
 

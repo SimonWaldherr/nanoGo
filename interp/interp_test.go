@@ -945,3 +945,251 @@ func TestPersistentVMVarPersistence(t *testing.T) {
 		t.Errorf("expected '42', got %q", buf.String())
 	}
 }
+
+// --------------- VFS tests ---------------
+
+func TestVFSReadWrite(t *testing.T) {
+	fs := NewVFS()
+	if err := fs.WriteFile("/tmp/hello.txt", []byte("hello vfs"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	data, err := fs.ReadFile("/tmp/hello.txt")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "hello vfs" {
+		t.Errorf("expected 'hello vfs', got %q", string(data))
+	}
+}
+
+func TestVFSMkdirAndReadDir(t *testing.T) {
+	fs := NewVFS()
+	if err := fs.MkdirAll("/tmp/a/b/c", 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	_ = fs.WriteFile("/tmp/a/file.txt", []byte("x"), 0644)
+	entries, err := fs.ReadDir("/tmp/a")
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, e := range entries {
+		names[e.Name] = true
+	}
+	if !names["b"] || !names["file.txt"] {
+		t.Errorf("expected 'b' and 'file.txt' in /tmp/a, got %v", names)
+	}
+}
+
+func TestVFSStat(t *testing.T) {
+	fs := NewVFS()
+	_ = fs.WriteFile("/tmp/s.txt", []byte("data"), 0644)
+	fi, err := fs.Stat("/tmp/s.txt")
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if fi.IsDir || fi.Size != 4 || fi.Name != "s.txt" {
+		t.Errorf("unexpected stat: %+v", fi)
+	}
+	di, err := fs.Stat("/tmp")
+	if err != nil {
+		t.Fatalf("Stat /tmp: %v", err)
+	}
+	if !di.IsDir {
+		t.Errorf("expected /tmp to be a directory")
+	}
+}
+
+func TestVFSRemove(t *testing.T) {
+	fs := NewVFS()
+	_ = fs.WriteFile("/tmp/rm.txt", []byte("bye"), 0644)
+	if err := fs.Remove("/tmp/rm.txt"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if _, err := fs.ReadFile("/tmp/rm.txt"); err == nil {
+		t.Error("expected error after removal")
+	}
+}
+
+func TestVFSEnv(t *testing.T) {
+	fs := NewVFS()
+	fs.Setenv("FOO", "bar")
+	if fs.Getenv("FOO") != "bar" {
+		t.Errorf("expected 'bar', got %q", fs.Getenv("FOO"))
+	}
+}
+
+// --------------- os package tests ---------------
+
+func TestOsPackageReadWriteFile(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	err := os.WriteFile("/tmp/wr.txt", "written content", 0644)
+	if err != nil {
+		fmt.Println("write error")
+		return
+	}
+	content, err := os.ReadFile("/tmp/wr.txt")
+	if err != nil {
+		fmt.Println("read error")
+		return
+	}
+	fmt.Println(content)
+}
+`)
+	if !strings.Contains(out, "written content") {
+		t.Errorf("expected 'written content', got %q", out)
+	}
+}
+
+func TestOsPackageMkdirAndReadDir(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	err := os.MkdirAll("/tmp/testdir", 0755)
+	if err != nil {
+		fmt.Println("mkdir error")
+		return
+	}
+	_ = os.WriteFile("/tmp/testdir/a.txt", "a", 0644)
+	_ = os.WriteFile("/tmp/testdir/b.txt", "b", 0644)
+	entries, err := os.ReadDir("/tmp/testdir")
+	if err != nil {
+		fmt.Println("readdir error")
+		return
+	}
+	for _, e := range entries {
+		fmt.Println(e.Name)
+	}
+}
+`)
+	if !strings.Contains(out, "a.txt") || !strings.Contains(out, "b.txt") {
+		t.Errorf("expected 'a.txt' and 'b.txt', got %q", out)
+	}
+}
+
+func TestOsPackageGetenv(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	fmt.Println(os.Getenv("HOME"))
+	fmt.Println(os.TempDir())
+}
+`)
+	if !strings.Contains(out, "/home/user") {
+		t.Errorf("expected HOME=/home/user, got %q", out)
+	}
+	if !strings.Contains(out, "/tmp") {
+		t.Errorf("expected TempDir=/tmp, got %q", out)
+	}
+}
+
+func TestOsReadFileError(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	_, err := os.ReadFile("/nonexistent/path.txt")
+	if err != nil {
+		fmt.Println("got error")
+	} else {
+		fmt.Println("no error")
+	}
+}
+`)
+	if !strings.Contains(out, "got error") {
+		t.Errorf("expected error for missing file, got %q", out)
+	}
+}
+
+// --------------- multi-return error capture tests ---------------
+
+func TestMultiReturnErrorCapture(t *testing.T) {
+	// Verify that val, err := pkg.Func() properly captures the error
+	// as the second value rather than propagating it.
+	out := runAndCapture(t, `
+package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func main() {
+	n, err := strconv.Atoi("42")
+	if err != nil {
+		fmt.Println("unexpected error")
+		return
+	}
+	fmt.Println(n)
+}
+`)
+	if !strings.Contains(out, "42") {
+		t.Errorf("expected '42', got %q", out)
+	}
+}
+
+func TestSharedVFSAcrossInterpreters(t *testing.T) {
+	// Two interpreter instances sharing the same VFS.
+	vfs := NewVFS()
+	vm1 := NewInterpreterWithVFS(vfs)
+	vm2 := NewInterpreterWithVFS(vfs)
+
+	var buf strings.Builder
+	registerTestNatives := func(vm *Interpreter) {
+		vm.RegisterNative("ConsoleLog", func(args []any) (any, error) {
+			if len(args) > 0 { buf.WriteString(ToString(args[0])); buf.WriteByte('\n') }
+			return nil, nil
+		})
+		vm.RegisterNative("ConsoleWarn", func(args []any) (any, error) { return nil, nil })
+		vm.RegisterNative("ConsoleError", func(args []any) (any, error) { return nil, nil })
+		vm.RegisterNative("__hostSprintf", func(args []any) (any, error) {
+			if len(args) == 0 { return "", nil }
+			fmtArgs := make([]any, 0, len(args)-1)
+			for _, a := range args[1:] { fmtArgs = append(fmtArgs, a) }
+			return fmt.Sprintf(ToString(args[0]), fmtArgs...), nil
+		})
+		RegisterBuiltinPackages(vm)
+	}
+
+	registerTestNatives(vm1)
+	registerTestNatives(vm2)
+
+	// vm1 writes a file.
+	src1 := "package main\nimport \"os\"\nfunc main() { _ = os.WriteFile(\"/tmp/shared.txt\", \"shared data\", 0644) }\n"
+	if err := vm1.Run(src1); err != nil {
+		t.Fatalf("vm1 Run: %v", err)
+	}
+	// vm2 reads the file written by vm1.
+	src2 := "package main\nimport (\"fmt\";\"os\")\nfunc main() { content, _ := os.ReadFile(\"/tmp/shared.txt\"); fmt.Println(content) }\n"
+	if err := vm2.Run(src2); err != nil {
+		t.Fatalf("vm2 Run: %v", err)
+	}
+	if !strings.Contains(buf.String(), "shared data") {
+		t.Errorf("expected 'shared data' read by vm2, got %q", buf.String())
+	}
+}
