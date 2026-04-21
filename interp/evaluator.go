@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"reflect"
 	"strings"
 )
 
@@ -133,6 +134,11 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 			return nil, NewRuntimeError(fmt.Sprintf("unsupported basic literal kind: %v", ex.Kind))
 		}
 	case *ast.Ident:
+		switch ex.Name {
+		case "true":  return true, nil
+		case "false": return false, nil
+		case "nil":   return nil, nil
+		}
 		if isBuiltinType(ex.Name) {
 			return &Function{Name: ex.Name, Native: func(args []any) (any, error) {
 				if len(args) == 0 { return zeroValue(ex.Name), nil }
@@ -623,6 +629,68 @@ func (vm *Interpreter) evalStmt(s ast.Stmt, env *Env) (controlFlow, error) {
 		frame.defers = append(frame.defers, func() {
 			_, _ = vm.callFunction(fn, env, recv, args)
 		})
+		return controlFlow{}, nil
+
+	case *ast.SelectStmt:
+		var rcases []reflect.SelectCase
+		var clauses []*ast.CommClause
+		for _, s2 := range st.Body.List {
+			cc, ok := s2.(*ast.CommClause); if !ok { continue }
+			clauses = append(clauses, cc)
+			if cc.Comm == nil {
+				rcases = append(rcases, reflect.SelectCase{Dir: reflect.SelectDefault})
+				continue
+			}
+			switch comm := cc.Comm.(type) {
+			case *ast.ExprStmt:
+				// <-ch (receive and discard)
+				ue, ok2 := comm.X.(*ast.UnaryExpr)
+				if !ok2 || ue.Op != token.ARROW { return controlFlow{}, NewRuntimeError("invalid select case expression") }
+				chv, err := vm.evalExpr(ue.X, env); if err != nil { return controlFlow{}, err }
+				ch, ok3 := chv.(*ChannelVal); if !ok3 { return controlFlow{}, NewRuntimeError("receive on non-channel in select") }
+				rcases = append(rcases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.C)})
+			case *ast.AssignStmt:
+				// v := <-ch  or  v, ok := <-ch
+				if len(comm.Rhs) != 1 { return controlFlow{}, NewRuntimeError("invalid select assign case") }
+				ue, ok2 := comm.Rhs[0].(*ast.UnaryExpr)
+				if !ok2 || ue.Op != token.ARROW { return controlFlow{}, NewRuntimeError("invalid select assign case: expected <-ch") }
+				chv, err := vm.evalExpr(ue.X, env); if err != nil { return controlFlow{}, err }
+				ch, ok3 := chv.(*ChannelVal); if !ok3 { return controlFlow{}, NewRuntimeError("receive on non-channel in select") }
+				rcases = append(rcases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.C)})
+			case *ast.SendStmt:
+				// ch <- v
+				chv, err := vm.evalExpr(comm.Chan, env); if err != nil { return controlFlow{}, err }
+				val, err := vm.evalExpr(comm.Value, env); if err != nil { return controlFlow{}, err }
+				ch, ok2 := chv.(*ChannelVal); if !ok2 { return controlFlow{}, NewRuntimeError("send on non-channel in select") }
+				v := val // capture for reflect
+				rcases = append(rcases, reflect.SelectCase{
+					Dir:  reflect.SelectSend,
+					Chan: reflect.ValueOf(ch.C),
+					Send: reflect.ValueOf(&v).Elem(), // wrap as interface{} for chan any
+				})
+			default:
+				return controlFlow{}, NewRuntimeError(fmt.Sprintf("unsupported select comm: %T", comm))
+			}
+		}
+		if len(rcases) == 0 { return controlFlow{}, nil }
+		chosen, recvVal, recvOK := reflect.Select(rcases)
+		cc := clauses[chosen]
+		caseEnv := NewEnv(env)
+		// Bind received value(s) if the chosen case was a receive assignment.
+		if assign, ok := cc.Comm.(*ast.AssignStmt); ok {
+			var rv any
+			if recvVal.IsValid() { rv = recvVal.Interface() }
+			bindVar := func(name string, val any) {
+				if name == "_" { return }
+				if assign.Tok == token.DEFINE { vm.declare(name, val, caseEnv) } else { vm.set(name, val, caseEnv) }
+			}
+			if len(assign.Lhs) >= 1 { if id, ok2 := assign.Lhs[0].(*ast.Ident); ok2 { bindVar(id.Name, rv) } }
+			if len(assign.Lhs) >= 2 { if id, ok2 := assign.Lhs[1].(*ast.Ident); ok2 { bindVar(id.Name, recvOK) } }
+		}
+		for _, s2 := range cc.Body {
+			c, err := vm.evalStmt(s2, caseEnv); if err != nil { return controlFlow{}, err }
+			switch c.kind { case controlReturn, controlBreak, controlContinue: return c, nil }
+		}
 		return controlFlow{}, nil
 
 	case *ast.GoStmt:

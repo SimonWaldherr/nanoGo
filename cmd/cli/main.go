@@ -16,19 +16,81 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: nanogo-cli <file.go> [timeout-seconds]")
+		printUsage()
 		os.Exit(1)
 	}
 
-	src, err := os.ReadFile(os.Args[1])
+	switch os.Args[1] {
+	case "fmt":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: nanogo-cli fmt <file.go>")
+			os.Exit(1)
+		}
+		runFmt(os.Args[2])
+	case "vet":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: nanogo-cli vet <file.go>")
+			os.Exit(1)
+		}
+		runVet(os.Args[2])
+	default:
+		// Original behaviour: nanogo-cli <file.go> [timeout-seconds]
+		runFile(os.Args[1], os.Args[2:])
+	}
+}
+
+func printUsage() {
+	fmt.Fprintln(os.Stderr, "usage: nanogo-cli <file.go> [timeout-seconds]")
+	fmt.Fprintln(os.Stderr, "       nanogo-cli fmt <file.go>")
+	fmt.Fprintln(os.Stderr, "       nanogo-cli vet <file.go>")
+}
+
+// runFmt prints the gofmt-formatted version of file to stdout.
+func runFmt(path string) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "read error:", err)
+		os.Exit(1)
+	}
+	formatted, err := interp.FormatSource(string(src))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "format error:", err)
+		os.Exit(1)
+	}
+	fmt.Print(formatted)
+}
+
+// runVet prints vet issues for file and exits with code 1 if any are found.
+func runVet(path string) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "read error:", err)
+		os.Exit(1)
+	}
+	issues, err := interp.VetSource(string(src))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "parse error:", err)
+		os.Exit(1)
+	}
+	for _, issue := range issues {
+		fmt.Printf("%s:%s\n", path, issue)
+	}
+	if len(issues) > 0 {
+		os.Exit(1)
+	}
+}
+
+// runFile executes a Go source file in the interpreter (original behaviour).
+func runFile(path string, extraArgs []string) {
+	src, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "read error:", err)
 		os.Exit(1)
 	}
 
 	timeout := 10 * time.Second
-	if len(os.Args) >= 3 {
-		d, err := time.ParseDuration(os.Args[2] + "s")
+	if len(extraArgs) >= 1 {
+		d, err := time.ParseDuration(extraArgs[0] + "s")
 		if err == nil {
 			timeout = d
 		}
@@ -140,13 +202,12 @@ func registerSafeNatives(vm *interp.Interpreter) {
 		return string(b), nil
 	})
 
-	// Host-proxied HTTP client (simple rate-limited GetText)
+	// Host-proxied HTTP client (simple rate-limited GetText and PostText)
 	var httpMu sync.Mutex
 	var lastReq time.Time
 	minInterval := 200 * time.Millisecond
-	vm.RegisterNative("HTTPGetText", func(args []any) (any, error) {
-		if len(args) == 0 { return "", nil }
-		url := interp.ToString(args[0])
+
+	doHTTP := func(method, url, body, contentType string) (string, error) {
 		httpMu.Lock()
 		now := time.Now()
 		if !lastReq.IsZero() {
@@ -161,7 +222,13 @@ func registerSafeNatives(vm *interp.Interpreter) {
 		httpMu.Unlock()
 
 		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Get(url)
+		var resp *http.Response
+		var err error
+		if method == "POST" {
+			resp, err = client.Post(url, contentType, strings.NewReader(body))
+		} else {
+			resp, err = client.Get(url)
+		}
 		if err != nil { return "", err }
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -170,5 +237,17 @@ func registerSafeNatives(vm *interp.Interpreter) {
 		data, err := io.ReadAll(resp.Body)
 		if err != nil { return "", err }
 		return string(data), nil
+	}
+
+	vm.RegisterNative("HTTPGetText", func(args []any) (any, error) {
+		if len(args) == 0 { return "", nil }
+		return doHTTP("GET", interp.ToString(args[0]), "", "")
+	})
+
+	vm.RegisterNative("HTTPPostText", func(args []any) (any, error) {
+		if len(args) < 2 { return "", nil }
+		contentType := "application/json"
+		if len(args) >= 3 { contentType = interp.ToString(args[2]) }
+		return doHTTP("POST", interp.ToString(args[0]), interp.ToString(args[1]), contentType)
 	})
 }

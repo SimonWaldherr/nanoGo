@@ -698,3 +698,250 @@ func TestHashKey(t *testing.T) {
 		t.Error("int and string should hash differently")
 	}
 }
+
+// ---------- select statement ----------
+
+func TestSelectReceiveReady(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	ch := make(chan int, 1)
+	ch <- 42
+	select {
+	case v := <-ch:
+		fmt.Println(v)
+	default:
+		fmt.Println("default")
+	}
+}
+`)
+	if !strings.Contains(out, "42") {
+		t.Errorf("expected '42', got %q", out)
+	}
+}
+
+func TestSelectDefault(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	ch := make(chan int, 1)
+	select {
+	case v := <-ch:
+		fmt.Println(v)
+	default:
+		fmt.Println("default")
+	}
+}
+`)
+	if !strings.Contains(out, "default") {
+		t.Errorf("expected 'default', got %q", out)
+	}
+}
+
+func TestSelectSend(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	ch := make(chan int, 1)
+	select {
+	case ch <- 7:
+		fmt.Println("sent")
+	default:
+		fmt.Println("blocked")
+	}
+	fmt.Println(<-ch)
+}
+`)
+	if !strings.Contains(out, "sent") || !strings.Contains(out, "7") {
+		t.Errorf("expected 'sent' and '7', got %q", out)
+	}
+}
+
+func TestSelectReceiveOK(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	ch := make(chan string, 1)
+	ch <- "hello"
+	close(ch)
+	select {
+	case v, ok := <-ch:
+		fmt.Println(v)
+		fmt.Println(ok)
+	}
+}
+`)
+	if !strings.Contains(out, "hello") {
+		t.Errorf("expected 'hello', got %q", out)
+	}
+}
+
+// ---------- strconv package ----------
+
+func TestStrconvItoaAtoi(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+import "strconv"
+func main() {
+	s := strconv.Itoa(99)
+	fmt.Println(s)
+	n, _ := strconv.Atoi("42")
+	fmt.Println(n)
+}
+`)
+	if !strings.Contains(out, "99") || !strings.Contains(out, "42") {
+		t.Errorf("expected '99' and '42', got %q", out)
+	}
+}
+
+func TestStrconvFormatBoolParseBool(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+import "strconv"
+func main() {
+	fmt.Println(strconv.FormatBool(true))
+	b, _ := strconv.ParseBool("false")
+	fmt.Println(b)
+}
+`)
+	if !strings.Contains(out, "true") || !strings.Contains(out, "false") {
+		t.Errorf("expected 'true' and 'false', got %q", out)
+	}
+}
+
+// ---------- strings package additions ----------
+
+func TestStringsHasPrefixSuffix(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+import "strings"
+func main() {
+	fmt.Println(strings.HasPrefix("foobar", "foo"))
+	fmt.Println(strings.HasSuffix("foobar", "bar"))
+	fmt.Println(strings.HasPrefix("foobar", "baz"))
+}
+`)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	expected := []string{"true", "true", "false"}
+	for i, want := range expected {
+		if i >= len(lines) || strings.TrimSpace(lines[i]) != want {
+			t.Errorf("line %d: want %q, got %q", i, want, safeIndex(lines, i))
+		}
+	}
+}
+
+func TestStringsTrimPrefixSuffix(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+import "strings"
+func main() {
+	fmt.Println(strings.TrimPrefix("foobar", "foo"))
+	fmt.Println(strings.TrimSuffix("foobar", "bar"))
+	fmt.Println(strings.Count("cheese", "e"))
+	fmt.Println(strings.Index("foobar", "bar"))
+	fmt.Println(strings.Repeat("ab", 3))
+}
+`)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	expected := []string{"bar", "foo", "3", "3", "ababab"}
+	for i, want := range expected {
+		if i >= len(lines) || strings.TrimSpace(lines[i]) != want {
+			t.Errorf("line %d: want %q, got %q", i, want, safeIndex(lines, i))
+		}
+	}
+}
+
+// ---------- math package additions ----------
+
+func TestMathFloorCeilRound(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+import "math"
+func main() {
+	fmt.Println(math.Floor(3.7))
+	fmt.Println(math.Ceil(3.2))
+	fmt.Println(math.Round(3.5))
+	fmt.Println(math.Max(2.0, 5.0))
+	fmt.Println(math.Min(2.0, 5.0))
+}
+`)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	expected := []string{"3", "4", "4", "5", "2"}
+	for i, want := range expected {
+		if i >= len(lines) || strings.TrimSpace(lines[i]) != want {
+			t.Errorf("math line %d: want %q, got %q", i, want, safeIndex(lines, i))
+		}
+	}
+}
+
+func TestMathPiConstant(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+import "math"
+func main() {
+	fmt.Println(math.Pi > 3.14)
+}
+`)
+	if !strings.Contains(out, "true") {
+		t.Errorf("expected 'true' for math.Pi > 3.14, got %q", out)
+	}
+}
+
+// ---------- sort additions ----------
+
+func TestSortStrings(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+import "sort"
+func main() {
+	s := []string{"banana", "apple", "cherry"}
+	sort.Strings(s)
+	fmt.Println(s[0])
+}
+`)
+	if !strings.Contains(out, "apple") {
+		t.Errorf("expected 'apple', got %q", out)
+	}
+}
+
+// ---------- Persistent VM behaviour (REPL scenario) ----------
+
+func TestPersistentVMFunctionAccess(t *testing.T) {
+	// Simulate the REPL's persistent VM: declare a function, then call it in a
+	// separate Run invocation on the same VM.
+	vm, buf := newTestVM()
+	if err := vm.Run("package main\nfunc greet() string { return \"hello\" }\nfunc main() {}\n"); err != nil {
+		t.Fatalf("declare greet: %v", err)
+	}
+	if err := vm.Run("package main\nimport \"fmt\"\nfunc main() { fmt.Println(greet()) }\n"); err != nil {
+		t.Fatalf("call greet: %v", err)
+	}
+	if !strings.Contains(buf.String(), "hello") {
+		t.Errorf("expected 'hello', got %q", buf.String())
+	}
+}
+
+func TestPersistentVMVarPersistence(t *testing.T) {
+	// Simulate the REPL's var conversion: declare a top-level var, then read it.
+	vm, buf := newTestVM()
+	if err := vm.Run("package main\nvar x = 42\nfunc main() {}\n"); err != nil {
+		t.Fatalf("declare x: %v", err)
+	}
+	if err := vm.Run("package main\nimport \"fmt\"\nfunc main() { fmt.Println(x) }\n"); err != nil {
+		t.Fatalf("read x: %v", err)
+	}
+	if !strings.Contains(buf.String(), "42") {
+		t.Errorf("expected '42', got %q", buf.String())
+	}
+}
