@@ -459,6 +459,21 @@ func (vm *Interpreter) evalStmt(s ast.Stmt, env *Env) (controlFlow, error) {
 					goto RHS_DONE
 				}
 			}
+			// Special case: val, err := someFunc()
+			// When there are exactly 2 LHS targets and 1 RHS call expression,
+			// capture the call error as the second value rather than propagating it.
+			// This enables the idiomatic Go pattern: val, err := pkg.Func().
+			if len(st.Lhs) == 2 && len(st.Rhs) == 1 {
+				if _, isCall := r.(*ast.CallExpr); isCall {
+					v, callErr := vm.evalExpr(r, env)
+					if callErr != nil {
+						rightVals = []any{v, callErr}
+					} else {
+						rightVals = []any{v, nil}
+					}
+					goto RHS_DONE
+				}
+			}
 			v, err := vm.evalExpr(r, env); if err != nil { return controlFlow{}, err }
 			rightVals[i] = v
 		}

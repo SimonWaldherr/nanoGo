@@ -477,6 +477,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return "", nil
 	}}
 	vm.RegisterPackage("storage", storPkg)
+
+	// --- os (backed by VFS) ---
+	registerOsPackage(vm)
 }
 
 // ensureNativeWG returns the *sync.WaitGroup associated with a StructVal.
@@ -568,7 +571,163 @@ func (vm *Interpreter) installImportedPackage(alias, path string) {
 	case "fs":
 		if _, ok := vm.packages["fs"]; !ok { RegisterBuiltinPackages(vm) }
 		vm.globals.Vars[alias] = vm.packages["fs"]
+	case "os":
+		if _, ok := vm.packages["os"]; !ok { RegisterBuiltinPackages(vm) }
+		vm.globals.Vars[alias] = vm.packages["os"]
 	default:
 		_ = fmt.Sprintf("unknown import: %s", path)
 	}
+}
+
+// registerOsPackage installs a curated "os" package backed by the interpreter's VFS.
+// It mirrors the most commonly used functions from the standard library os package.
+func registerOsPackage(vm *Interpreter) {
+	vfs := vm.VFS
+
+	// Helper: build a *StructVal representing a FileInfo.
+	fileInfoStruct := func(fi *VFSFileInfo) *StructVal {
+		return &StructVal{TypeName: "FileInfo", Fields: map[string]any{
+			"Name":  fi.Name,
+			"Size":  fi.Size,
+			"IsDir": fi.IsDir,
+			"Mode":  fi.Mode,
+		}}
+	}
+
+	// Helper: build a *SliceVal of DirEntry structs.
+	dirEntrySlice := func(entries []*VFSFileInfo) *SliceVal {
+		sv := &SliceVal{ElementType: "DirEntry", Data: []any{}}
+		for _, e := range entries {
+			sv.Data = append(sv.Data, &StructVal{TypeName: "DirEntry", Fields: map[string]any{
+				"Name":  e.Name,
+				"Size":  e.Size,
+				"IsDir": e.IsDir,
+				"Mode":  e.Mode,
+			}})
+		}
+		return sv
+	}
+
+	osPkg := &Package{Name: "os", Funcs: map[string]*Function{}, Vars: map[string]any{}}
+
+	// os.Args
+	argsSlice := &SliceVal{ElementType: "string", Data: []any{}}
+	for _, a := range vm.Args { argsSlice.Data = append(argsSlice.Data, a) }
+	osPkg.Vars["Args"] = argsSlice
+
+	// os.Stdin / Stdout / Stderr — placeholder structs (no real I/O for now)
+	osPkg.Vars["Stdin"]  = &StructVal{TypeName: "File", Fields: map[string]any{"__fd": 0}}
+	osPkg.Vars["Stdout"] = &StructVal{TypeName: "File", Fields: map[string]any{"__fd": 1}}
+	osPkg.Vars["Stderr"] = &StructVal{TypeName: "File", Fields: map[string]any{"__fd": 2}}
+
+	// os.ReadFile(path) (string, error)
+	osPkg.Funcs["ReadFile"] = &Function{Name: "ReadFile", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if len(args) == 0 { return "", NewRuntimeError("ReadFile: missing path") }
+		data, err := vfs.ReadFile(ToString(args[0]))
+		if err != nil { return "", err }
+		return string(data), nil
+	}}
+
+	// os.WriteFile(path, data, perm)
+	osPkg.Funcs["WriteFile"] = &Function{Name: "WriteFile", Params: []string{"path", "data", "perm"}, Native: func(args []any) (any, error) {
+		if len(args) < 2 { return nil, NewRuntimeError("WriteFile: missing args") }
+		mode := 0644
+		if len(args) >= 3 { mode = ToInt(args[2]) }
+		return nil, vfs.WriteFile(ToString(args[0]), []byte(ToString(args[1])), mode)
+	}}
+
+	// os.Mkdir(path, perm)
+	osPkg.Funcs["Mkdir"] = &Function{Name: "Mkdir", Params: []string{"path", "perm"}, Native: func(args []any) (any, error) {
+		if len(args) == 0 { return nil, NewRuntimeError("Mkdir: missing path") }
+		mode := 0755
+		if len(args) >= 2 { mode = ToInt(args[1]) }
+		return nil, vfs.Mkdir(ToString(args[0]), mode)
+	}}
+
+	// os.MkdirAll(path, perm)
+	osPkg.Funcs["MkdirAll"] = &Function{Name: "MkdirAll", Params: []string{"path", "perm"}, Native: func(args []any) (any, error) {
+		if len(args) == 0 { return nil, NewRuntimeError("MkdirAll: missing path") }
+		mode := 0755
+		if len(args) >= 2 { mode = ToInt(args[1]) }
+		return nil, vfs.MkdirAll(ToString(args[0]), mode)
+	}}
+
+	// os.Remove(path)
+	osPkg.Funcs["Remove"] = &Function{Name: "Remove", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if len(args) == 0 { return nil, NewRuntimeError("Remove: missing path") }
+		return nil, vfs.Remove(ToString(args[0]))
+	}}
+
+	// os.RemoveAll(path)
+	osPkg.Funcs["RemoveAll"] = &Function{Name: "RemoveAll", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if len(args) == 0 { return nil, NewRuntimeError("RemoveAll: missing path") }
+		return nil, vfs.RemoveAll(ToString(args[0]))
+	}}
+
+	// os.Stat(path) (*FileInfo, error)
+	osPkg.Funcs["Stat"] = &Function{Name: "Stat", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if len(args) == 0 { return nil, NewRuntimeError("Stat: missing path") }
+		fi, err := vfs.Stat(ToString(args[0]))
+		if err != nil { return nil, err }
+		return fileInfoStruct(fi), nil
+	}}
+
+	// os.ReadDir(path) ([]DirEntry, error)
+	osPkg.Funcs["ReadDir"] = &Function{Name: "ReadDir", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if len(args) == 0 { return nil, NewRuntimeError("ReadDir: missing path") }
+		entries, err := vfs.ReadDir(ToString(args[0]))
+		if err != nil { return nil, err }
+		return dirEntrySlice(entries), nil
+	}}
+
+	// os.Getenv(key) string
+	osPkg.Funcs["Getenv"] = &Function{Name: "Getenv", Params: []string{"key"}, Native: func(args []any) (any, error) {
+		if len(args) == 0 { return "", nil }
+		return vfs.Getenv(ToString(args[0])), nil
+	}}
+
+	// os.Setenv(key, value) error
+	osPkg.Funcs["Setenv"] = &Function{Name: "Setenv", Params: []string{"key", "value"}, Native: func(args []any) (any, error) {
+		if len(args) < 2 { return nil, NewRuntimeError("Setenv: need key and value") }
+		vfs.Setenv(ToString(args[0]), ToString(args[1]))
+		return nil, nil
+	}}
+
+	// os.Environ() []string
+	osPkg.Funcs["Environ"] = &Function{Name: "Environ", Native: func(args []any) (any, error) {
+		pairs := vfs.Environ()
+		sv := &SliceVal{ElementType: "string", Data: []any{}}
+		for _, p := range pairs { sv.Data = append(sv.Data, p) }
+		return sv, nil
+	}}
+
+	// os.Getwd() (string, error)
+	osPkg.Funcs["Getwd"] = &Function{Name: "Getwd", Native: func(args []any) (any, error) {
+		return vfs.Getwd(), nil
+	}}
+
+	// os.Chdir(path) error
+	osPkg.Funcs["Chdir"] = &Function{Name: "Chdir", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if len(args) == 0 { return nil, NewRuntimeError("Chdir: missing path") }
+		return nil, vfs.Chdir(ToString(args[0]))
+	}}
+
+	// os.TempDir() string
+	osPkg.Funcs["TempDir"] = &Function{Name: "TempDir", Native: func(args []any) (any, error) {
+		return "/tmp", nil
+	}}
+
+	// os.UserHomeDir() (string, error)
+	osPkg.Funcs["UserHomeDir"] = &Function{Name: "UserHomeDir", Native: func(args []any) (any, error) {
+		return "/home/user", nil
+	}}
+
+	// os.Exit(code) — signals exit via a panic so the interpreter unwinds
+	osPkg.Funcs["Exit"] = &Function{Name: "Exit", Params: []string{"code"}, Native: func(args []any) (any, error) {
+		code := 0
+		if len(args) > 0 { code = ToInt(args[0]) }
+		return nil, NewRuntimeError(fmt.Sprintf("os.Exit(%d)", code))
+	}}
+
+	vm.RegisterPackage("os", osPkg)
 }

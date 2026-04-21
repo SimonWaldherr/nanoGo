@@ -5,7 +5,14 @@ MODULE := simonwaldherr.de/go/nanogo
 # Output directories
 BUILD_DIR := build
 
-all: build-wasm build-cli
+all: build-wasm build-cli build-mcp
+
+# ---------- MCP server (Model Context Protocol for LLMs) ----------
+MCP_OUT := $(BUILD_DIR)/nanogo-mcp
+
+build-mcp:
+	@mkdir -p $(BUILD_DIR)
+	go build -o $(MCP_OUT) ./cmd/mcp
 
 # ---------- REPL ----------
 build-repl:
