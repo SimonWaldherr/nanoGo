@@ -633,7 +633,14 @@ func registerOsPackage(vm *Interpreter) {
 		if len(args) < 2 { return nil, NewRuntimeError("WriteFile: missing args") }
 		mode := 0644
 		if len(args) >= 3 { mode = ToInt(args[2]) }
-		return nil, vfs.WriteFile(ToString(args[0]), []byte(ToString(args[1])), mode)
+		var data []byte
+		switch v := args[1].(type) {
+		case []byte:
+			data = v
+		default:
+			data = []byte(ToString(args[1]))
+		}
+		return nil, vfs.WriteFile(ToString(args[0]), data, mode)
 	}}
 
 	// os.Mkdir(path, perm)

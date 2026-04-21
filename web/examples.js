@@ -437,4 +437,194 @@ func main() {
   _ = json.Unmarshal(b, &m)
   fmt.Println("unmarshalled:", m["name"], m["v"])
 }
+`,"Virtual FS (os)": `package main
+
+import (
+  "fmt"
+  "os"
+)
+
+func main() {
+  // Write files to the virtual filesystem
+  err := os.WriteFile("/tmp/hello.txt", "Hello from nanoGo VFS!", 0644)
+  if err != nil {
+    fmt.Println("write error:", err)
+    return
+  }
+  fmt.Println("Wrote /tmp/hello.txt")
+
+  // Read it back
+  content, err := os.ReadFile("/tmp/hello.txt")
+  if err != nil {
+    fmt.Println("read error:", err)
+    return
+  }
+  fmt.Println("Content:", content)
+
+  // Write a second file
+  _ = os.WriteFile("/tmp/data.txt", "line one\nline two\n", 0644)
+
+  // List /tmp directory
+  entries, err := os.ReadDir("/tmp")
+  if err != nil {
+    fmt.Println("readdir error:", err)
+    return
+  }
+  fmt.Println("Files in /tmp:")
+  for _, e := range entries {
+    fmt.Println(" -", e.Name)
+  }
+
+  // Environment variables
+  fmt.Println("HOME:", os.Getenv("HOME"))
+  fmt.Println("TMP:", os.TempDir())
+}
+`,"Closures": `package main
+
+import "fmt"
+
+// counter returns a function that increments and returns a counter.
+func counter(start int) func() int {
+  n := start
+  return func() int {
+    n++
+    return n
+  }
+}
+
+// adder returns a function that adds x to its argument.
+func adder(x int) func(int) int {
+  return func(y int) int { return x + y }
+}
+
+// accumulate returns a closure that sums all values passed to it.
+func accumulate() func(int) int {
+  total := 0
+  return func(v int) int {
+    total += v
+    return total
+  }
+}
+
+func main() {
+  c1 := counter(0)
+  c2 := counter(10)
+  fmt.Println("c1:", c1(), c1(), c1()) // 1 2 3
+  fmt.Println("c2:", c2(), c2())       // 11 12
+
+  add5 := adder(5)
+  fmt.Println("add5(3):", add5(3))   // 8
+  fmt.Println("add5(10):", add5(10)) // 15
+
+  acc := accumulate()
+  fmt.Println("acc(1):", acc(1)) // 1
+  fmt.Println("acc(4):", acc(4)) // 5
+  fmt.Println("acc(5):", acc(5)) // 10
+}
+`,"Error Handling": `package main
+
+import (
+  "fmt"
+  "strconv"
+)
+
+// safeDivide divides a by b, returning an error string on bad input.
+func safeDivide(a, b float64) (float64, string) {
+  if b == 0 {
+    return 0, "division by zero"
+  }
+  return a / b, ""
+}
+
+func main() {
+  result, errMsg := safeDivide(10, 3)
+  if errMsg != "" {
+    fmt.Println("Error:", errMsg)
+  } else {
+    fmt.Printf("10 / 3 = %.4f\n", result)
+  }
+
+  _, errMsg = safeDivide(5, 0)
+  if errMsg != "" {
+    fmt.Println("Expected error:", errMsg)
+  }
+
+  // strconv demonstrates idiomatic val, err pattern
+  n, err := strconv.Atoi("42")
+  if err != nil {
+    fmt.Println("parse error:", err)
+  } else {
+    fmt.Println("Parsed int:", n)
+  }
+
+  _, err = strconv.Atoi("not-a-number")
+  if err != nil {
+    fmt.Println("Expected parse error for non-numeric string")
+  }
+}
+`,"Math": `package main
+
+import (
+  "fmt"
+  "math"
+)
+
+func main() {
+  fmt.Println("Constants:")
+  fmt.Printf("  Pi = %.6f\n", math.Pi)
+  fmt.Printf("  E  = %.6f\n", math.E)
+
+  fmt.Println("Functions:")
+  fmt.Printf("  Sqrt(2)       = %.6f\n", math.Sqrt(2))
+  fmt.Printf("  Pow(2, 10)    = %.0f\n",  math.Pow(2, 10))
+  fmt.Printf("  Abs(-5.5)     = %.1f\n",  math.Abs(-5.5))
+  fmt.Printf("  Floor(3.7)    = %.1f\n",  math.Floor(3.7))
+  fmt.Printf("  Ceil(3.2)     = %.1f\n",  math.Ceil(3.2))
+  fmt.Printf("  Round(3.5)    = %.1f\n",  math.Round(3.5))
+  fmt.Printf("  Log(E)        = %.6f\n",  math.Log(math.E))
+  fmt.Printf("  Log2(1024)    = %.1f\n",  math.Log2(1024))
+  fmt.Printf("  Sin(Pi/2)     = %.6f\n",  math.Sin(math.Pi/2))
+  fmt.Printf("  Cos(Pi)       = %.6f\n",  math.Cos(math.Pi))
+  fmt.Printf("  Max(3.0, 7.0) = %.1f\n",  math.Max(3, 7))
+  fmt.Printf("  Min(3.0, 7.0) = %.1f\n",  math.Min(3, 7))
+}
+`,"Strconv": `package main
+
+import (
+  "fmt"
+  "strconv"
+)
+
+func main() {
+  // int <-> string
+  s := strconv.Itoa(42)
+  fmt.Println("Itoa(42):", s)
+
+  n, err := strconv.Atoi("123")
+  if err != nil {
+    fmt.Println("Atoi error:", err)
+  } else {
+    fmt.Println("Atoi(\"123\"):", n)
+  }
+
+  // float formatting
+  f := strconv.FormatFloat(3.14159, 'f', 3, 64)
+  fmt.Println("FormatFloat(3.14159, 'f', 3):", f)
+
+  // bool <-> string
+  fmt.Println("FormatBool(true):", strconv.FormatBool(true))
+  b, err := strconv.ParseBool("false")
+  if err != nil {
+    fmt.Println("ParseBool error:", err)
+  } else {
+    fmt.Println("ParseBool(\"false\"):", b)
+  }
+
+  // int with base
+  hex := strconv.FormatInt(255, 16)
+  fmt.Println("FormatInt(255, 16):", hex) // ff
+
+  bin := strconv.FormatInt(10, 2)
+  fmt.Println("FormatInt(10, 2):", bin) // 1010
+}
 `};

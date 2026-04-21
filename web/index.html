@@ -724,6 +724,12 @@
       --gradient-bg: linear-gradient(135deg,#fffaf6 0%,#fff1e9 100%);
     }
 
+    /* Styled log line types */
+    .log-line.log-error { color: #f87171; }
+    .log-line.log-warn { color: #fbbf24; }
+    .log-line.log-system { color: var(--text-dim); font-style: italic; }
+    .log-line.log-output { color: var(--text); }
+
     /* Scrollbar Styling */
     ::-webkit-scrollbar {
       width: 8px;
@@ -776,7 +782,11 @@
         </div>
         <button id="shareBtn" title="Share code">📤 Share</button>
         <button id="downloadBtn" title="Download code">💾 Download</button>
-        <a href="https://github.com/SimonWaldherr/nanogo" target="_blank" style="color: var(--accent); text-decoration: none;">
+        <label title="Upload a .go file" style="cursor:pointer; display:inline-flex; align-items:center; gap:4px; padding:0.5rem 0.75rem; background:var(--panel-light); border:1px solid var(--border); border-radius:8px; font-size:0.875rem; transition:all 0.2s ease;">
+          📂 Upload
+          <input id="fileInput" type="file" accept=".go" style="display:none">
+        </label>
+        <a href="https://github.com/SimonWaldherr/nanogo" target="_blank" style="color: var(--accent); text-decoration: none; padding:0.5rem 0.75rem; font-size:0.875rem;">
           📚 GitHub
         </a>
       </div>
@@ -820,9 +830,11 @@
 
       <div class="controls">
         <button id="runBtn" class="primary" disabled>
-          ▶️ Run Code (Ctrl/⌘+Enter)
+          ▶️ Run (Ctrl/⌘+Enter)
         </button>
         <button id="stopBtn" title="Stop running program">⏹️ Stop</button>
+        <button id="formatBtn" title="Format code with gofmt">✨ Format</button>
+        <button id="vetBtn" title="Run static analysis">🔍 Vet</button>
         <button id="clearBtn">🗑️ Clear</button>
         <div class="input-group">
           <label for="modeSelect">Mode:</label>
@@ -834,6 +846,16 @@
         <div class="input-group">
           <label for="scale">Canvas Scale:</label>
           <input id="scale" type="number" value="8" min="1" max="20">
+        </div>
+        <div class="input-group">
+          <label for="fontSize">Font:</label>
+          <select id="fontSize">
+            <option value="12">12px</option>
+            <option value="13">13px</option>
+            <option value="14" selected>14px</option>
+            <option value="16">16px</option>
+            <option value="18">18px</option>
+          </select>
         </div>
       </div>
 
@@ -871,7 +893,11 @@ func main() {
       <div class="output-panel active" id="consolePanel">
         <div class="output-header">
           <span>📋 Console Output</span>
-          <span class="example-badge">Text</span>
+          <span style="display:flex;gap:8px;align-items:center">
+            <span id="execTime" style="font-size:0.75rem;color:var(--text-muted)"></span>
+            <button id="copyLogBtn" class="copy-btn" title="Copy console output">Copy</button>
+            <span class="example-badge">Text</span>
+          </span>
         </div>
         <div class="output-content">
           <div id="log" tabindex="0" class="auto-scroll">Welcome to nanoGo!
@@ -972,6 +998,11 @@ Select an example from the sidebar to get started! 🚀</div>
         , 'Maps & Ranges': { output: 'console', description: 'Map creation and range iteration', badge: 'Utilities' }
         , 'Timer Ticker': { output: 'console', description: 'Timers and tickers for time-based events', badge: 'Time' }
         , 'JSON Roundtrip': { output: 'console', description: 'Marshal and unmarshal JSON', badge: 'Data' }
+        , 'Virtual FS (os)': { output: 'console', description: 'Read, write and list files in the virtual filesystem', badge: 'OS' }
+        , 'Closures': { output: 'console', description: 'Higher-order functions and closures', badge: 'Algorithms' }
+        , 'Error Handling': { output: 'console', description: 'Multi-return error pattern with strconv', badge: 'Algorithms' }
+        , 'Math': { output: 'console', description: 'math package — Sqrt, Pow, Sin, Cos, Log etc.', badge: 'Math' }
+        , 'Strconv': { output: 'console', description: 'strconv — number/bool/string conversions', badge: 'Utilities' }
       };
 
       // Demo information content
@@ -1121,6 +1152,54 @@ Select an example from the sidebar to get started! 🚀</div>
         'JSON Roundtrip': `
           <p><strong>JSON Roundtrip</strong></p>
           <p>Marshal a Go value to JSON and unmarshal it back.</p>
+        `,
+        'Virtual FS (os)': `
+          <p><strong>Virtual Filesystem (os package)</strong></p>
+          <p>Demonstrates the in-memory Unix-like virtual filesystem exposed through the <code>os</code> package.</p>
+          <ul>
+            <li><code>os.WriteFile(path, content, perm)</code> — create/overwrite file</li>
+            <li><code>os.ReadFile(path)</code> — read file contents</li>
+            <li><code>os.ReadDir(path)</code> — list directory entries</li>
+            <li><code>os.Getenv("HOME")</code> — environment variables</li>
+          </ul>
+        `,
+        'Closures': `
+          <p><strong>Closures & Higher-Order Functions</strong></p>
+          <p>Shows how Go functions can close over local variables and be passed/returned as values.</p>
+          <ul>
+            <li>Counter closure with private state</li>
+            <li>Parameterized adder factory</li>
+            <li>Accumulator closure</li>
+          </ul>
+        `,
+        'Error Handling': `
+          <p><strong>Error Handling Patterns</strong></p>
+          <p>Demonstrates idiomatic Go multi-return error handling using strconv.</p>
+          <ul>
+            <li>Multiple return values <code>(result, errMsg)</code></li>
+            <li><code>strconv.Atoi</code> with <code>val, err :=</code> pattern</li>
+            <li>Checking and logging errors</li>
+          </ul>
+        `,
+        'Math': `
+          <p><strong>Math Package</strong></p>
+          <p>Covers constants and functions from the <code>math</code> package.</p>
+          <ul>
+            <li>Constants: <code>math.Pi</code>, <code>math.E</code></li>
+            <li>Rounding: <code>Floor</code>, <code>Ceil</code>, <code>Round</code></li>
+            <li>Trigonometry: <code>Sin</code>, <code>Cos</code></li>
+            <li>Exponential: <code>Pow</code>, <code>Sqrt</code>, <code>Log</code></li>
+          </ul>
+        `,
+        'Strconv': `
+          <p><strong>Strconv Package</strong></p>
+          <p>String/number conversion functions from the <code>strconv</code> standard library.</p>
+          <ul>
+            <li><code>Itoa</code> / <code>Atoi</code> — int ↔ string</li>
+            <li><code>FormatFloat</code> — float → string with precision</li>
+            <li><code>FormatBool</code> / <code>ParseBool</code> — bool ↔ string</li>
+            <li><code>FormatInt(n, base)</code> — hex, binary representations</li>
+          </ul>
         `
       };
 
@@ -1142,6 +1221,12 @@ Select an example from the sidebar to get started! 🚀</div>
       const demoInfo = document.getElementById("demoInfo");
 
       const stopBtn = document.getElementById("stopBtn");
+      const formatBtn = document.getElementById("formatBtn");
+      const vetBtn = document.getElementById("vetBtn");
+      const copyLogBtn = document.getElementById("copyLogBtn");
+      const fileInput = document.getElementById("fileInput");
+      const fontSizeSelect = document.getElementById("fontSize");
+      const execTimeEl = document.getElementById("execTime");
 
       // CodeMirror editor (initialized from the textarea)
       let editor = null;
@@ -1294,17 +1379,19 @@ Select an example from the sidebar to get started! 🚀</div>
       let isFocused = false;
 
       // Enhanced logging with fading and auto-scroll
-      function logMessage(message) {
+      // type: 'output' | 'error' | 'warn' | 'system' (default: 'output')
+      function logMessage(message, type) {
         const timestamp = new Date().toLocaleTimeString();
         const logLine = {
           text: `[${timestamp}] ${message}`,
           element: null,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          type: type || 'output'
         };
 
         // Create log line element
         const lineElement = document.createElement('div');
-        lineElement.className = 'log-line';
+        lineElement.className = 'log-line log-' + (type || 'output');
         lineElement.textContent = logLine.text;
         logLine.element = lineElement;
 
@@ -1345,13 +1432,14 @@ Select an example from the sidebar to get started! 🚀</div>
         logLines.forEach(line => {
           if (!line.element) return;
           
+          const typeClass = 'log-' + (line.type || 'output');
           const age = now - line.timestamp;
           if (age > fadeTimeout * 2) {
-            line.element.className = 'log-line old';
+            line.element.className = 'log-line ' + typeClass + ' old';
           } else if (age > fadeTimeout) {
-            line.element.className = 'log-line fading';
+            line.element.className = 'log-line ' + typeClass + ' fading';
           } else {
-            line.element.className = 'log-line';
+            line.element.className = 'log-line ' + typeClass;
           }
         });
       }
@@ -1360,13 +1448,14 @@ Select an example from the sidebar to get started! 🚀</div>
         if (isFocused || !logLine.element) return;
         
         const age = Date.now() - logLine.timestamp;
+        const typeClass = 'log-' + (logLine.type || 'output');
         if (age >= fadeTimeout) {
-          logLine.element.className = 'log-line fading';
+          logLine.element.className = 'log-line ' + typeClass + ' fading';
           
           // Further fade after another interval
           setTimeout(() => {
             if (!isFocused && logLine.element) {
-              logLine.element.className = 'log-line old';
+              logLine.element.className = 'log-line ' + typeClass + ' old';
             }
           }, fadeTimeout);
         }
@@ -1375,17 +1464,19 @@ Select an example from the sidebar to get started! 🚀</div>
       function clearLog() {
         logEl.innerHTML = "";
         logLines = [];
+        if (execTimeEl) execTimeEl.textContent = '';
         
         // Add initial message
         const initialLine = document.createElement('div');
-        initialLine.className = 'log-line';
+        initialLine.className = 'log-line log-system';
         initialLine.textContent = "🎯 Output cleared. Ready for new execution!";
         logEl.appendChild(initialLine);
         
         logLines.push({
           text: "🎯 Output cleared. Ready for new execution!",
           element: initialLine,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          type: 'system'
         });
 
         // Force scroll to bottom after clearing
@@ -1403,10 +1494,10 @@ Select an example from the sidebar to get started! 🚀</div>
       logEl.addEventListener('focus', () => {
         isFocused = true;
         logEl.classList.add('focused');
-        // Restore all lines to full opacity
+        // Restore all lines to full opacity (preserve type class)
         logLines.forEach(line => {
           if (line.element) {
-            line.element.className = 'log-line';
+            line.element.className = 'log-line log-' + (line.type || 'output');
           }
         });
       });
@@ -1458,8 +1549,8 @@ Select an example from the sidebar to get started! 🚀</div>
         
         if (location.protocol === 'file:') {
           setStatus("Error: Must run on HTTP server, not file://", "error");
-          logMessage("ERROR: WebAssembly requires HTTP/HTTPS protocol.");
-          logMessage("Start a local server: python3 -m http.server 8080");
+          logMessage("ERROR: WebAssembly requires HTTP/HTTPS protocol.", 'error');
+          logMessage("Start a local server: python3 -m http.server 8080", 'system');
           return;
         }
 
@@ -1471,19 +1562,20 @@ Select an example from the sidebar to get started! 🚀</div>
             case 'ready':
               setStatus('Ready', 'ready');
               runBtn.disabled = false;
-              logMessage('🎉 WebAssembly loaded and ready!');
+              logMessage('🎉 WebAssembly loaded and ready!', 'system');
               fillExamples();
               loadCodeFromURL();
               break;
             case 'log':
-              logMessage(String(m.text));
+              logMessage(String(m.text), 'output');
               break;
             case 'warn':
-              logMessage('⚠️ WARN: ' + String(m.text));
+              logMessage('⚠️ WARN: ' + String(m.text), 'warn');
               break;
             case 'error':
-              logMessage('❌ ERROR: ' + String(m.text));
+              logMessage('❌ ERROR: ' + String(m.text), 'error');
               setStatus('Runtime error', 'error');
+              if (execTimeEl) execTimeEl.textContent = '';
               break;
             case 'canvas-size': {
               const w = Number(m.w), h = Number(m.h);
@@ -1503,7 +1595,7 @@ Select an example from the sidebar to get started! 🚀</div>
             case 'dom-setinner': {
               const el = document.getElementById(m.id);
               if (el) el.innerHTML = m.html;
-              logMessage('📄 HTML template rendered');
+              logMessage('📄 HTML template rendered', 'system');
               break;
             }
             case 'dom-setvalue': {
@@ -1529,17 +1621,39 @@ Select an example from the sidebar to get started! 🚀</div>
               try { window.alert(m.text) } catch (e) { console.warn(e) }
               break;
             }
-            case 'done':
-              logMessage('✅ === Execution finished ===');
+            case 'format-result':
+              if (m.error) {
+                logMessage('✨ Format error: ' + m.error, 'error');
+              } else if (m.source != null) {
+                setSource(m.source);
+                logMessage('✨ Code formatted', 'system');
+              }
+              break;
+            case 'vet-result':
+              if (m.error) {
+                logMessage('🔍 Vet error: ' + m.error, 'error');
+              } else if (m.issues && m.issues.length === 0) {
+                logMessage('🔍 Vet: no issues found ✅', 'system');
+              } else if (m.issues) {
+                logMessage('🔍 Vet found ' + m.issues.length + ' issue(s):', 'warn');
+                m.issues.forEach(iss => logMessage('  ' + iss.line + ':' + iss.column + ': ' + iss.message, 'warn'));
+              }
+              break;
+            case 'done': {
+              const elapsed = m.elapsed != null ? m.elapsed : null;
+              const timeStr = elapsed != null ? ` (${elapsed}ms)` : '';
+              logMessage('✅ Execution finished' + timeStr, 'system');
+              if (execTimeEl) execTimeEl.textContent = elapsed != null ? elapsed + 'ms' : '';
               setStatus('Ready', 'ready');
               break;
+            }
             default:
               console.log('worker:', m);
           }
         };
         worker.onerror = (e) => {
           setStatus('Worker error', 'error');
-          logMessage('❌ Worker error: ' + e.message);
+          logMessage('❌ Worker error: ' + e.message, 'error');
         };
         worker.postMessage({ type: 'init' });
       }
@@ -1560,40 +1674,102 @@ Select an example from the sidebar to get started! 🚀</div>
           const ctx = c.getContext('2d');
           ctx.clearRect(0, 0, c.width, c.height);
           
+          if (execTimeEl) execTimeEl.textContent = '';
           localStorage.setItem("nanogo_last", getSource());
-          logMessage('🚀 === Running user code ===');
+          logMessage('🚀 Running…', 'system');
           setStatus('Running code...', 'loading');
           const mode = modeSelect.value || 'stream';
           const t0 = performance.now();
           worker.postMessage({ type: 'run', source: getSource(), mode: mode, t0 });
         } catch (err) {
           setStatus('Runtime error', 'error');
-          logMessage('❌ RUNTIME ERROR: ' + err.message);
+          logMessage('❌ RUNTIME ERROR: ' + err.message, 'error');
         }
       }
 
       runBtn.onclick = runCode;
 
+      if (formatBtn) {
+        formatBtn.onclick = () => {
+          if (!worker) { logMessage('Worker not ready', 'warn'); return; }
+          worker.postMessage({ type: 'format', source: getSource() });
+        };
+      }
+
+      if (vetBtn) {
+        vetBtn.onclick = () => {
+          if (!worker) { logMessage('Worker not ready', 'warn'); return; }
+          worker.postMessage({ type: 'vet', source: getSource() });
+        };
+      }
+
+      if (copyLogBtn) {
+        copyLogBtn.onclick = () => {
+          const text = Array.from(logEl.querySelectorAll('.log-line')).map(el => el.textContent).join('\n');
+          navigator.clipboard.writeText(text).then(() => {
+            copyLogBtn.textContent = 'Copied!';
+            setTimeout(() => { copyLogBtn.textContent = 'Copy'; }, 1500);
+          }, () => {
+            copyLogBtn.textContent = 'Failed';
+            setTimeout(() => { copyLogBtn.textContent = 'Copy'; }, 1500);
+          });
+        };
+      }
+
+      if (fileInput) {
+        fileInput.addEventListener('change', (ev) => {
+          const file = ev.target.files && ev.target.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            setSource(e.target.result);
+            logMessage('📂 Loaded: ' + file.name, 'system');
+            showOutputPanel('console');
+          };
+          reader.readAsText(file);
+          // Reset input so the same file can be re-uploaded
+          fileInput.value = '';
+        });
+      }
+
+      if (fontSizeSelect) {
+        const savedFontSize = localStorage.getItem('nanogo_font_size');
+        if (savedFontSize) fontSizeSelect.value = savedFontSize;
+        function applyFontSize(size) {
+          const px = size + 'px';
+          if (editor && editor.getWrapperElement) {
+            editor.getWrapperElement().style.fontSize = px;
+            editor.refresh();
+          }
+          if (srcEl) srcEl.style.fontSize = px;
+        }
+        applyFontSize(fontSizeSelect.value);
+        fontSizeSelect.addEventListener('change', () => {
+          applyFontSize(fontSizeSelect.value);
+          localStorage.setItem('nanogo_font_size', fontSizeSelect.value);
+        });
+      }
+
       if (stopBtn) {
         stopBtn.onclick = () => {
-          if (!worker) { logMessage('No worker running'); return; }
+          if (!worker) { logMessage('No worker running', 'warn'); return; }
           try {
             worker.terminate();
           } catch (e) {}
           worker = null;
+          if (execTimeEl) execTimeEl.textContent = '';
           setStatus('Stopped', 'error');
-          logMessage('⛔ Execution terminated by user');
+          logMessage('⛔ Execution terminated by user', 'system');
           // Reinitialize the worker so user can run again quickly
           setTimeout(() => startWasmWorker(), 300);
         };
       }
 
       function fillExamples() {
-        // Ensure tag filters are rendered once
+        // Re-render tag filters each time (collect fresh set of badges)
         function renderTagFilters() {
           if (!tagFilters) return;
-          if (tagFilters.dataset.inited) return;
-          // collect unique badges
+          // collect unique badges in insertion order
           const tags = new Set();
           Object.keys(EXAMPLE_CONFIG).forEach(k => { if (EXAMPLES[k]) tags.add(EXAMPLE_CONFIG[k].badge || 'Demo'); });
           // Clear and add 'All'
@@ -1610,7 +1786,6 @@ Select an example from the sidebar to get started! 🚀</div>
             b.onclick = () => { selectedTag = (selectedTag === t ? null : t); document.querySelectorAll('.tag-btn').forEach(btn=>btn.classList.remove('active')); if (selectedTag) b.classList.add('active'); else allBtn.classList.add('active'); fillExamples(); };
             tagFilters.appendChild(b);
           });
-          tagFilters.dataset.inited = '1';
         }
 
         examplesList.innerHTML = "";
@@ -1689,21 +1864,22 @@ Select an example from the sidebar to get started! 🚀</div>
         
         // Create initial welcome message
         const welcomeLines = [
-          "Welcome to nanoGo!",
-          "Select an example from the sidebar to get started!",
-          ""
+          { text: "Welcome to nanoGo!", type: 'system' },
+          { text: "Select an example from the sidebar to get started!", type: 'system' },
+          { text: "", type: 'output' }
         ];
 
-        welcomeLines.forEach(text => {
+        welcomeLines.forEach(({ text, type }) => {
           const lineElement = document.createElement('div');
-          lineElement.className = 'log-line';
+          lineElement.className = 'log-line log-' + type;
           lineElement.textContent = text;
           logEl.appendChild(lineElement);
           
           logLines.push({
             text: text,
             element: lineElement,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            type: type
           });
         });
 
@@ -1736,7 +1912,7 @@ Select an example from the sidebar to get started! 🚀</div>
         const config = EXAMPLE_CONFIG[name] || { output: 'console' };
         showOutputPanel(config.output);
 
-        logMessage(`📖 Loaded example: ${name} (${config.output} output)`);
+        logMessage(`📖 Loaded: ${name}`, 'system');
       }
 
       // Share functionality
@@ -1745,11 +1921,11 @@ Select an example from the sidebar to get started! 🚀</div>
         const url = location.origin + location.pathname + "#code=" + b64;
         navigator.clipboard.writeText(url).then(() => {
           setStatus("Share URL copied!", "ready");
-          logMessage("📤 Share URL copied to clipboard");
+          logMessage("📤 Share URL copied to clipboard", 'system');
           shareBtn.textContent = '✅ Copied!';
           setTimeout(() => shareBtn.textContent = '📤 Share', 2000);
         }, err => {
-          logMessage("❌ Share copy failed: " + err);
+          logMessage("❌ Share copy failed: " + err, 'error');
         });
       };
 
@@ -1761,7 +1937,7 @@ Select an example from the sidebar to get started! 🚀</div>
         a.download = "nanogo-pro-code.go";
         a.click();
         URL.revokeObjectURL(a.href);
-        logMessage("💾 Code downloaded");
+        logMessage("💾 Code downloaded", 'system');
       };
 
       function loadCodeFromURL() {
@@ -1769,16 +1945,16 @@ Select an example from the sidebar to get started! 🚀</div>
         if (hash) {
           try {
             setSource(atob(decodeURIComponent(hash)));
-            logMessage("📥 Code loaded from URL");
+            logMessage("📥 Code loaded from URL", 'system');
             showOutputPanel('console'); // Default to console for shared code
           } catch (e) {
-            logMessage("❌ Failed to load code from URL");
+            logMessage("❌ Failed to load code from URL", 'error');
           }
         } else {
           const saved = localStorage.getItem("nanogo_last");
           if (saved && saved !== EXAMPLES['Basics']) {
             setSource(saved);
-            logMessage("💾 Restored previous session");
+            logMessage("💾 Restored previous session", 'system');
             showOutputPanel('console');
           }
         }
