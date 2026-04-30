@@ -816,8 +816,9 @@ Select an example from the sidebar to get started! 🚀</div>
       const _cellQueue = [];
       let _cellRafScheduled = false;
       // Fallback frame interval (≈ 60 fps) used only when
-      // requestAnimationFrame is unavailable (very old browsers / some
-      // worker contexts). Real browsers will hit the rAF branch.
+      // requestAnimationFrame (rAF) is unavailable in this context (very old
+      // browsers / certain worker scopes). Real browsers will hit the rAF
+      // branch below.
       const FRAME_DELAY_MS = 16;
       function _flushCells() {
         _cellRafScheduled = false;

@@ -6,7 +6,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -115,20 +114,19 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 		switch ex.Kind {
 		case token.INT:
 			// Use strconv to correctly handle 0x, 0o, 0b, and underscored literals.
-			// Bound checks below avoid silent overflow when GOARCH has 32-bit ints
-			// (e.g. js/wasm where int is 32-bit). On 64-bit hosts the bounds are
-			// the natural strconv limits already.
-			if n, err := strconv.ParseInt(ex.Value, 0, 64); err == nil {
-				if n < math.MinInt || n > math.MaxInt {
-					return 0, NewRuntimeError("integer literal out of range: " + ex.Value)
-				}
+			// We pass strconv.IntSize as the bitSize so strconv itself returns an
+			// error for values that don't fit in the platform's `int` type
+			// (notably js/wasm where int is 32-bit). This eliminates the need
+			// for a manual narrowing check on the returned int64.
+			if n, err := strconv.ParseInt(ex.Value, 0, strconv.IntSize); err == nil {
 				return int(n), nil
 			}
-			// Fallback: try unsigned for very large positive constants.
-			if n, err := strconv.ParseUint(ex.Value, 0, 64); err == nil {
-				if n > uint64(math.MaxInt) {
-					return 0, NewRuntimeError("integer literal out of range: " + ex.Value)
-				}
+			// Fallback: try unsigned for very large positive constants
+			// (e.g. 0xFFFFFFFFFFFFFFFF on 64-bit). Again let strconv enforce
+			// the int-sized bound so the conversion below is always safe.
+			// Note we use strconv.IntSize-1 because uint values that exceed
+			// int's positive range must still be rejected when narrowing.
+			if n, err := strconv.ParseUint(ex.Value, 0, strconv.IntSize-1); err == nil {
 				return int(n), nil
 			}
 			return 0, NewRuntimeError("invalid integer literal: " + ex.Value)
@@ -960,11 +958,15 @@ func equals(a, b any) bool {
 		return ok && x == y
 	default:
 		// Guard against uncomparable types (slice/map/func reaching here)
-		// which would otherwise panic on the `==` operator. We intentionally
-		// swallow the recovered value because (a) the only panic shape that
-		// reaches here is the runtime's "comparing uncomparable type" panic,
-		// and (b) the semantically correct answer for that case in this
-		// interpreter is "not equal" rather than aborting the user program.
+		// which would otherwise panic on the `==` operator. The reflect-based
+		// comparability check below handles the common case, but we still
+		// defer-recover defensively because user code could in theory smuggle
+		// in values whose runtime kind disagrees with reported comparability
+		// (e.g. interface boxing of a struct that embeds a slice). For this
+		// interpreter the semantically correct answer in those edge cases is
+		// "not equal" rather than aborting the user's program. Any panic
+		// shape that *isn't* a comparison panic would still be unusual here,
+		// but swallowing it is preferable to crashing the playground.
 		defer func() { _ = recover() }()
 		ra, rb := reflect.ValueOf(a), reflect.ValueOf(b)
 		if !ra.IsValid() || !rb.IsValid() {
