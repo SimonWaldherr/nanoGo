@@ -851,7 +851,7 @@ Select an example from the sidebar to get started! 🚀</div>
         _cellQueue.push({ x: x, y: y, alive: alive });
         if (!_cellRafScheduled) {
           _cellRafScheduled = true;
-          (typeof requestAnimationFrame === 'function'
+          (typeof requestAnimationFrame !== 'undefined' && typeof requestAnimationFrame === 'function'
             ? requestAnimationFrame
             : (cb) => setTimeout(cb, FRAME_DELAY_MS))(_flushCells);
         }

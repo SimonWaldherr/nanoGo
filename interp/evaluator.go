@@ -118,18 +118,11 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 			// error for values that don't fit in the platform's `int` type
 			// (notably js/wasm where int is 32-bit). This eliminates the need
 			// for a manual narrowing check on the returned int64.
-			if n, err := strconv.ParseInt(ex.Value, 0, strconv.IntSize); err == nil {
-				return int(n), nil
+			n, err := strconv.ParseInt(ex.Value, 0, strconv.IntSize)
+			if err != nil {
+				return 0, NewRuntimeError("invalid integer literal: " + ex.Value)
 			}
-			// Fallback: try unsigned for very large positive constants
-			// (e.g. 0xFFFFFFFFFFFFFFFF on 64-bit). Again let strconv enforce
-			// the int-sized bound so the conversion below is always safe.
-			// Note we use strconv.IntSize-1 because uint values that exceed
-			// int's positive range must still be rejected when narrowing.
-			if n, err := strconv.ParseUint(ex.Value, 0, strconv.IntSize-1); err == nil {
-				return int(n), nil
-			}
-			return 0, NewRuntimeError("invalid integer literal: " + ex.Value)
+			return int(n), nil
 		case token.FLOAT:
 			f, err := strconv.ParseFloat(strings.ReplaceAll(ex.Value, "_", ""), 64)
 			if err != nil {
