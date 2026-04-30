@@ -391,6 +391,23 @@ or the MIME type is wrong.
 between releases. Setting `Cache-Control: public, max-age=31536000, immutable`
 turns repeat visits into ~0-byte loads.
 
+### 4. Built-in Service Worker
+
+The playground registers `web/sw.js`, which uses a cache-first strategy for
+the core offline assets:
+
+- `index.html`
+- `styles.css`
+- `wasm_exec.js`
+- `wasm_worker.js`
+- `examples.js`
+- `nanogo.wasm`
+- the CodeMirror CDN files
+
+That means repeat visits can start instantly even when the WASM is large or
+the network is slow. When you change any of those assets, bump the
+`CACHE_NAME` in `web/sw.js` so clients refresh their cached copy immediately.
+
 ## 🎯 Use Cases
 
 ### 1. **Educational Platforms**

@@ -182,7 +182,6 @@ Select an example from the sidebar to get started! 🚀</div>
 
   <!-- Scripts -->
   <script src="wasm_exec.js"></script>
-  <script src="examples.js"></script>
   <script>
     (function() {
       'use strict';
@@ -262,6 +261,36 @@ Select an example from the sidebar to get started! 🚀</div>
         , 'Math': { output: 'console', description: 'math package — Sqrt, Pow, Sin, Cos, Log etc.', badge: 'Math' }
         , 'Strconv': { output: 'console', description: 'strconv — number/bool/string conversions', badge: 'Utilities' }
       };
+
+      const EXAMPLE_NAMES = Object.keys(EXAMPLE_CONFIG).filter(name => name !== 'Empty');
+      window.EXAMPLES = window.EXAMPLES || Object.create(null);
+      let examplesLoaded = Object.keys(window.EXAMPLES).length > 0;
+      let examplesLoadPromise = null;
+
+      function getExampleSource(name) {
+        return window.EXAMPLES ? window.EXAMPLES[name] : undefined;
+      }
+
+      function ensureExamplesLoaded() {
+        if (examplesLoaded) return Promise.resolve(window.EXAMPLES);
+        if (examplesLoadPromise) return examplesLoadPromise;
+        examplesLoadPromise = new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = 'examples.js';
+          script.async = true;
+          script.dataset.nanogoExamples = 'true';
+          script.onload = () => {
+            examplesLoaded = true;
+            resolve(window.EXAMPLES || Object.create(null));
+          };
+          script.onerror = () => {
+            examplesLoadPromise = null;
+            reject(new Error('Failed to load examples.js'));
+          };
+          document.body.appendChild(script);
+        });
+        return examplesLoadPromise;
+      }
 
       // Demo information content
       const DEMO_INFO = {
@@ -624,6 +653,14 @@ Select an example from the sidebar to get started! 🚀</div>
         exampleSearch.addEventListener('input', () => {
           fillExamples();
         });
+        exampleSearch.addEventListener('focus', () => {
+          ensureExamplesLoaded().catch(() => {});
+        }, { once: true });
+      }
+      if (examplesList) {
+        examplesList.addEventListener('pointerenter', () => {
+          ensureExamplesLoaded().catch(() => {});
+        }, { once: true });
       }
 
       function setStatus(message, type = "loading") {
@@ -1084,7 +1121,7 @@ Select an example from the sidebar to get started! 🚀</div>
           if (!tagFilters) return;
           // collect unique badges in insertion order
           const tags = new Set();
-          Object.keys(EXAMPLE_CONFIG).forEach(k => { if (EXAMPLES[k]) tags.add(EXAMPLE_CONFIG[k].badge || 'Demo'); });
+          EXAMPLE_NAMES.forEach(k => { tags.add(EXAMPLE_CONFIG[k].badge || 'Demo'); });
           // Clear and add 'All'
           tagFilters.innerHTML = '';
           const allBtn = document.createElement('button');
@@ -1105,7 +1142,7 @@ Select an example from the sidebar to get started! 🚀</div>
         renderTagFilters();
         const filter = exampleSearch && exampleSearch.value ? exampleSearch.value.trim().toLowerCase() : "";
 
-        Object.keys(EXAMPLES).forEach(name => {
+        EXAMPLE_NAMES.forEach(name => {
           if (name === 'Empty') return; // Skip empty example
           const config = EXAMPLE_CONFIG[name] || { output: 'console', description: 'Go programming example', badge: 'Demo' };
 
@@ -1135,15 +1172,21 @@ Select an example from the sidebar to get started! 🚀</div>
           copyBtn.className = 'copy-btn';
           copyBtn.title = 'Copy example code';
           copyBtn.textContent = 'Copy';
-          copyBtn.onclick = (ev) => {
+          copyBtn.onclick = async (ev) => {
             ev.stopPropagation();
-            navigator.clipboard.writeText(EXAMPLES[name]).then(() => {
+            copyBtn.disabled = true;
+            copyBtn.textContent = '…';
+            try {
+              await ensureExamplesLoaded();
+              await navigator.clipboard.writeText(getExampleSource(name) || '');
               copyBtn.textContent = 'Copied!';
               setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
-            }, () => {
+            } catch (e) {
               copyBtn.textContent = 'Failed';
               setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
-            });
+            } finally {
+              copyBtn.disabled = false;
+            }
           };
 
           const rightCol = document.createElement('div');
@@ -1161,13 +1204,6 @@ Select an example from the sidebar to get started! 🚀</div>
 
         // Initialize enhanced logging (only once on first fill)
         if (!logLines || logLines.length === 0) initializeEnhancedLogging();
-
-        // Auto-select first example when nothing is selected and filter yields items
-        const any = examplesList.querySelector('.example-item');
-        if (any && !currentExample) {
-          const firstNameEl = any.querySelector('.example-name');
-          if (firstNameEl) selectExample(firstNameEl.textContent);
-        }
       }
 
       function initializeEnhancedLogging() {
@@ -1202,11 +1238,17 @@ Select an example from the sidebar to get started! 🚀</div>
         }, 100);
       }
 
-      function selectExample(name) {
-        if (!EXAMPLES[name]) return;
-        
+      async function selectExample(name) {
+        try {
+          await ensureExamplesLoaded();
+        } catch (e) {
+          logMessage('❌ Failed to load examples: ' + e.message, 'error');
+          return;
+        }
+        if (!getExampleSource(name)) return;
+
         currentExample = name;
-        setSource(EXAMPLES[name]);
+        setSource(getExampleSource(name));
 
         // Update active state
         document.querySelectorAll('.example-item').forEach(item => {
@@ -1265,12 +1307,21 @@ Select an example from the sidebar to get started! 🚀</div>
           }
         } else {
           const saved = localStorage.getItem("nanogo_last");
-          if (saved && saved !== EXAMPLES['Basics']) {
+          if (saved) {
             setSource(saved);
             logMessage("💾 Restored previous session", 'system');
             showOutputPanel('console');
           }
         }
+      }
+
+      function registerServiceWorker() {
+        if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('./sw.js').catch((err) => {
+            console.warn('service worker registration failed:', err);
+          });
+        }, { once: true });
       }
 
       // Keyboard shortcuts
@@ -1283,6 +1334,7 @@ Select an example from the sidebar to get started! 🚀</div>
 
       // Initialize
       setStatus('Loading WebAssembly...', 'loading');
+      registerServiceWorker();
       startWasmWorker();
     })();
   </script>
