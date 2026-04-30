@@ -119,6 +119,13 @@ func main() {
 	js.Global().Set("nanoGoSetCanvas", js.FuncOf(jsNanoGoSetCanvas))
 	js.Global().Set("nanoGoSetScale", js.FuncOf(jsNanoGoSetScale))
 
+	// Signal readiness to the host (worker or main thread). The worker
+	// installs `nanoGoSignalReady` before invoking go.run, so this call
+	// resolves the worker's ready promise without any polling.
+	if signal := js.Global().Get("nanoGoSignalReady"); signal.Type() == js.TypeFunction {
+		signal.Invoke()
+	}
+
 	// Block forever for the browser event loop.
 	select {}
 }

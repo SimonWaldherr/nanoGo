@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -112,24 +113,44 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 	case *ast.BasicLit:
 		switch ex.Kind {
 		case token.INT:
-			n := 0
-			for i := 0; i < len(ex.Value); i++ { c := ex.Value[i]; if c < '0' || c > '9' { break }; n = n*10 + int(c-'0') }
-			return n, nil
-		case token.FLOAT:
-			s := ex.Value; dot := strings.IndexByte(s, '.')
-			if dot < 0 { return ToFloat(s), nil }
-			intp := ToInt(s[:dot]); frac := 0.0; base := 1.0
-			for i := dot+1; i < len(s); i++ { frac = frac*10 + float64(s[i]-'0'); base *= 10 }
-			return float64(intp) + frac/base, nil
-		case token.STRING:
-			s := ex.Value; if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' { return s[1:len(s)-1], nil }; return s, nil
-		case token.CHAR:
-			v := ex.Value
-			if len(v) >= 3 && v[0] == '\'' && v[len(v)-1] == '\'' {
-				if v[1] == '\\' && len(v) >= 4 { switch v[2] { case 'n': return int('\n'), nil; case 't': return int('\t'), nil; default: return int(v[2]), nil } }
-				return int(v[1]), nil
+			// Use strconv to correctly handle 0x, 0o, 0b, and underscored literals.
+			if n, err := strconv.ParseInt(ex.Value, 0, 64); err == nil {
+				return int(n), nil
 			}
-			return 0, NewRuntimeError("invalid character literal")
+			// Fallback: try unsigned for very large positive constants.
+			if n, err := strconv.ParseUint(ex.Value, 0, 64); err == nil {
+				return int(n), nil
+			}
+			return 0, NewRuntimeError("invalid integer literal: " + ex.Value)
+		case token.FLOAT:
+			f, err := strconv.ParseFloat(strings.ReplaceAll(ex.Value, "_", ""), 64)
+			if err != nil {
+				return 0.0, NewRuntimeError("invalid float literal: " + ex.Value)
+			}
+			return f, nil
+		case token.STRING:
+			// Use strconv.Unquote to handle escape sequences (\n, \t, \", \\, \uXXXX, ...)
+			// and both interpreted ("...") and raw (`...`) string literals.
+			if s, err := strconv.Unquote(ex.Value); err == nil {
+				return s, nil
+			}
+			// Fallback: strip surrounding quotes if present.
+			s := ex.Value
+			if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+				return s[1 : len(s)-1], nil
+			}
+			return s, nil
+		case token.CHAR:
+			// strconv.UnquoteChar requires the leading quote stripped.
+			v := ex.Value
+			if len(v) < 3 || v[0] != '\'' || v[len(v)-1] != '\'' {
+				return 0, NewRuntimeError("invalid character literal")
+			}
+			r, _, _, err := strconv.UnquoteChar(v[1:len(v)-1], '\'')
+			if err != nil {
+				return 0, NewRuntimeError("invalid character literal: " + v)
+			}
+			return int(r), nil
 		default:
 			return nil, NewRuntimeError(fmt.Sprintf("unsupported basic literal kind: %v", ex.Kind))
 		}
@@ -895,12 +916,49 @@ func typeOfValue(vm *Interpreter, v any) string {
 }
 
 func equals(a, b any) bool {
+	// Handle nil explicitly to avoid surprises with typed nils.
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
 	switch x := a.(type) {
 	case int:     return x == ToInt(b)
 	case float64: return x == ToFloat(b)
 	case bool:    return x == ToBool(b)
 	case string:  return x == ToString(b)
-	case *StructVal: return hashKey(a) == hashKey(b)
-	default:      return a == b
+	case *StructVal:
+		y, ok := b.(*StructVal)
+		if !ok {
+			return false
+		}
+		// Pointer equality first, then structural via hash key.
+		if x == y {
+			return true
+		}
+		return hashKey(a) == hashKey(b)
+	case *SliceVal:
+		// Slices are not comparable in Go (except to nil); use pointer equality.
+		y, ok := b.(*SliceVal)
+		return ok && x == y
+	case *MapVal:
+		y, ok := b.(*MapVal)
+		return ok && x == y
+	case *ChannelVal:
+		y, ok := b.(*ChannelVal)
+		return ok && x == y
+	case *Function:
+		y, ok := b.(*Function)
+		return ok && x == y
+	default:
+		// Guard against uncomparable types (slice/map/func reaching here)
+		// which would otherwise panic on the == operator.
+		defer func() { _ = recover() }()
+		ra, rb := reflect.ValueOf(a), reflect.ValueOf(b)
+		if !ra.IsValid() || !rb.IsValid() {
+			return false
+		}
+		if !ra.Type().Comparable() || !rb.Type().Comparable() {
+			return false
+		}
+		return a == b
 	}
 }
