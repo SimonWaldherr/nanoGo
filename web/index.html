@@ -815,6 +815,10 @@ Select an example from the sidebar to get started! 🚀</div>
       }
       const _cellQueue = [];
       let _cellRafScheduled = false;
+      // Fallback frame interval (≈ 60 fps) used only when
+      // requestAnimationFrame is unavailable (very old browsers / some
+      // worker contexts). Real browsers will hit the rAF branch.
+      const FRAME_DELAY_MS = 16;
       function _flushCells() {
         _cellRafScheduled = false;
         const ctx = _getLifeCtx();
@@ -848,7 +852,7 @@ Select an example from the sidebar to get started! 🚀</div>
           _cellRafScheduled = true;
           (typeof requestAnimationFrame === 'function'
             ? requestAnimationFrame
-            : (cb) => setTimeout(cb, 16))(_flushCells);
+            : (cb) => setTimeout(cb, FRAME_DELAY_MS))(_flushCells);
         }
       }
 

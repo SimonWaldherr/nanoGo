@@ -156,11 +156,11 @@ async function initWasmWorker() {
   ]);
 
   // Make sure references are populated (Go usually puts them on globalThis).
-  self.nanoGoRun     = self.nanoGoRun     || self.globalThis?.nanoGoRun;
-  self.nanoGoSetScale= self.nanoGoSetScale|| self.globalThis?.nanoGoSetScale;
-  self.nanoGoFormat  = self.nanoGoFormat  || self.globalThis?.nanoGoFormat;
-  self.nanoGoVet     = self.nanoGoVet     || self.globalThis?.nanoGoVet;
-  self.nanoGoVersion = self.nanoGoVersion || self.globalThis?.nanoGoVersion;
+  self.nanoGoRun      = self.nanoGoRun      || self.globalThis?.nanoGoRun;
+  self.nanoGoSetScale = self.nanoGoSetScale || self.globalThis?.nanoGoSetScale;
+  self.nanoGoFormat   = self.nanoGoFormat   || self.globalThis?.nanoGoFormat;
+  self.nanoGoVet      = self.nanoGoVet      || self.globalThis?.nanoGoVet;
+  self.nanoGoVersion  = self.nanoGoVersion  || self.globalThis?.nanoGoVersion;
 
   if (typeof self.nanoGoRun !== 'function') {
     throw new Error('nanoGoRun not registered');
