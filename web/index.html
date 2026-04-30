@@ -268,7 +268,7 @@ Select an example from the sidebar to get started! 🚀</div>
       let examplesLoadPromise = null;
 
       function getExampleSource(name) {
-        return window.EXAMPLES ? window.EXAMPLES[name] : undefined;
+        return window.EXAMPLES[name];
       }
 
       function ensureExamplesLoaded() {
@@ -1307,7 +1307,7 @@ Select an example from the sidebar to get started! 🚀</div>
           }
         } else {
           const saved = localStorage.getItem("nanogo_last");
-          if (saved) {
+          if (saved && saved.trim().length > 0) {
             setSource(saved);
             logMessage("💾 Restored previous session", 'system');
             showOutputPanel('console');
