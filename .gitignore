@@ -33,3 +33,12 @@ go.work.sum
 cli
 nanogo-cli
 nanogo-repl
+
+# Build artifacts
+build/
+
+# Pre-compressed WASM variants produced by `make build-wasm-compressed`.
+# The uncompressed nanogo.wasm is intentionally NOT ignored, since it is
+# committed for the static playground deployment.
+web/nanogo.wasm.gz
+web/nanogo.wasm.br

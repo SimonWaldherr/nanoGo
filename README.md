@@ -287,6 +287,13 @@ make all
 # Build WebAssembly module only
 make build-wasm
 
+# Build the WASM and emit pre-compressed .gz / .br variants
+# (brotli is optional; the target falls back gracefully when not installed)
+make build-wasm-compressed
+
+# Print uncompressed / gzip / brotli sizes of web/nanogo.wasm
+make size-report
+
 # Build CLI interpreter
 make build-cli
 
@@ -295,6 +302,9 @@ make build-repl
 
 # Run tests
 make test
+
+# Run a quick timing benchmark of the demo program
+make benchmark
 
 # Clean build artifacts
 make clean
@@ -327,6 +337,59 @@ go test ./cmd/cli
 # Run all tests
 make test
 ```
+
+## ⚡ Performance & Deployment
+
+The web playground ships a single ~7.7 MB `nanogo.wasm` artifact. A few simple
+deployment tweaks dramatically improve cold-load time:
+
+### 1. Serve pre-compressed WASM
+
+`make build-wasm-compressed` produces `web/nanogo.wasm.gz` and (if `brotli` is
+installed) `web/nanogo.wasm.br`. Typical sizes:
+
+| Encoding     | Size          |
+|--------------|---------------|
+| uncompressed | ~7.7 MB       |
+| gzip (-9)    | ~2.0 MB (-74%)|
+| brotli (-11) | ~1.4 MB (-82%)|
+
+Run `make size-report` after building to see the exact numbers for your tree.
+
+#### nginx
+
+```nginx
+location /nanogo.wasm {
+    gzip_static  on;          # serves nanogo.wasm.gz when client supports gzip
+    brotli_static on;         # serves nanogo.wasm.br when client supports br
+    types { application/wasm wasm; }
+    default_type application/wasm;
+    add_header Cache-Control "public, max-age=31536000, immutable";
+}
+```
+
+#### Caddy
+
+```caddyfile
+@wasm path *.wasm
+header @wasm Content-Type application/wasm
+header @wasm Cache-Control "public, max-age=31536000, immutable"
+encode zstd gzip
+```
+
+### 2. Streaming instantiation
+
+The worker uses `WebAssembly.instantiateStreaming(fetch(...), ...)`, so make
+sure your server returns `Content-Type: application/wasm` for `.wasm`
+responses (most modern servers do this automatically). The worker
+transparently falls back to the buffered path if streaming is unavailable
+or the MIME type is wrong.
+
+### 3. HTTP caching
+
+`nanogo.wasm`, `wasm_exec.js`, `app.js`, and CodeMirror are all immutable
+between releases. Setting `Cache-Control: public, max-age=31536000, immutable`
+turns repeat visits into ~0-byte loads.
 
 ## 🎯 Use Cases
 
