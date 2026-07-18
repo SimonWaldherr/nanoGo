@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nanogo-playground-v1';
+const CACHE_NAME = 'nanogo-playground-__BUILD_ID__';
 const PRECACHE_URLS = [
   './',
   './index.html',
