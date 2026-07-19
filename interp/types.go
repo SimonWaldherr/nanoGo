@@ -61,6 +61,46 @@ func (m *MapVal) getByKey(k any) (any, bool) {
 func (m *MapVal) setByKey(k, v any) { h := hashKey(k); m.Data[h] = v; m.Keys[h] = k }
 func (m *MapVal) deleteByKey(k any) { h := hashKey(k); delete(m.Data, h); delete(m.Keys, h) }
 
+// ToNativeValue converts nanoGo's internal container values into ordinary Go
+// values. Native packages use it before handing data to libraries that do not
+// understand MapVal, SliceVal, or StructVal.
+func ToNativeValue(v any) any {
+	switch x := v.(type) {
+	case *MapVal:
+		out := make(map[string]any, len(x.Data))
+		for hashedKey, value := range x.Data {
+			out[fmt.Sprint(x.Keys[hashedKey])] = ToNativeValue(value)
+		}
+		return out
+	case *SliceVal:
+		out := make([]any, len(x.Data))
+		for i, value := range x.Data {
+			out[i] = ToNativeValue(value)
+		}
+		return out
+	case *StructVal:
+		out := make(map[string]any, len(x.Fields))
+		for name, value := range x.Fields {
+			out[name] = ToNativeValue(value)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for key, value := range x {
+			out[key] = ToNativeValue(value)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, value := range x {
+			out[i] = ToNativeValue(value)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
 // ChannelVal models a typed channel with a Go channel underneath.
 type ChannelVal struct {
 	ElementType string

@@ -61,7 +61,7 @@ Running Go in the browser through WebAssembly opens up exciting possibilities th
 - ✅ **Browser Integration**: Special `browser` package for DOM manipulation and canvas drawing
 - ✅ **HTTP Client**: Make HTTP requests from Go code in the browser
 - ✅ **Template Engine**: `text/template` support for dynamic content generation
-- ✅ **Local Storage**: Persist data using browser's localStorage API
+- ✅ **Browser Storage**: Persist data for the active playground session
 - ✅ **Math & Random**: Full `math` and `math/rand` package support
 
 ### Execution Modes
@@ -160,7 +160,7 @@ func main() {
 }
 ```
 
-### Example 3: Browser DOM Manipulation
+### Example 3: Browser DOM & Canvas
 
 ```go
 package main
@@ -168,14 +168,14 @@ package main
 import "browser"
 
 func main() {
-    // Draw shapes on canvas
-    canvas := browser.GetCanvas()
-    canvas.FillRect(10, 10, 50, 50, "blue")
-    canvas.FillCircle(100, 100, 30, "red")
-    
-    // Access browser APIs
-    browser.Alert("Hello from Go!")
-    browser.Log("Debug message from Go")
+    browser.SetHTML("output", "<p>Rendered by nanoGo</p>")
+
+    browser.CanvasSize(8, 8)
+    browser.CanvasSet(1, 1, true)
+    browser.CanvasSet(2, 2, true)
+    browser.CanvasFlush()
+
+    browser.ConsoleLog("Canvas updated")
 }
 ```
 

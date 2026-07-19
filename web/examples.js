@@ -189,7 +189,7 @@ func lifeStep(g [][]int) [][]int {
 
 func main() {
   fmt.Println("Game of Life")
-  w, h := 64, 40
+  w, h := 48, 30
   browser.CanvasSize(w, h)
   grid := make([][]int, h)
   for y := 0; y < h; y++ {
@@ -197,7 +197,7 @@ func main() {
     for x := 0; x < w; x++ { if (x*y + y) % 7 == 0 { row[x] = 1 } }
     grid[y] = row
   }
-  for i := 0; i < 200; i++ {
+  for i := 0; i < 72; i++ {
     for y := 0; y < h; y++ {
       for x := 0; x < w; x++ {
         browser.CanvasSet(x, y, grid[y][x] == 1)
@@ -205,7 +205,7 @@ func main() {
     }
     browser.CanvasFlush()
     grid = lifeStep(grid)
-    time.Sleep(30)
+    time.Sleep(20)
   }
   fmt.Println("done")
 }
@@ -222,10 +222,10 @@ func main() {
   txt := http.GetText("examples.js")
   fmt.Println("fetched len:", len(txt))
 
-  // Store in localStorage
+  // Store in nanoGo's browser storage API
   storage.SetItem("lastFetchLen", fmt.Sprintf("%d", len(txt)))
   v := storage.GetItem("lastFetchLen")
-  fmt.Println("localStorage lastFetchLen:", v)
+  fmt.Println("stored lastFetchLen:", v)
 
   // Show first 60 chars into DOM
   snip := strings.TrimSpace(txt)
@@ -322,11 +322,11 @@ import (
 
 func main() {
   fmt.Println("Bouncing ball demo")
-  w, h := 64, 40
+  w, h := 48, 30
   browser.CanvasSize(w, h)
   x, y := 0, 0
   dx, dy := 1, 1
-  for i := 0; i < 200; i++ {
+  for i := 0; i < 72; i++ {
     // clear
     for yy := 0; yy < h; yy++ { for xx := 0; xx < w; xx++ { browser.CanvasSet(xx, yy, 0==1) } }
     browser.CanvasSet(x, y, 1==1)
@@ -334,7 +334,7 @@ func main() {
     x += dx; y += dy
     if x <= 0 || x >= w-1 { dx = -dx }
     if y <= 0 || y >= h-1 { dy = -dy }
-    time.Sleep(30)
+    time.Sleep(20)
   }
   fmt.Println("done")
 }

@@ -239,19 +239,38 @@ func LocalStorageSetItem(key, value string) {
 	ls := js.Global().Get("localStorage")
 	if ls.Truthy() {
 		ls.Call("setItem", key, value)
+		return
 	}
+	workerStorage().Call("set", key, value)
 }
 
 func LocalStorageGetItem(key string) string {
 	ls := js.Global().Get("localStorage")
-	if !ls.Truthy() {
+	if ls.Truthy() {
+		v := ls.Call("getItem", key)
+		if v.Truthy() {
+			return v.String()
+		}
 		return ""
 	}
-	v := ls.Call("getItem", key)
+	v := workerStorage().Call("get", key)
 	if v.Truthy() {
 		return v.String()
 	}
 	return ""
+}
+
+// workerStorage provides session-scoped storage when the interpreter runs in a
+// Web Worker, where the browser's synchronous localStorage API is unavailable.
+// The map survives subsequent playground runs in the same worker.
+func workerStorage() js.Value {
+	store := js.Global().Get("nanoGoWorkerStorage")
+	if store.Truthy() {
+		return store
+	}
+	store = js.Global().Get("Map").New()
+	js.Global().Set("nanoGoWorkerStorage", store)
+	return store
 }
 
 // ---------------- Native registrations ----------

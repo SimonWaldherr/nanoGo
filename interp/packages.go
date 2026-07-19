@@ -56,7 +56,18 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	vm.RegisterPackage("fmt", fmtPkg)
 
 	// --- time ---
-	timePkg := &Package{Name: "time", Funcs: map[string]*Function{}, Vars: map[string]any{}}
+	timerType := &TypeDef{Name: "Timer", Kind: "struct", Fields: []FieldDef{{Name: "C", Type: "chan int"}}, Methods: map[string]*Function{}}
+	tickerType := &TypeDef{Name: "Ticker", Kind: "struct", Fields: []FieldDef{{Name: "C", Type: "chan int"}}, Methods: map[string]*Function{}}
+	vm.types[timerType.Name] = timerType
+	vm.types[tickerType.Name] = tickerType
+	timerType.Methods["Stop"] = &Function{Name: "Stop", RecvType: "Timer", Native: func(args []any) (any, error) {
+		return stopNativeTimer(args[0]), nil
+	}}
+	tickerType.Methods["Stop"] = &Function{Name: "Stop", RecvType: "Ticker", Native: func(args []any) (any, error) {
+		stopNativeTimer(args[0])
+		return nil, nil
+	}}
+	timePkg := &Package{Name: "time", Funcs: map[string]*Function{}, Vars: map[string]any{}, Types: map[string]*TypeDef{"Timer": timerType, "Ticker": tickerType}}
 	timePkg.Funcs["Now"] = &Function{Name: "Now", Native: func(args []any) (any, error) {
 		return int(time.Now().UnixMilli()), nil
 	}}
@@ -68,6 +79,16 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		if len(args) == 0 { return 0, nil }
 		startMs := ToInt(args[0])
 		return int(time.Since(time.UnixMilli(int64(startMs))).Milliseconds()), nil
+	}}
+	timePkg.Funcs["NewTimer"] = &Function{Name: "NewTimer", Params: []string{"milliseconds"}, Native: func(args []any) (any, error) {
+		milliseconds := 0
+		if len(args) > 0 { milliseconds = ToInt(args[0]) }
+		return newNativeTimer(milliseconds, false)
+	}}
+	timePkg.Funcs["NewTicker"] = &Function{Name: "NewTicker", Params: []string{"milliseconds"}, Native: func(args []any) (any, error) {
+		milliseconds := 0
+		if len(args) > 0 { milliseconds = ToInt(args[0]) }
+		return newNativeTimer(milliseconds, true)
 	}}
 	vm.RegisterPackage("time", timePkg)
 
@@ -109,7 +130,7 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	// Marshal(v any) -> string
 	jsonPkg.Funcs["Marshal"] = &Function{Name: "Marshal", Native: func(args []any) (any, error) {
 		if len(args) == 0 { return "null", nil }
-		b, err := json.Marshal(args[0])
+		b, err := json.Marshal(ToNativeValue(args[0]))
 		if err != nil { return "", err }
 		return string(b), nil
 	}}
@@ -398,35 +419,10 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		tmpl := ToString(args[0])
 		var data any = nil
 		if len(args) > 1 { data = args[1] }
-		// Convert interpreter runtime values (MapVal, SliceVal, StructVal) into native Go types
-		var convert func(any) any
-		convert = func(v any) any {
-			switch x := v.(type) {
-			case *MapVal:
-				out := map[string]any{}
-				for h, vv := range x.Data {
-					// original key may be stored in Keys map
-					orig := x.Keys[h]
-					keyStr := fmt.Sprintf("%v", orig)
-					out[keyStr] = convert(vv)
-				}
-				return out
-			case *SliceVal:
-				arr := make([]any, len(x.Data))
-				for i := range x.Data { arr[i] = convert(x.Data[i]) }
-				return arr
-			case *StructVal:
-				out := map[string]any{}
-				for k, vv := range x.Fields { out[k] = convert(vv) }
-				return out
-			default:
-				return v
-			}
-		}
 		t, err := template.New("tpl").Parse(tmpl)
 		if err != nil { return "", err }
 		var buf bytes.Buffer
-		nativeData := convert(data)
+		nativeData := ToNativeValue(data)
 		if err := t.Execute(&buf, nativeData); err != nil { return "", err }
 		return buf.String(), nil
 	}}
@@ -493,6 +489,67 @@ func ensureNativeWG(v any) *sync.WaitGroup {
 		return wg
 	}
 	return &sync.WaitGroup{}
+}
+
+type nativeTimer struct {
+	stop chan struct{}
+	once sync.Once
+}
+
+func (timer *nativeTimer) Stop() bool {
+	stopped := false
+	timer.once.Do(func() {
+		close(timer.stop)
+		stopped = true
+	})
+	return stopped
+}
+
+func newNativeTimer(milliseconds int, repeating bool) (*StructVal, error) {
+	if milliseconds <= 0 {
+		return nil, NewRuntimeError("timer duration must be positive")
+	}
+	channel := &ChannelVal{ElementType: "int", C: make(chan any, 1)}
+	timer := &nativeTimer{stop: make(chan struct{})}
+	typeName := "Timer"
+	if repeating { typeName = "Ticker" }
+	value := &StructVal{TypeName: typeName, Fields: map[string]any{"C": channel, "__nativeTimer": timer}}
+	duration := time.Duration(milliseconds) * time.Millisecond
+
+	go func() {
+		if !repeating {
+			select {
+			case <-time.After(duration):
+				channel.C <- int(time.Now().UnixMilli())
+			case <-timer.stop:
+			}
+			return
+		}
+
+		ticker := time.NewTicker(duration)
+		defer ticker.Stop()
+		for {
+			select {
+			case now := <-ticker.C:
+				select {
+				case channel.C <- int(now.UnixMilli()):
+				default:
+				}
+			case <-timer.stop:
+				return
+			}
+		}
+	}()
+	return value, nil
+}
+
+func stopNativeTimer(v any) bool {
+	if value, ok := v.(*StructVal); ok {
+		if timer, ok := value.Fields["__nativeTimer"].(*nativeTimer); ok {
+			return timer.Stop()
+		}
+	}
+	return false
 }
 
 // ensureNativeRegexp extracts the *regexp.Regexp from a StructVal.
