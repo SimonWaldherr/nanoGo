@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -1022,6 +1024,90 @@ func TestVFSEnv(t *testing.T) {
 	fs.Setenv("FOO", "bar")
 	if fs.Getenv("FOO") != "bar" {
 		t.Errorf("expected 'bar', got %q", fs.Getenv("FOO"))
+	}
+}
+
+func TestVFSMountFSSnapshotsReadOnlyFiles(t *testing.T) {
+	vfs := NewVFS()
+	source := fstest.MapFS{
+		"hello.txt":         &fstest.MapFile{Data: []byte("hello from embed")},
+		"nested/config.txt": &fstest.MapFile{Data: []byte("enabled=true")},
+	}
+	if err := vfs.MountFS("/assets", source); err != nil {
+		t.Fatalf("MountFS: %v", err)
+	}
+	if data, err := vfs.ReadFile("/assets/nested/config.txt"); err != nil || string(data) != "enabled=true" {
+		t.Fatalf("mounted read = %q, %v", data, err)
+	}
+	if err := vfs.WriteFile("/assets/hello.txt", []byte("mutated"), 0644); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("mounted write error = %v, want read-only", err)
+	}
+	if err := vfs.RemoveAll("/assets"); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("mounted remove error = %v, want read-only", err)
+	}
+}
+
+func TestVFSImportDirAndReaderHaveBoundedSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir+"/nested", 0755); err != nil {
+		t.Fatalf("prepare directory: %v", err)
+	}
+	if err := os.WriteFile(dir+"/nested/file.txt", []byte("from directory"), 0644); err != nil {
+		t.Fatalf("prepare file: %v", err)
+	}
+	vfs := NewVFS()
+	if err := vfs.ImportDir("/import", dir, VFSImportOptions{ReadOnly: true}); err != nil {
+		t.Fatalf("ImportDir: %v", err)
+	}
+	if data, err := vfs.ReadFile("/import/nested/file.txt"); err != nil || string(data) != "from directory" {
+		t.Fatalf("directory import read = %q, %v", data, err)
+	}
+	if err := vfs.ImportReader(context.Background(), "/input/request.txt", strings.NewReader("reader data"), 64); err != nil {
+		t.Fatalf("ImportReader: %v", err)
+	}
+	if data, err := vfs.ReadFile("/input/request.txt"); err != nil || string(data) != "reader data" {
+		t.Fatalf("reader import read = %q, %v", data, err)
+	}
+	if err := vfs.ImportReader(context.Background(), "/input/too-big.txt", strings.NewReader("1234"), 3); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("reader import limit error = %v, want limit", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := vfs.ImportReader(canceled, "/input/canceled.txt", strings.NewReader("never"), 64); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled reader import error = %v, want context.Canceled", err)
+	}
+}
+
+func TestVFSImportFSHonorsConfiguredLimits(t *testing.T) {
+	source := fstest.MapFS{
+		"first.txt":  &fstest.MapFile{Data: []byte("one")},
+		"second.txt": &fstest.MapFile{Data: []byte("two")},
+	}
+	if err := NewVFS().ImportFS("/assets", source, VFSImportOptions{MaxFiles: 1}); err == nil || !strings.Contains(err.Error(), "files") {
+		t.Fatalf("file limit error = %v, want file limit", err)
+	}
+	if err := NewVFS().ImportFS("/assets", source, VFSImportOptions{MaxBytes: 3}); err == nil || !strings.Contains(err.Error(), "bytes") {
+		t.Fatalf("byte limit error = %v, want byte limit", err)
+	}
+}
+
+func TestMountedVFSUsesGuestFilesystemCapability(t *testing.T) {
+	vfs := NewVFS()
+	if err := vfs.MountFS("/assets", fstest.MapFS{"message.txt": &fstest.MapFile{Data: []byte("safe asset")}}); err != nil {
+		t.Fatalf("MountFS: %v", err)
+	}
+	vm, out := newTestVM()
+	vm.VFS = vfs
+	RegisterBuiltinPackages(vm)
+	vm.Capabilities = Capabilities{FileSystem: FileSystemCapabilities{Read: true, ReadPaths: []string{"/assets"}}}
+	if err := vm.Run(`package main
+import "fmt"
+import "os"
+func main() { text, _ := os.ReadFile("/assets/message.txt"); fmt.Println(text) }`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := out.String(); got != "safe asset\n" {
+		t.Fatalf("guest mounted file output = %q", got)
 	}
 }
 

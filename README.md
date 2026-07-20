@@ -363,6 +363,38 @@ must be absolute. This is also applied to host-proxied `fs.ReadFile`, which
 receives the canonical, checked absolute VFS path. A host native must still
 enforce the equivalent policy when it maps that VFS path onto real files.
 
+### Virtual filesystems and safe host imports
+
+`VFS` is an in-memory filesystem that can be shared by selected interpreter
+instances with `NewInterpreterWithVFS`. For host-provided content, use a
+snapshot import rather than exposing a live host directory. `MountFS` accepts
+any `io/fs.FS`—including `embed.FS`—and seals the mounted tree read-only.
+`ImportDir` copies a host folder, while `ImportReader` copies bounded request
+data and checks its context between reads.
+
+```go
+vfs := interp.NewVFS()
+assets, err := fs.Sub(embeddedAssets, "assets")
+if err != nil { log.Fatal(err) }
+if err := vfs.MountFS("/assets", assets); err != nil { log.Fatal(err) }
+
+// Reader data is copied, capped, and never kept as a host Reader reference.
+if err := vfs.ImportReader(ctx, "/input/request.json", request.Body, 1<<20); err != nil {
+    log.Fatal(err)
+}
+
+vm := interp.NewInterpreterWithVFS(vfs)
+vm.Capabilities = interp.Capabilities{FileSystem: interp.FileSystemCapabilities{
+    Read: true, ReadPaths: []string{"/assets", "/input"},
+}}
+```
+
+Imports default to at most `DefaultVFSImportMaxFiles` files and
+`DefaultVFSImportMaxBytes` bytes; tune those values with `VFSImportOptions`.
+Read-only mounts still require the guest's `Read` capability, and never grant
+the guest direct access to the host directory or Reader. See
+[examples/vfs_mount](examples/vfs_mount) for a runnable `embed.FS` example.
+
 ### Local debugging timeline
 
 `debug.Q` is a q-style probe: it preserves the guest expression and its value,

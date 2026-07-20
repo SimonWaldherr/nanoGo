@@ -21,11 +21,12 @@ type VFS struct {
 }
 
 type vfsNode struct {
-	name    string
-	content []byte
-	isDir   bool
-	modTime time.Time
-	mode    int
+	name     string
+	content  []byte
+	isDir    bool
+	readOnly bool
+	modTime  time.Time
+	mode     int
 }
 
 // VFSFileInfo describes a file or directory entry returned by Stat / ReadDir.
@@ -123,8 +124,12 @@ func (fs *VFS) WriteFile(p string, data []byte, mode int) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	abs := cleanPath(p, fs.cwd)
+	if fs.readOnlyPathLocked(abs) {
+		return fmt.Errorf("write %s: read-only filesystem", p)
+	}
 	parent := path.Dir(abs)
-	if _, ok := fs.nodes[parent]; !ok {
+	parentNode, ok := fs.nodes[parent]
+	if !ok || !parentNode.isDir {
 		return fmt.Errorf("open %s: no such file or directory", p)
 	}
 	content := make([]byte, len(data))
@@ -147,8 +152,12 @@ func (fs *VFS) Mkdir(p string, mode int) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	abs := cleanPath(p, fs.cwd)
+	if fs.readOnlyPathLocked(abs) {
+		return fmt.Errorf("mkdir %s: read-only filesystem", p)
+	}
 	parent := path.Dir(abs)
-	if _, ok := fs.nodes[parent]; !ok {
+	parentNode, ok := fs.nodes[parent]
+	if !ok || !parentNode.isDir {
 		return fmt.Errorf("mkdir %s: no such file or directory", p)
 	}
 	if _, ok := fs.nodes[abs]; ok {
@@ -166,6 +175,9 @@ func (fs *VFS) MkdirAll(p string, mode int) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	abs := cleanPath(p, fs.cwd)
+	if fs.readOnlyPathLocked(abs) {
+		return fmt.Errorf("mkdir %s: read-only filesystem", p)
+	}
 	if mode == 0 {
 		mode = 0755
 	}
@@ -188,6 +200,9 @@ func (fs *VFS) Remove(p string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	abs := cleanPath(p, fs.cwd)
+	if fs.readOnlyPathLocked(abs) {
+		return fmt.Errorf("remove %s: read-only filesystem", p)
+	}
 	node, ok := fs.nodes[abs]
 	if !ok {
 		return fmt.Errorf("remove %s: no such file or directory", p)
@@ -208,6 +223,9 @@ func (fs *VFS) RemoveAll(p string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	abs := cleanPath(p, fs.cwd)
+	if fs.readOnlyPathLocked(abs) {
+		return fmt.Errorf("remove %s: read-only filesystem", p)
+	}
 	if _, ok := fs.nodes[abs]; !ok {
 		return nil // not an error per os.RemoveAll contract
 	}
@@ -285,4 +303,17 @@ func (fs *VFS) Environ() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// readOnlyPathLocked reports whether abs is within a read-only mounted tree.
+// The caller must hold fs.mu for reading or writing.
+func (fs *VFS) readOnlyPathLocked(abs string) bool {
+	for current := abs; ; current = path.Dir(current) {
+		if node, ok := fs.nodes[current]; ok && node.readOnly {
+			return true
+		}
+		if current == "/" {
+			return false
+		}
+	}
 }
