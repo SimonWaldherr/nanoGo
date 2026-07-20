@@ -26,16 +26,23 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 	if err != nil {
 		return err
 	}
+	vm.emitTrace("run_start", "main", "", nil)
 	defer func() {
 		// A guest goroutine must not outlive its host invocation. All evaluator
 		// and channel waits observe this cancellation and unwind cooperatively.
 		exec.cancel()
 		exec.wg.Wait()
+		message := "ok"
+		if err != nil {
+			message = err.Error()
+		}
+		vm.emitTrace("run_end", "main", message, nil)
 		vm.endExecution(exec)
 	}()
 
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "input.go", src, 0)
+	exec.fset = fset
 	if err != nil {
 		return err
 	}
@@ -427,6 +434,14 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 			if pid, ok := sel.X.(*ast.Ident); ok {
 				if p, ok := vm.get(pid.Name, vm.globals); ok {
 					if p, ok := p.(*Package); ok {
+						if p.Name == "debug" {
+							switch sel.Sel.Name {
+							case "Q":
+								return vm.traceDebugQ(ex, env)
+							case "Mark":
+								return vm.traceDebugMark(ex, env)
+							}
+						}
 						member, ok2 := vm.resolvePackageSelector(p, sel.Sel.Name)
 						if !ok2 {
 							return nil, NewRuntimeError("unknown package member: " + pid.Name + "." + sel.Sel.Name)
@@ -1386,6 +1401,8 @@ func (vm *Interpreter) evalStmt(s ast.Stmt, env *Env) (controlFlow, error) {
 		go func() {
 			defer exec.wg.Done()
 			defer exec.releaseGoroutine()
+			vm.emitTrace("goroutine_start", fn.Name, "", st)
+			defer vm.emitTrace("goroutine_end", fn.Name, "", st)
 			_, _ = vm.callFunction(fn, vm.globals, recv, args)
 		}()
 		return controlFlow{}, nil
@@ -1466,6 +1483,7 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 	if err := vm.executionError(); err != nil {
 		return nil, err
 	}
+	vm.emitTrace("call_start", fn.Name, "", nil)
 	// Run defers in LIFO order on exit; also handle panic unwinding.
 	frame := &callFrame{defers: []func(){}}
 	defer func() {
@@ -1479,6 +1497,11 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 				err = pe
 			}
 		}
+		message := "ok"
+		if err != nil {
+			message = err.Error()
+		}
+		vm.emitTrace("call_end", fn.Name, message, nil)
 	}()
 
 	// Native function?

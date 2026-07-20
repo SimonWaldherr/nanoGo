@@ -18,7 +18,8 @@ import (
 )
 
 // RegisterBuiltinPackages installs a tiny, curated set of std-like packages:
-// fmt, time, math, encoding/json, sync, regexp, strings, sort, math/rand, browser, text/template, http, storage.
+// fmt, time, math, encoding/json, sync, regexp, strings, sort, math/rand,
+// browser, text/template, http, fs, os, storage, and debug.
 func RegisterBuiltinPackages(vm *Interpreter) {
 
 	// --- fmt ---
@@ -76,6 +77,19 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return ToString(res), nil
 	}}
 	vm.RegisterPackage("fmt", fmtPkg)
+
+	// --- debug ---
+	// debug.Q and debug.Mark are intercepted in evalExpr so they can retain the
+	// original expression text, just like q-style print debugging. Their output
+	// goes to the optional host-owned Tracer rather than guest stdout.
+	debugPkg := &Package{Name: "debug", Funcs: map[string]*Function{}}
+	debugPkg.Funcs["Q"] = &Function{Name: "Q", IsVariadic: true, Native: func([]any) (any, error) {
+		return nil, NewRuntimeError("debug.Q must be called directly")
+	}}
+	debugPkg.Funcs["Mark"] = &Function{Name: "Mark", Params: []string{"label"}, Native: func([]any) (any, error) {
+		return nil, NewRuntimeError("debug.Mark must be called directly")
+	}}
+	vm.RegisterPackage("debug", debugPkg)
 
 	// --- time ---
 	timerType := &TypeDef{Name: "Timer", Kind: "struct", Fields: []FieldDef{{Name: "C", Type: "chan int"}}, Methods: map[string]*Function{}}
@@ -622,17 +636,26 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	// --- http (very simple: GetText, PostText) ---
 	httpPkg := &Package{Name: "http", Funcs: map[string]*Function{}}
 	httpPkg.Funcs["GetText"] = &Function{Name: "GetText", Params: []string{"url"}, Native: func(args []any) (any, error) {
+		if len(args) == 0 {
+			return "", NewRuntimeError("http.GetText: missing URL")
+		}
+		if err := vm.requireHTTP(ToString(args[0])); err != nil {
+			return "", err
+		}
 		if n, ok := vm.natives["HTTPGetText"]; ok {
 			v, err := n([]any{ToString(args[0])})
 			return v, err
 		}
-		return "", nil
+		return "", NewRuntimeError("HTTP host native not available")
 	}}
 	httpPkg.Funcs["PostText"] = &Function{Name: "PostText", IsVariadic: true, Native: func(args []any) (any, error) {
 		// PostText(url, body [, contentType])
 		// contentType defaults to "application/json" when omitted.
 		if len(args) < 2 {
-			return "", nil
+			return "", NewRuntimeError("http.PostText: missing URL or body")
+		}
+		if err := vm.requireHTTP(ToString(args[0])); err != nil {
+			return "", err
 		}
 		contentType := "application/json"
 		if len(args) >= 3 {
@@ -642,13 +665,16 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 			v, err := n([]any{ToString(args[0]), ToString(args[1]), contentType})
 			return v, err
 		}
-		return "", nil
+		return "", NewRuntimeError("HTTP host native not available")
 	}}
 	vm.RegisterPackage("http", httpPkg)
 
 	// --- fs (read-only, host-proxied) ---
 	fsPkg := &Package{Name: "fs", Funcs: map[string]*Function{}}
 	fsPkg.Funcs["ReadFile"] = &Function{Name: "ReadFile", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if err := vm.requireFileRead("fs.ReadFile"); err != nil {
+			return "", err
+		}
 		if n, ok := vm.natives["HostReadFile"]; ok {
 			v, err := n([]any{ToString(args[0])})
 			return v, err
@@ -843,6 +869,11 @@ func (vm *Interpreter) installImportedPackage(alias, path string) {
 			RegisterBuiltinPackages(vm)
 		} // idempotent
 		vm.globals.Vars[alias] = vm.packages["fmt"]
+	case "debug":
+		if _, ok := vm.packages["debug"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
+		vm.declare(alias, vm.packages["debug"], vm.globals)
 	case "time":
 		if _, ok := vm.packages["time"]; !ok {
 			RegisterBuiltinPackages(vm)
@@ -932,6 +963,8 @@ func (vm *Interpreter) installImportedPackage(alias, path string) {
 // It mirrors the most commonly used functions from the standard library os package.
 func registerOsPackage(vm *Interpreter) {
 	vfs := vm.VFS
+	requireRead := func(operation string) error { return vm.requireFileRead(operation) }
+	requireWrite := func(operation string) error { return vm.requireFileWrite(operation) }
 
 	// Helper: build a *StructVal representing a FileInfo.
 	fileInfoStruct := func(fi *VFSFileInfo) *StructVal {
@@ -973,6 +1006,9 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.ReadFile(path) (string, error)
 	osPkg.Funcs["ReadFile"] = &Function{Name: "ReadFile", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if err := requireRead("os.ReadFile"); err != nil {
+			return "", err
+		}
 		if len(args) == 0 {
 			return "", NewRuntimeError("ReadFile: missing path")
 		}
@@ -985,6 +1021,9 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.WriteFile(path, data, perm)
 	osPkg.Funcs["WriteFile"] = &Function{Name: "WriteFile", Params: []string{"path", "data", "perm"}, Native: func(args []any) (any, error) {
+		if err := requireWrite("os.WriteFile"); err != nil {
+			return nil, err
+		}
 		if len(args) < 2 {
 			return nil, NewRuntimeError("WriteFile: missing args")
 		}
@@ -1004,6 +1043,9 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Mkdir(path, perm)
 	osPkg.Funcs["Mkdir"] = &Function{Name: "Mkdir", Params: []string{"path", "perm"}, Native: func(args []any) (any, error) {
+		if err := requireWrite("os.Mkdir"); err != nil {
+			return nil, err
+		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("Mkdir: missing path")
 		}
@@ -1016,6 +1058,9 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.MkdirAll(path, perm)
 	osPkg.Funcs["MkdirAll"] = &Function{Name: "MkdirAll", Params: []string{"path", "perm"}, Native: func(args []any) (any, error) {
+		if err := requireWrite("os.MkdirAll"); err != nil {
+			return nil, err
+		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("MkdirAll: missing path")
 		}
@@ -1028,6 +1073,9 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Remove(path)
 	osPkg.Funcs["Remove"] = &Function{Name: "Remove", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if err := requireWrite("os.Remove"); err != nil {
+			return nil, err
+		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("Remove: missing path")
 		}
@@ -1036,6 +1084,9 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.RemoveAll(path)
 	osPkg.Funcs["RemoveAll"] = &Function{Name: "RemoveAll", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if err := requireWrite("os.RemoveAll"); err != nil {
+			return nil, err
+		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("RemoveAll: missing path")
 		}
@@ -1044,6 +1095,9 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Stat(path) (*FileInfo, error)
 	osPkg.Funcs["Stat"] = &Function{Name: "Stat", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if err := requireRead("os.Stat"); err != nil {
+			return nil, err
+		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("Stat: missing path")
 		}
@@ -1056,6 +1110,9 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.ReadDir(path) ([]DirEntry, error)
 	osPkg.Funcs["ReadDir"] = &Function{Name: "ReadDir", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if err := requireRead("os.ReadDir"); err != nil {
+			return nil, err
+		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("ReadDir: missing path")
 		}
@@ -1068,6 +1125,9 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Getenv(key) string
 	osPkg.Funcs["Getenv"] = &Function{Name: "Getenv", Params: []string{"key"}, Native: func(args []any) (any, error) {
+		if err := requireRead("os.Getenv"); err != nil {
+			return "", err
+		}
 		if len(args) == 0 {
 			return "", nil
 		}
@@ -1076,6 +1136,9 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Setenv(key, value) error
 	osPkg.Funcs["Setenv"] = &Function{Name: "Setenv", Params: []string{"key", "value"}, Native: func(args []any) (any, error) {
+		if err := requireWrite("os.Setenv"); err != nil {
+			return nil, err
+		}
 		if len(args) < 2 {
 			return nil, NewRuntimeError("Setenv: need key and value")
 		}
@@ -1085,6 +1148,9 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Environ() []string
 	osPkg.Funcs["Environ"] = &Function{Name: "Environ", Native: func(args []any) (any, error) {
+		if err := requireRead("os.Environ"); err != nil {
+			return nil, err
+		}
 		pairs := vfs.Environ()
 		sv := &SliceVal{ElementType: "string", Data: []any{}}
 		for _, p := range pairs {
@@ -1100,6 +1166,9 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Chdir(path) error
 	osPkg.Funcs["Chdir"] = &Function{Name: "Chdir", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		if err := requireWrite("os.Chdir"); err != nil {
+			return nil, err
+		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("Chdir: missing path")
 		}

@@ -485,6 +485,9 @@ func runCode(source string, vfs *interp.VFS, timeout time.Duration) (output stri
 	defer cancel()
 
 	vm := interp.NewInterpreterWithVFS(vfs)
+	// The MCP server deliberately shares its session VFS with guest code, but
+	// does not grant the guest network access merely because the host has it.
+	vm.Capabilities.FileSystem = interp.FileSystemCapabilities{Read: true, Write: true}
 	write := func(prefix string, args []any) {
 		if len(args) == 0 {
 			return

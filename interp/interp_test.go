@@ -11,6 +11,9 @@ import (
 
 func newTestVM() (*Interpreter, *strings.Builder) {
 	vm := NewInterpreter()
+	// Most interpreter tests exercise package behaviour rather than the
+	// capability policy itself; policy-specific tests use a fresh zero-policy VM.
+	vm.Capabilities = FullCapabilities()
 	var buf strings.Builder
 
 	vm.RegisterNative("ConsoleLog", func(args []any) (any, error) {
@@ -1188,6 +1191,8 @@ func TestSharedVFSAcrossInterpreters(t *testing.T) {
 
 	registerTestNatives(vm1)
 	registerTestNatives(vm2)
+	vm1.Capabilities = FullCapabilities()
+	vm2.Capabilities = FullCapabilities()
 
 	// vm1 writes a file.
 	src1 := "package main\nimport \"os\"\nfunc main() { _ = os.WriteFile(\"/tmp/shared.txt\", \"shared data\", 0644) }\n"
@@ -1360,5 +1365,140 @@ func main() {
 }`)
 	if !errors.Is(err, ErrGoroutineLimit) {
 		t.Fatalf("Run error = %v, want ErrGoroutineLimit", err)
+	}
+}
+
+func TestCapabilitiesDenyFilesystemAndNetworkByDefault(t *testing.T) {
+	vm := NewInterpreter()
+	RegisterBuiltinPackages(vm)
+	vm.RegisterNative("HostReadFile", func([]any) (any, error) {
+		t.Fatal("host read native must not be called when filesystem is denied")
+		return "", nil
+	})
+	vm.RegisterNative("HTTPGetText", func([]any) (any, error) {
+		t.Fatal("HTTP native must not be called when network is denied")
+		return "", nil
+	})
+
+	err := vm.Run(`package main
+import "fs"
+func main() { fs.ReadFile("secret.txt") }`)
+	if err == nil || !strings.Contains(err.Error(), "filesystem read denied") {
+		t.Fatalf("filesystem error = %v, want denied", err)
+	}
+	err = vm.Run(`package main
+import "http"
+func main() { http.GetText("https://api.example.com/data") }`)
+	if err == nil || !strings.Contains(err.Error(), "network access denied") {
+		t.Fatalf("network error = %v, want denied", err)
+	}
+}
+
+func TestCapabilitiesAllowOnlyConfiguredHosts(t *testing.T) {
+	vm := NewInterpreter()
+	vm.Capabilities = Capabilities{Network: NetworkCapabilities{
+		HTTP:         true,
+		AllowedHosts: []string{"api.example.com", "*.trusted.test"},
+	}}
+	vm.RegisterNative("HTTPGetText", func(args []any) (any, error) {
+		return "ok:" + ToString(args[0]), nil
+	})
+	RegisterBuiltinPackages(vm)
+
+	err := vm.Run(`package main
+import "http"
+func main() { http.GetText("https://api.example.com/v1") }`)
+	if err != nil {
+		t.Fatalf("allowed host error = %v", err)
+	}
+	err = vm.Run(`package main
+import "http"
+func main() { http.GetText("https://evil.example.com/") }`)
+	if err == nil || !strings.Contains(err.Error(), "host evil.example.com") {
+		t.Fatalf("disallowed host error = %v, want denied host", err)
+	}
+	err = vm.Run(`package main
+import "http"
+func main() { http.GetText("http://127.0.0.1:8080/") }`)
+	if err == nil || !strings.Contains(err.Error(), "host 127.0.0.1") {
+		t.Fatalf("private host error = %v, want denied host", err)
+	}
+}
+
+func TestTracerCapturesQStyleDebugEvents(t *testing.T) {
+	vm, _ := newTestVM()
+	tracer := NewTracer(16)
+	vm.SetTracer(tracer)
+	if err := vm.Run(`package main
+import "debug"
+func main() {
+    total := 40 + 2
+    debug.Q(total, total*2)
+    debug.Mark("after calculation")
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	events := tracer.Events()
+	var qEvent, markEvent *TraceEvent
+	for i := range events {
+		switch events[i].Kind {
+		case "debug_q":
+			qEvent = &events[i]
+		case "debug_mark":
+			markEvent = &events[i]
+		}
+	}
+	if qEvent == nil || !strings.Contains(qEvent.Message, "total = 42") || !strings.Contains(qEvent.Message, "total * 2 = 84") {
+		t.Fatalf("missing q-style values in events: %#v", events)
+	}
+	if markEvent == nil || markEvent.Message != "after calculation" {
+		t.Fatalf("missing debug marker in events: %#v", events)
+	}
+	if qEvent.Location.Line == 0 || qEvent.Sequence >= markEvent.Sequence {
+		t.Fatalf("trace events are missing source order: q=%#v mark=%#v", qEvent, markEvent)
+	}
+}
+
+func TestTracerUsesBoundedChronologicalRing(t *testing.T) {
+	tracer := NewTracer(2)
+	tracer.record(TraceEvent{Kind: "one"})
+	tracer.record(TraceEvent{Kind: "two"})
+	tracer.record(TraceEvent{Kind: "three"})
+	events := tracer.Events()
+	if len(events) != 2 || events[0].Kind != "two" || events[1].Kind != "three" {
+		t.Fatalf("ring events = %#v", events)
+	}
+}
+
+func TestTracerRecordsGuestGoroutineLifecycle(t *testing.T) {
+	vm, _ := newTestVM()
+	tracer := NewTracer(16)
+	vm.SetTracer(tracer)
+	if err := vm.Run(`package main
+import "debug"
+func main() {
+    done := make(chan int)
+    go func() {
+        debug.Q("worker")
+        done <- 1
+    }()
+    <-done
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	events := tracer.Events()
+	seenStart, seenEnd, seenQ := false, false, false
+	for _, event := range events {
+		switch event.Kind {
+		case "goroutine_start":
+			seenStart = true
+		case "goroutine_end":
+			seenEnd = true
+		case "debug_q":
+			seenQ = true
+		}
+	}
+	if !seenStart || !seenEnd || !seenQ {
+		t.Fatalf("incomplete guest-goroutine trace: %#v", events)
 	}
 }

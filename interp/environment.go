@@ -57,11 +57,16 @@ type Interpreter struct {
 	// specific limit for a trusted workload.
 	Limits ExecutionLimits
 
+	// Capabilities gates the curated filesystem and HTTP packages. The zero
+	// value denies those capabilities; configure it before RunContext.
+	Capabilities Capabilities
+
 	// runMu serializes complete executions; a VM has mutable globals and is not
 	// safe to execute concurrently. execution is atomic because every AST node
 	// checks it; this keeps cancellation checks off the mutex fast path.
 	runMu     sync.Mutex
 	execution atomic.Pointer[execution]
+	tracer    atomic.Pointer[Tracer]
 }
 
 // DefaultMaxContainerSize is the maximum slice, map hint, or channel capacity

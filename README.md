@@ -290,6 +290,56 @@ go run ./examples/host_bridge
 go run ./examples/resource_limits
 ```
 
+### Capability policy: filesystem and network
+
+The curated `os`, `fs`, and `http` packages are **deny-by-default**. Registering
+a host native alone does not grant the matching package permission: configure
+the interpreter before `RunContext`.
+
+```go
+vm.Capabilities = interp.Capabilities{
+    FileSystem: interp.FileSystemCapabilities{
+        Read:  true,
+        Write: false, // os.WriteFile, Remove, Mkdir, Chdir, Setenv stay denied
+    },
+    Network: interp.NetworkCapabilities{
+        HTTP:         true,
+        AllowedHosts: []string{"api.example.com", "*.trusted.example"},
+        // Literal private/loopback IPs remain denied by default.
+    },
+}
+```
+
+`AllowedHosts` is matched against the URL host before the HTTP host-native is
+called. An empty allow-list means any host after explicitly setting `HTTP: true`.
+The transport native must still enforce DNS/IP egress restrictions, because DNS
+can resolve a permitted hostname to an internal IP address. `FullCapabilities()`
+exists for trusted development code only. Direct `RegisterNative` functions are
+explicit host capabilities and must enforce their own authorization.
+
+### Local debugging timeline
+
+`debug.Q` is a q-style probe: it preserves the guest expression and its value,
+but records it in a host-owned tracer rather than writing to guest stdout.
+`debug.Mark` adds a named timeline marker. `Tracer.Events()` provides a bounded,
+chronological trace of runs, calls, guest goroutines, denied capabilities, and
+debug probes—well suited to a traceGL-like timeline or a custom local UI.
+
+```go
+tracer := interp.NewTracer(2_048)
+vm.SetTracer(tracer)
+
+// Guest source: import "debug"; debug.Q(total); debug.Mark("before send")
+if err := vm.RunContext(ctx, source); err != nil { /* ... */ }
+for _, event := range tracer.Events() {
+    fmt.Println(event.Sequence, event.Kind, event.Location, event.Message)
+}
+```
+
+The tracer is in-memory and bounded; it does not grant the guest filesystem or
+network access. See [examples/capabilities](examples/capabilities) and
+[examples/debug_trace](examples/debug_trace) for runnable host programs.
+
 ## 🏗️ Architecture
 
 ### Interpreter Design

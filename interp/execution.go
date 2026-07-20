@@ -2,6 +2,7 @@ package interp
 
 import (
 	"context"
+	"go/token"
 	"sync"
 	"sync/atomic"
 )
@@ -12,6 +13,7 @@ type execution struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	limits ExecutionLimits
+	fset   *token.FileSet
 
 	killed     atomic.Bool
 	limitCause atomic.Uint32

@@ -21,6 +21,9 @@ func jsNanoGoRun(this js.Value, args []js.Value) any {
 	source := args[0].String()
 
 	vm := interp.NewInterpreter()
+	// Browser requests remain subject to same-origin/CORS rules. Filesystem
+	// access stays denied; the browser host intentionally enables HTTP only.
+	vm.Capabilities.Network.HTTP = true
 
 	// Register stdlib-like host natives and built-in packages (fmt, time, math, json, sync, regexp, strings, sort, math/rand, browser, text/template, http, storage).
 	runtime.RegisterHostNatives(vm, &activeCanvas)

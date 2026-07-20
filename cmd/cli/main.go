@@ -106,7 +106,14 @@ func runFile(path string, extraArgs []string) {
 // RunSafe executes untrusted Go source inside the nanoGo interpreter
 // with a context-based timeout. It recovers from panics so the host
 // application is never crashed by user code.
-func RunSafe(source string, timeout time.Duration) (retErr error) {
+func RunSafe(source string, timeout time.Duration) error {
+	return RunSafeWithCapabilities(source, timeout, interp.Capabilities{})
+}
+
+// RunSafeWithCapabilities executes guest code with an explicit capability
+// policy. RunSafe uses the zero policy, which denies the curated filesystem and
+// HTTP packages even if the CLI host has registered matching natives.
+func RunSafeWithCapabilities(source string, timeout time.Duration, capabilities interp.Capabilities) (retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			retErr = fmt.Errorf("panic recovered: %v", r)
@@ -116,7 +123,7 @@ func RunSafe(source string, timeout time.Duration) (retErr error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	err := runInterpreted(ctx, source)
+	err := runInterpreted(ctx, source, capabilities)
 	if errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("execution timed out after %s: %w", timeout, err)
 	}
@@ -125,8 +132,9 @@ func RunSafe(source string, timeout time.Duration) (retErr error) {
 
 // runInterpreted creates a sandboxed interpreter, registers only the
 // host functions we choose to expose, and executes the source.
-func runInterpreted(ctx context.Context, source string) error {
+func runInterpreted(ctx context.Context, source string, capabilities interp.Capabilities) error {
 	vm := interp.NewInterpreter()
+	vm.Capabilities = capabilities
 	registerSafeNatives(vm)
 	interp.RegisterBuiltinPackages(vm)
 	return vm.RunContext(ctx, source)
@@ -171,7 +179,9 @@ func registerSafeNatives(vm *interp.Interpreter) {
 
 	// Host-proxied read-only file access (whitelist).
 	vm.RegisterNative("HostReadFile", func(args []any) (any, error) {
-		if len(args) == 0 { return "", nil }
+		if len(args) == 0 {
+			return "", nil
+		}
 		p := interp.ToString(args[0])
 		// Clean and forbid absolute or upward paths
 		clean := filepath.Clean(p)
@@ -183,17 +193,26 @@ func registerSafeNatives(vm *interp.Interpreter) {
 		ok := false
 		for _, a := range allowed {
 			if clean == a || strings.HasPrefix(clean, a+string(filepath.Separator)) {
-				ok = true; break
+				ok = true
+				break
 			}
 		}
-		if !ok { return nil, fmt.Errorf("access denied: path not in whitelist") }
+		if !ok {
+			return nil, fmt.Errorf("access denied: path not in whitelist")
+		}
 		wd, err := os.Getwd()
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		full := filepath.Join(wd, clean)
 		// Ensure the file is inside the repo working directory
-		if !strings.HasPrefix(full, wd) { return nil, fmt.Errorf("access denied") }
+		if !strings.HasPrefix(full, wd) {
+			return nil, fmt.Errorf("access denied")
+		}
 		b, err := os.ReadFile(full)
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		return string(b), nil
 	})
 
@@ -227,31 +246,45 @@ func registerSafeNatives(vm *interp.Interpreter) {
 		var err error
 		if method == "POST" {
 			request, err = http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
-			if err == nil { request.Header.Set("Content-Type", contentType) }
+			if err == nil {
+				request.Header.Set("Content-Type", contentType)
+			}
 		} else {
 			request, err = http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		}
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		resp, err := client.Do(request)
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return "", fmt.Errorf("HTTP status %d", resp.StatusCode)
 		}
 		data, err := io.ReadAll(resp.Body)
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		return string(data), nil
 	}
 
 	vm.RegisterNativeContext("HTTPGetText", func(ctx context.Context, args []any) (any, error) {
-		if len(args) == 0 { return "", nil }
+		if len(args) == 0 {
+			return "", nil
+		}
 		return doHTTP(ctx, "GET", interp.ToString(args[0]), "", "")
 	})
 
 	vm.RegisterNativeContext("HTTPPostText", func(ctx context.Context, args []any) (any, error) {
-		if len(args) < 2 { return "", nil }
+		if len(args) < 2 {
+			return "", nil
+		}
 		contentType := "application/json"
-		if len(args) >= 3 { contentType = interp.ToString(args[2]) }
+		if len(args) >= 3 {
+			contentType = interp.ToString(args[2])
+		}
 		return doHTTP(ctx, "POST", interp.ToString(args[0]), interp.ToString(args[1]), contentType)
 	})
 }
