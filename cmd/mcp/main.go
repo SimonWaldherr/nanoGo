@@ -6,14 +6,14 @@
 //
 // Exposed MCP tools:
 //
-//   run_code   – execute Go source in the nanoGo interpreter; returns stdout
-//   fmt_code   – gofmt-format Go source
-//   vet_code   – static-analysis checks on Go source
-//   vfs_read   – read a file from the session virtual filesystem
-//   vfs_write  – write a file to the session virtual filesystem
-//   vfs_list   – list directory contents in the virtual filesystem
-//   vfs_mkdir  – create a directory in the virtual filesystem
-//   vfs_remove – remove a file or directory from the virtual filesystem
+//	run_code   – execute Go source in the nanoGo interpreter; returns stdout
+//	fmt_code   – gofmt-format Go source
+//	vet_code   – static-analysis checks on Go source
+//	vfs_read   – read a file from the session virtual filesystem
+//	vfs_write  – write a file to the session virtual filesystem
+//	vfs_list   – list directory contents in the virtual filesystem
+//	vfs_mkdir  – create a directory in the virtual filesystem
+//	vfs_remove – remove a file or directory from the virtual filesystem
 //
 // The server maintains a single VFS per process lifetime; code executed with
 // run_code can read/write files that were created with the vfs_* tools.
@@ -24,9 +24,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"simonwaldherr.de/go/nanogo/interp"
@@ -471,6 +473,7 @@ func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
 // It captures all fmt.Print*/browser.ConsoleLog output and returns it as a string.
 func runCode(source string, vfs *interp.VFS, timeout time.Duration) (output string, retErr error) {
 	var buf strings.Builder
+	var bufMu sync.Mutex
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -481,60 +484,40 @@ func runCode(source string, vfs *interp.VFS, timeout time.Duration) (output stri
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	type result struct {
-		out string
-		err error
+	vm := interp.NewInterpreterWithVFS(vfs)
+	write := func(prefix string, args []any) {
+		if len(args) == 0 {
+			return
+		}
+		bufMu.Lock()
+		buf.WriteString(prefix)
+		buf.WriteString(interp.ToString(args[0]))
+		buf.WriteByte('\n')
+		bufMu.Unlock()
 	}
-	done := make(chan result, 1)
+	// Guest goroutines can log concurrently, so capture output behind a mutex.
+	vm.RegisterNative("ConsoleLog", func(args []any) (any, error) { write("", args); return nil, nil })
+	vm.RegisterNative("ConsoleWarn", func(args []any) (any, error) { write("[warn] ", args); return nil, nil })
+	vm.RegisterNative("ConsoleError", func(args []any) (any, error) { write("[error] ", args); return nil, nil })
+	vm.RegisterNative("__hostSprintf", func(args []any) (any, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		format := interp.ToString(args[0])
+		fmtArgs := make([]any, 0, len(args)-1)
+		for _, a := range args[1:] {
+			fmtArgs = append(fmtArgs, a)
+		}
+		return fmt.Sprintf(format, fmtArgs...), nil
+	})
 
-	go func() {
-		vm := interp.NewInterpreterWithVFS(vfs)
-
-		// Capture console output.
-		vm.RegisterNative("ConsoleLog", func(args []any) (any, error) {
-			if len(args) > 0 {
-				buf.WriteString(interp.ToString(args[0]))
-				buf.WriteByte('\n')
-			}
-			return nil, nil
-		})
-		vm.RegisterNative("ConsoleWarn", func(args []any) (any, error) {
-			if len(args) > 0 {
-				buf.WriteString("[warn] ")
-				buf.WriteString(interp.ToString(args[0]))
-				buf.WriteByte('\n')
-			}
-			return nil, nil
-		})
-		vm.RegisterNative("ConsoleError", func(args []any) (any, error) {
-			if len(args) > 0 {
-				buf.WriteString("[error] ")
-				buf.WriteString(interp.ToString(args[0]))
-				buf.WriteByte('\n')
-			}
-			return nil, nil
-		})
-		vm.RegisterNative("__hostSprintf", func(args []any) (any, error) {
-			if len(args) == 0 {
-				return "", nil
-			}
-			format := interp.ToString(args[0])
-			fmtArgs := make([]any, 0, len(args)-1)
-			for _, a := range args[1:] {
-				fmtArgs = append(fmtArgs, a)
-			}
-			return fmt.Sprintf(format, fmtArgs...), nil
-		})
-
-		interp.RegisterBuiltinPackages(vm)
-		err := vm.Run(source)
-		done <- result{out: buf.String(), err: err}
-	}()
-
-	select {
-	case res := <-done:
-		return res.out, res.err
-	case <-ctx.Done():
-		return buf.String(), fmt.Errorf("execution timed out after %s", timeout)
+	interp.RegisterBuiltinPackages(vm)
+	retErr = vm.RunContext(ctx, source)
+	bufMu.Lock()
+	output = buf.String()
+	bufMu.Unlock()
+	if errors.Is(retErr, context.DeadlineExceeded) {
+		return output, fmt.Errorf("execution timed out after %s: %w", timeout, retErr)
 	}
+	return output, retErr
 }

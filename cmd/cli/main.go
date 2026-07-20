@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -115,26 +116,20 @@ func RunSafe(source string, timeout time.Duration) (retErr error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	done := make(chan error, 1)
-	go func() {
-		done <- runInterpreted(source)
-	}()
-
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		return fmt.Errorf("execution timed out after %s", timeout)
+	err := runInterpreted(ctx, source)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("execution timed out after %s: %w", timeout, err)
 	}
+	return err
 }
 
 // runInterpreted creates a sandboxed interpreter, registers only the
 // host functions we choose to expose, and executes the source.
-func runInterpreted(source string) error {
+func runInterpreted(ctx context.Context, source string) error {
 	vm := interp.NewInterpreter()
 	registerSafeNatives(vm)
 	interp.RegisterBuiltinPackages(vm)
-	return vm.Run(source)
+	return vm.RunContext(ctx, source)
 }
 
 // registerSafeNatives installs only the minimal set of host functions
@@ -207,14 +202,20 @@ func registerSafeNatives(vm *interp.Interpreter) {
 	var lastReq time.Time
 	minInterval := 200 * time.Millisecond
 
-	doHTTP := func(method, url, body, contentType string) (string, error) {
+	doHTTP := func(ctx context.Context, method, url, body, contentType string) (string, error) {
 		httpMu.Lock()
 		now := time.Now()
 		if !lastReq.IsZero() {
 			wait := minInterval - now.Sub(lastReq)
 			if wait > 0 {
 				httpMu.Unlock()
-				time.Sleep(wait)
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return "", ctx.Err()
+				}
 				httpMu.Lock()
 			}
 		}
@@ -222,13 +223,16 @@ func registerSafeNatives(vm *interp.Interpreter) {
 		httpMu.Unlock()
 
 		client := &http.Client{Timeout: 5 * time.Second}
-		var resp *http.Response
+		var request *http.Request
 		var err error
 		if method == "POST" {
-			resp, err = client.Post(url, contentType, strings.NewReader(body))
+			request, err = http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
+			if err == nil { request.Header.Set("Content-Type", contentType) }
 		} else {
-			resp, err = client.Get(url)
+			request, err = http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		}
+		if err != nil { return "", err }
+		resp, err := client.Do(request)
 		if err != nil { return "", err }
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -239,15 +243,15 @@ func registerSafeNatives(vm *interp.Interpreter) {
 		return string(data), nil
 	}
 
-	vm.RegisterNative("HTTPGetText", func(args []any) (any, error) {
+	vm.RegisterNativeContext("HTTPGetText", func(ctx context.Context, args []any) (any, error) {
 		if len(args) == 0 { return "", nil }
-		return doHTTP("GET", interp.ToString(args[0]), "", "")
+		return doHTTP(ctx, "GET", interp.ToString(args[0]), "", "")
 	})
 
-	vm.RegisterNative("HTTPPostText", func(args []any) (any, error) {
+	vm.RegisterNativeContext("HTTPPostText", func(ctx context.Context, args []any) (any, error) {
 		if len(args) < 2 { return "", nil }
 		contentType := "application/json"
 		if len(args) >= 3 { contentType = interp.ToString(args[2]) }
-		return doHTTP("POST", interp.ToString(args[0]), interp.ToString(args[1]), contentType)
+		return doHTTP(ctx, "POST", interp.ToString(args[0]), interp.ToString(args[1]), contentType)
 	})
 }

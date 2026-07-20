@@ -225,6 +225,71 @@ func main() {
 }
 ```
 
+### Controlled execution, timeout, and host messaging
+
+Use `RunContext` whenever source is not fully trusted. It checks the context
+while evaluating code and while waiting on nanoGo channels, `select`,
+`time.Sleep`, and nanoGo's `sync.WaitGroup`. `Kill` provides the same
+cooperative interruption for a currently running interpreter.
+
+`HostChannel` is a bidirectional bridge with two intentionally separate guest
+variables: `hostIn` accepts host-to-guest data, while `hostOut` sends data back
+to the host. Guest code cannot close either endpoint or write to `hostIn`.
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+defer cancel()
+
+vm := interp.NewInterpreter()
+interp.RegisterBuiltinPackages(vm)
+
+bridge := interp.NewHostChannel(16)
+if err := vm.BindHostChannel("hostIn", "hostOut", bridge); err != nil {
+	log.Fatal(err)
+}
+
+if err := bridge.Send(ctx, "ping"); err != nil {
+	log.Fatal(err)
+}
+err := vm.RunContext(ctx, `package main
+func main() {
+	request := <-hostIn
+	hostOut <- "echo: " + request
+}`)
+if err != nil {
+	log.Fatal(err)
+}
+reply, err := bridge.Receive(ctx) // "echo: ping"
+```
+
+`Run` remains available for compatibility and uses a background context. An
+interpreter allows one active run at a time. Cancellation is cooperative: a
+legacy host native that blocks indefinitely cannot be forcibly killed by Go.
+For blocking host work, register it with `RegisterNativeContext`, which receives
+the current `context.Context`. The default interpreter also limits allocations
+made through `make` and `append` to `DefaultMaxContainerSize` entries; set
+`vm.MaxContainerSize` before execution when a trusted workload needs more.
+
+For deterministic limits in addition to a wall-clock context, configure
+`vm.Limits`. `MaxSteps` caps evaluator checkpoints and `MaxGoroutines` caps
+simultaneously active guest goroutines. Set an individual value to `0` only for
+trusted code where that restriction should be disabled.
+
+```go
+vm.Limits = interp.ExecutionLimits{
+    MaxSteps:      5_000_000,
+    MaxGoroutines: 64,
+}
+```
+
+Runnable host integrations are available in [examples/host_bridge](examples/host_bridge)
+and [examples/resource_limits](examples/resource_limits):
+
+```bash
+go run ./examples/host_bridge
+go run ./examples/resource_limits
+```
+
 ## 🏗️ Architecture
 
 ### Interpreter Design

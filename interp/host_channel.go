@@ -1,0 +1,239 @@
+package interp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+)
+
+// ErrHostChannelClosed is returned when the host closes one side of a bridge.
+var ErrHostChannelClosed = errors.New("nanogo: host channel closed")
+
+// HostChannel is a bidirectional, cancellation-aware bridge between a Go host
+// and guest code. BindHostChannel exposes its two endpoints as separate guest
+// channel variables: input is host -> nanoGo, output is nanoGo -> host.
+//
+// The host owns closure. Guest code cannot close either endpoint, so untrusted
+// code cannot tear down the transport or send after a close race.
+type HostChannel struct {
+	inbound  chan any
+	outbound chan any
+
+	inputDone  chan struct{}
+	outputDone chan struct{}
+	inputOnce  sync.Once
+	outputOnce sync.Once
+}
+
+// NewHostChannel creates a bridge with the same buffer capacity in both
+// directions. A buffer of zero creates synchronous backpressure.
+func NewHostChannel(buffer int) *HostChannel {
+	if buffer < 0 {
+		buffer = 0
+	}
+	return &HostChannel{
+		inbound:    make(chan any, buffer),
+		outbound:   make(chan any, buffer),
+		inputDone:  make(chan struct{}),
+		outputDone: make(chan struct{}),
+	}
+}
+
+// Send transfers a supported value from the Go host to nanoGo. Primitive
+// values, maps, and slices are copied into nanoGo runtime values; pointers,
+// functions, structs, and other host capabilities are rejected rather than
+// leaked to guest code.
+func (c *HostChannel) Send(ctx context.Context, value any) error {
+	if c == nil {
+		return ErrHostChannelClosed
+	}
+	v, err := bridgeToGuest(value)
+	if err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case c.inbound <- v:
+		return nil
+	case <-c.inputDone:
+		return ErrHostChannelClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Receive transfers the next guest value to the Go host as ordinary Go data.
+func (c *HostChannel) Receive(ctx context.Context) (any, error) {
+	if c == nil {
+		return nil, ErrHostChannelClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case value := <-c.outbound:
+		return bridgeToHost(value)
+	case <-c.outputDone:
+		return nil, ErrHostChannelClosed
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// CloseInput stops host -> guest traffic. A guest receive observes a closed
+// channel once buffered messages have been consumed.
+func (c *HostChannel) CloseInput() {
+	if c != nil {
+		c.inputOnce.Do(func() { close(c.inputDone) })
+	}
+}
+
+// CloseOutput stops guest -> host traffic and unblocks a guest sender.
+func (c *HostChannel) CloseOutput() {
+	if c != nil {
+		c.outputOnce.Do(func() { close(c.outputDone) })
+	}
+}
+
+// Close closes both directions of the bridge. It is safe to call repeatedly.
+func (c *HostChannel) Close() {
+	c.CloseInput()
+	c.CloseOutput()
+}
+
+// BindHostChannel adds two guest globals before execution starts. inputName is
+// receive-only in guest code; outputName is send-only. This directionality is
+// intentional: it prevents guest code from impersonating the host or stealing
+// messages it just emitted.
+func (vm *Interpreter) BindHostChannel(inputName, outputName string, channel *HostChannel) error {
+	if channel == nil {
+		return errors.New("nanogo: nil host channel")
+	}
+	if !validGuestIdentifier(inputName) || !validGuestIdentifier(outputName) || inputName == outputName {
+		return errors.New("nanogo: host channel names must be distinct Go identifiers")
+	}
+	vm.runMu.Lock()
+	defer vm.runMu.Unlock()
+	if vm.execution.Load() != nil {
+		return errors.New("nanogo: bind host channels before RunContext")
+	}
+	vm.declare(inputName, &ChannelVal{
+		ElementType: "any", C: channel.inbound, done: channel.inputDone,
+		hostOwned: true, direction: channelReceiveOnly,
+	}, vm.globals)
+	vm.declare(outputName, &ChannelVal{
+		ElementType: "any", C: channel.outbound, done: channel.outputDone,
+		hostOwned: true, direction: channelSendOnly,
+	}, vm.globals)
+	return nil
+}
+
+func validGuestIdentifier(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if (r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') || (i > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	switch name {
+	case "break", "default", "func", "interface", "select", "case", "defer", "go", "map", "struct", "chan", "else", "goto", "package", "switch", "const", "fallthrough", "if", "range", "type", "continue", "for", "import", "return", "var":
+		return false
+	}
+	return true
+}
+
+func bridgeToGuest(value any) (any, error) {
+	switch v := value.(type) {
+	case nil, bool, string, int, int64, float64:
+		return v, nil
+	case []byte:
+		out := &SliceVal{ElementType: "byte", Data: make([]any, len(v))}
+		for i := range v {
+			out.Data[i] = int(v[i])
+		}
+		return out, nil
+	case []any:
+		out := &SliceVal{ElementType: "any", Data: make([]any, len(v))}
+		for i, item := range v {
+			converted, err := bridgeToGuest(item)
+			if err != nil {
+				return nil, err
+			}
+			out.Data[i] = converted
+		}
+		return out, nil
+	case []string:
+		out := &SliceVal{ElementType: "string", Data: make([]any, len(v))}
+		for i := range v {
+			out.Data[i] = v[i]
+		}
+		return out, nil
+	case []int:
+		out := &SliceVal{ElementType: "int", Data: make([]any, len(v))}
+		for i := range v {
+			out.Data[i] = v[i]
+		}
+		return out, nil
+	case map[string]any:
+		out := &MapVal{KeyType: "string", ElementType: "any", Data: map[string]any{}, Keys: map[string]any{}}
+		for key, item := range v {
+			converted, err := bridgeToGuest(item)
+			if err != nil {
+				return nil, err
+			}
+			out.setByKey(key, converted)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("nanogo: unsupported host channel value %T", value)
+	}
+}
+
+func bridgeToHost(value any) (any, error) {
+	switch v := value.(type) {
+	case nil, bool, string, int, int64, float64:
+		return v, nil
+	case *SliceVal:
+		out := make([]any, len(v.Data))
+		for i, item := range v.Data {
+			converted, err := bridgeToHost(item)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = converted
+		}
+		return out, nil
+	case *MapVal:
+		out := make(map[string]any, len(v.Data))
+		for hashed, item := range v.Data {
+			converted, err := bridgeToHost(item)
+			if err != nil {
+				return nil, err
+			}
+			out[fmt.Sprint(v.Keys[hashed])] = converted
+		}
+		return out, nil
+	case *StructVal:
+		out := make(map[string]any, len(v.Fields))
+		for name, item := range v.Fields {
+			if strings.HasPrefix(name, "__") {
+				continue
+			}
+			converted, err := bridgeToHost(item)
+			if err != nil {
+				return nil, err
+			}
+			out[name] = converted
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("nanogo: unsupported guest channel value %T", value)
+	}
+}

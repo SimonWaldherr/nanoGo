@@ -3,14 +3,15 @@ package interp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
 	mrand "math/rand"
 	"regexp"
 	"sort"
-	strlib "strings"
 	"strconv"
+	strlib "strings"
 	"sync"
 	"text/template"
 	"time"
@@ -26,31 +27,52 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		// Join with spaces + newline
 		out := ""
 		for i, a := range args {
-			if i > 0 { out += " " }
+			if i > 0 {
+				out += " "
+			}
 			out += ToString(a)
 		}
 		// Reuse ConsoleLog via host
-		if nfun, ok := vm.natives["ConsoleLog"]; ok { _, _ = nfun([]any{out}) }
+		if nfun, ok := vm.natives["ConsoleLog"]; ok {
+			_, _ = nfun([]any{out})
+		}
 		return len(out), nil
 	}}
 	fmtPkg.Funcs["Printf"] = &Function{Name: "Printf", IsVariadic: true, Native: func(args []any) (any, error) {
-		if len(args) == 0 { return 0, nil }
+		if len(args) == 0 {
+			return 0, nil
+		}
 		format := ToString(args[0])
 		rest := args[1:]
 		// Use host-provided sprintf wrapper to avoid re-implementing format parsing
 		sp, ok := vm.natives["__hostSprintf"]
-		if !ok { return 0, NewRuntimeError("host sprintf not available") }
+		if !ok {
+			return 0, NewRuntimeError("host sprintf not available")
+		}
 		res, err := sp(append([]any{format}, rest...))
-		if err != nil { return 0, err }
+		if err != nil {
+			return 0, err
+		}
 		out := ToString(res)
-		if nfun, ok := vm.natives["ConsoleLog"]; ok { _, _ = nfun([]any{out}) }
+		if nfun, ok := vm.natives["ConsoleLog"]; ok {
+			_, _ = nfun([]any{out})
+		}
 		return len(out), nil
 	}}
 	fmtPkg.Funcs["Sprintf"] = &Function{Name: "Sprintf", IsVariadic: true, Native: func(args []any) (any, error) {
-		if len(args) == 0 { return "", nil }
-		format := ToString(args[0]); rest := args[1:]
-		sp, ok := vm.natives["__hostSprintf"]; if !ok { return "", NewRuntimeError("host sprintf not available") }
-		res, err := sp(append([]any{format}, rest...)); if err != nil { return "", err }
+		if len(args) == 0 {
+			return "", nil
+		}
+		format := ToString(args[0])
+		rest := args[1:]
+		sp, ok := vm.natives["__hostSprintf"]
+		if !ok {
+			return "", NewRuntimeError("host sprintf not available")
+		}
+		res, err := sp(append([]any{format}, rest...))
+		if err != nil {
+			return "", err
+		}
 		return ToString(res), nil
 	}}
 	vm.RegisterPackage("fmt", fmtPkg)
@@ -71,24 +93,43 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	timePkg.Funcs["Now"] = &Function{Name: "Now", Native: func(args []any) (any, error) {
 		return int(time.Now().UnixMilli()), nil
 	}}
-	timePkg.Funcs["Sleep"] = &Function{Name: "Sleep", Native: func(args []any) (any, error) {
-		if len(args) > 0 { time.Sleep(time.Duration(ToInt(args[0])) * time.Millisecond) } // ms
-		return nil, nil
+	timePkg.Funcs["Sleep"] = &Function{Name: "Sleep", NativeContext: func(ctx context.Context, args []any) (any, error) {
+		if len(args) == 0 {
+			return nil, nil
+		}
+		duration := time.Duration(ToInt(args[0])) * time.Millisecond
+		if duration < 0 {
+			return nil, NewRuntimeError("time.Sleep: negative duration")
+		}
+		timer := time.NewTimer(duration)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return nil, nil
+		case <-ctx.Done():
+			return nil, contextError(ctx)
+		}
 	}}
 	timePkg.Funcs["Since"] = &Function{Name: "Since", Native: func(args []any) (any, error) {
-		if len(args) == 0 { return 0, nil }
+		if len(args) == 0 {
+			return 0, nil
+		}
 		startMs := ToInt(args[0])
 		return int(time.Since(time.UnixMilli(int64(startMs))).Milliseconds()), nil
 	}}
-	timePkg.Funcs["NewTimer"] = &Function{Name: "NewTimer", Params: []string{"milliseconds"}, Native: func(args []any) (any, error) {
+	timePkg.Funcs["NewTimer"] = &Function{Name: "NewTimer", Params: []string{"milliseconds"}, NativeContext: func(ctx context.Context, args []any) (any, error) {
 		milliseconds := 0
-		if len(args) > 0 { milliseconds = ToInt(args[0]) }
-		return newNativeTimer(milliseconds, false)
+		if len(args) > 0 {
+			milliseconds = ToInt(args[0])
+		}
+		return newNativeTimer(ctx, milliseconds, false)
 	}}
-	timePkg.Funcs["NewTicker"] = &Function{Name: "NewTicker", Params: []string{"milliseconds"}, Native: func(args []any) (any, error) {
+	timePkg.Funcs["NewTicker"] = &Function{Name: "NewTicker", Params: []string{"milliseconds"}, NativeContext: func(ctx context.Context, args []any) (any, error) {
 		milliseconds := 0
-		if len(args) > 0 { milliseconds = ToInt(args[0]) }
-		return newNativeTimer(milliseconds, true)
+		if len(args) > 0 {
+			milliseconds = ToInt(args[0])
+		}
+		return newNativeTimer(ctx, milliseconds, true)
 	}}
 	vm.RegisterPackage("time", timePkg)
 
@@ -114,11 +155,15 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	// --- math/rand --- (small facade)
 	randPkg := &Package{Name: "math/rand", Funcs: map[string]*Function{}}
 	randPkg.Funcs["Intn"] = &Function{Name: "Intn", Params: []string{"n"}, Native: func(args []any) (any, error) {
-		n := ToInt(args[0]); if n <= 0 { return 0, nil }
+		n := ToInt(args[0])
+		if n <= 0 {
+			return 0, nil
+		}
 		return mrand.Intn(n), nil
 	}}
 	randPkg.Funcs["Seed"] = &Function{Name: "Seed", Params: []string{"seed"}, Native: func(args []any) (any, error) {
-		mrand.Seed(int64(ToInt(args[0]))); return nil, nil
+		mrand.Seed(int64(ToInt(args[0])))
+		return nil, nil
 	}}
 	randPkg.Funcs["Float64"] = &Function{Name: "Float64", Native: func(args []any) (any, error) {
 		return mrand.Float64(), nil
@@ -129,14 +174,20 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	jsonPkg := &Package{Name: "encoding/json", Funcs: map[string]*Function{}}
 	// Marshal(v any) -> string
 	jsonPkg.Funcs["Marshal"] = &Function{Name: "Marshal", Native: func(args []any) (any, error) {
-		if len(args) == 0 { return "null", nil }
+		if len(args) == 0 {
+			return "null", nil
+		}
 		b, err := json.Marshal(ToNativeValue(args[0]))
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		return string(b), nil
 	}}
 	// Unmarshal(s string) -> any   (NOTE: diverges from stdlib, returns value instead of filling a pointer)
 	jsonPkg.Funcs["Unmarshal"] = &Function{Name: "Unmarshal", Native: func(args []any) (any, error) {
-		if len(args) == 0 { return nil, nil }
+		if len(args) == 0 {
+			return nil, nil
+		}
 		var v any
 		err := json.Unmarshal([]byte(ToString(args[0])), &v)
 		return v, err
@@ -146,55 +197,68 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 
 	// --- strings --- (subset)
 	stringsPkg := &Package{Name: "strings", Funcs: map[string]*Function{}}
-	stringsPkg.Funcs["Contains"] = &Function{Name: "Contains", Params: []string{"s","sub"}, Native: func(args []any) (any, error) {
+	stringsPkg.Funcs["Contains"] = &Function{Name: "Contains", Params: []string{"s", "sub"}, Native: func(args []any) (any, error) {
 		return strlib.Contains(ToString(args[0]), ToString(args[1])), nil
 	}}
-	stringsPkg.Funcs["Split"] = &Function{Name: "Split", Params: []string{"s","sep"}, Native: func(args []any) (any, error) {
+	stringsPkg.Funcs["Split"] = &Function{Name: "Split", Params: []string{"s", "sep"}, Native: func(args []any) (any, error) {
 		parts := strlib.Split(ToString(args[0]), ToString(args[1]))
 		out := &SliceVal{ElementType: "string", Data: []any{}}
-		for _, p := range parts { out.Data = append(out.Data, p) }
+		for _, p := range parts {
+			out.Data = append(out.Data, p)
+		}
 		return out, nil
 	}}
-	stringsPkg.Funcs["Join"] = &Function{Name: "Join", Params: []string{"arr","sep"}, Native: func(args []any) (any, error) {
+	stringsPkg.Funcs["Join"] = &Function{Name: "Join", Params: []string{"arr", "sep"}, Native: func(args []any) (any, error) {
 		arr, _ := args[0].(*SliceVal)
 		sep := ToString(args[1])
 		ss := make([]string, 0, len(arr.Data))
-		for _, v := range arr.Data { ss = append(ss, ToString(v)) }
+		for _, v := range arr.Data {
+			ss = append(ss, ToString(v))
+		}
 		return strlib.Join(ss, sep), nil
 	}}
-	stringsPkg.Funcs["ReplaceAll"] = &Function{Name: "ReplaceAll", Params: []string{"s","old","new"}, Native: func(args []any) (any, error) {
+	stringsPkg.Funcs["ReplaceAll"] = &Function{Name: "ReplaceAll", Params: []string{"s", "old", "new"}, Native: func(args []any) (any, error) {
 		return strlib.ReplaceAll(ToString(args[0]), ToString(args[1]), ToString(args[2])), nil
 	}}
-	stringsPkg.Funcs["Replace"] = &Function{Name: "Replace", Params: []string{"s","old","new","n"}, Native: func(args []any) (any, error) {
+	stringsPkg.Funcs["Replace"] = &Function{Name: "Replace", Params: []string{"s", "old", "new", "n"}, Native: func(args []any) (any, error) {
 		return strlib.Replace(ToString(args[0]), ToString(args[1]), ToString(args[2]), ToInt(args[3])), nil
 	}}
 	stringsPkg.Funcs["ToUpper"] = &Function{Name: "ToUpper", Params: []string{"s"}, Native: func(args []any) (any, error) { return strlib.ToUpper(ToString(args[0])), nil }}
 	stringsPkg.Funcs["ToLower"] = &Function{Name: "ToLower", Params: []string{"s"}, Native: func(args []any) (any, error) { return strlib.ToLower(ToString(args[0])), nil }}
 	stringsPkg.Funcs["TrimSpace"] = &Function{Name: "TrimSpace", Params: []string{"s"}, Native: func(args []any) (any, error) { return strlib.TrimSpace(ToString(args[0])), nil }}
-	stringsPkg.Funcs["Trim"] = &Function{Name: "Trim", Params: []string{"s","cutset"}, Native: func(args []any) (any, error) { return strlib.Trim(ToString(args[0]), ToString(args[1])), nil }}
-	stringsPkg.Funcs["TrimPrefix"] = &Function{Name: "TrimPrefix", Params: []string{"s","prefix"}, Native: func(args []any) (any, error) { return strlib.TrimPrefix(ToString(args[0]), ToString(args[1])), nil }}
-	stringsPkg.Funcs["TrimSuffix"] = &Function{Name: "TrimSuffix", Params: []string{"s","suffix"}, Native: func(args []any) (any, error) { return strlib.TrimSuffix(ToString(args[0]), ToString(args[1])), nil }}
-	stringsPkg.Funcs["HasPrefix"] = &Function{Name: "HasPrefix", Params: []string{"s","prefix"}, Native: func(args []any) (any, error) { return strlib.HasPrefix(ToString(args[0]), ToString(args[1])), nil }}
-	stringsPkg.Funcs["HasSuffix"] = &Function{Name: "HasSuffix", Params: []string{"s","suffix"}, Native: func(args []any) (any, error) { return strlib.HasSuffix(ToString(args[0]), ToString(args[1])), nil }}
-	stringsPkg.Funcs["Count"] = &Function{Name: "Count", Params: []string{"s","sub"}, Native: func(args []any) (any, error) { return strlib.Count(ToString(args[0]), ToString(args[1])), nil }}
-	stringsPkg.Funcs["Index"] = &Function{Name: "Index", Params: []string{"s","sub"}, Native: func(args []any) (any, error) { return strlib.Index(ToString(args[0]), ToString(args[1])), nil }}
-	stringsPkg.Funcs["Repeat"] = &Function{Name: "Repeat", Params: []string{"s","count"}, Native: func(args []any) (any, error) { return strlib.Repeat(ToString(args[0]), ToInt(args[1])), nil }}
+	stringsPkg.Funcs["Trim"] = &Function{Name: "Trim", Params: []string{"s", "cutset"}, Native: func(args []any) (any, error) { return strlib.Trim(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["TrimPrefix"] = &Function{Name: "TrimPrefix", Params: []string{"s", "prefix"}, Native: func(args []any) (any, error) { return strlib.TrimPrefix(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["TrimSuffix"] = &Function{Name: "TrimSuffix", Params: []string{"s", "suffix"}, Native: func(args []any) (any, error) { return strlib.TrimSuffix(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["HasPrefix"] = &Function{Name: "HasPrefix", Params: []string{"s", "prefix"}, Native: func(args []any) (any, error) { return strlib.HasPrefix(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["HasSuffix"] = &Function{Name: "HasSuffix", Params: []string{"s", "suffix"}, Native: func(args []any) (any, error) { return strlib.HasSuffix(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["Count"] = &Function{Name: "Count", Params: []string{"s", "sub"}, Native: func(args []any) (any, error) { return strlib.Count(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["Index"] = &Function{Name: "Index", Params: []string{"s", "sub"}, Native: func(args []any) (any, error) { return strlib.Index(ToString(args[0]), ToString(args[1])), nil }}
+	stringsPkg.Funcs["Repeat"] = &Function{Name: "Repeat", Params: []string{"s", "count"}, Native: func(args []any) (any, error) { return strlib.Repeat(ToString(args[0]), ToInt(args[1])), nil }}
 	vm.RegisterPackage("strings", stringsPkg)
 
 	// --- sort --- (Ints, Strings, Float64s in-place)
 	sortPkg := &Package{Name: "sort", Funcs: map[string]*Function{}}
 	sortPkg.Funcs["Ints"] = &Function{Name: "Ints", Params: []string{"slice"}, Native: func(args []any) (any, error) {
-		s, ok := args[0].(*SliceVal); if !ok || s == nil { return nil, nil }
+		s, ok := args[0].(*SliceVal)
+		if !ok || s == nil {
+			return nil, nil
+		}
 		sort.Slice(s.Data, func(i, j int) bool { return ToInt(s.Data[i]) < ToInt(s.Data[j]) })
 		return nil, nil
 	}}
 	sortPkg.Funcs["Strings"] = &Function{Name: "Strings", Params: []string{"slice"}, Native: func(args []any) (any, error) {
-		s, ok := args[0].(*SliceVal); if !ok || s == nil { return nil, nil }
+		s, ok := args[0].(*SliceVal)
+		if !ok || s == nil {
+			return nil, nil
+		}
 		sort.Slice(s.Data, func(i, j int) bool { return ToString(s.Data[i]) < ToString(s.Data[j]) })
 		return nil, nil
 	}}
 	sortPkg.Funcs["Float64s"] = &Function{Name: "Float64s", Params: []string{"slice"}, Native: func(args []any) (any, error) {
-		s, ok := args[0].(*SliceVal); if !ok || s == nil { return nil, nil }
+		s, ok := args[0].(*SliceVal)
+		if !ok || s == nil {
+			return nil, nil
+		}
 		sort.Slice(s.Data, func(i, j int) bool { return ToFloat(s.Data[i]) < ToFloat(s.Data[j]) })
 		return nil, nil
 	}}
@@ -207,23 +271,32 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	}}
 	strconvPkg.Funcs["Atoi"] = &Function{Name: "Atoi", Params: []string{"s"}, Native: func(args []any) (any, error) {
 		n, err := strconv.Atoi(ToString(args[0]))
-		if err != nil { return 0, err }
+		if err != nil {
+			return 0, err
+		}
 		return n, nil
 	}}
-	strconvPkg.Funcs["FormatFloat"] = &Function{Name: "FormatFloat", Params: []string{"f","fmt","prec","bitSize"}, Native: func(args []any) (any, error) {
-		if len(args) < 4 { return "", NewRuntimeError("FormatFloat: need 4 args") }
+	strconvPkg.Funcs["FormatFloat"] = &Function{Name: "FormatFloat", Params: []string{"f", "fmt", "prec", "bitSize"}, Native: func(args []any) (any, error) {
+		if len(args) < 4 {
+			return "", NewRuntimeError("FormatFloat: need 4 args")
+		}
 		// Accept a string format character (e.g., "f", "e", "g") or an int ASCII value.
 		var fmtByte byte = 'f'
 		switch fv := args[1].(type) {
 		case string:
-			if len(fv) > 0 { fmtByte = fv[0] }
+			if len(fv) > 0 {
+				fmtByte = fv[0]
+			}
 		default:
 			fmtByte = byte(ToInt(args[1]) & 0xFF)
 		}
 		return strconv.FormatFloat(ToFloat(args[0]), fmtByte, ToInt(args[2]), ToInt(args[3])), nil
 	}}
-	strconvPkg.Funcs["ParseFloat"] = &Function{Name: "ParseFloat", Params: []string{"s","bitSize"}, Native: func(args []any) (any, error) {
-		bitSize := 64; if len(args) >= 2 { bitSize = ToInt(args[1]) }
+	strconvPkg.Funcs["ParseFloat"] = &Function{Name: "ParseFloat", Params: []string{"s", "bitSize"}, Native: func(args []any) (any, error) {
+		bitSize := 64
+		if len(args) >= 2 {
+			bitSize = ToInt(args[1])
+		}
 		f, err := strconv.ParseFloat(ToString(args[0]), bitSize)
 		return f, err
 	}}
@@ -234,8 +307,10 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		b, err := strconv.ParseBool(ToString(args[0]))
 		return b, err
 	}}
-	strconvPkg.Funcs["FormatInt"] = &Function{Name: "FormatInt", Params: []string{"i","base"}, Native: func(args []any) (any, error) {
-		if len(args) < 2 { return "", NewRuntimeError("FormatInt: need 2 args") }
+	strconvPkg.Funcs["FormatInt"] = &Function{Name: "FormatInt", Params: []string{"i", "base"}, Native: func(args []any) (any, error) {
+		if len(args) < 2 {
+			return "", NewRuntimeError("FormatInt: need 2 args")
+		}
 		return strconv.FormatInt(int64(ToInt(args[0])), ToInt(args[1])), nil
 	}}
 	vm.RegisterPackage("strconv", strconvPkg)
@@ -247,14 +322,15 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	wgType.Methods["Add"] = &Function{Name: "Add", RecvType: "WaitGroup", Params: []string{"delta"}, Native: func(args []any) (any, error) {
 		w := ensureNativeWG(args[0])
 		delta := ToInt(args[1])
-		w.Add(delta)
-		return nil, nil
+		return nil, w.Add(delta)
 	}}
 	wgType.Methods["Done"] = &Function{Name: "Done", RecvType: "WaitGroup", Native: func(args []any) (any, error) {
-		w := ensureNativeWG(args[0]); w.Done(); return nil, nil
+		w := ensureNativeWG(args[0])
+		return nil, w.Add(-1)
 	}}
-	wgType.Methods["Wait"] = &Function{Name: "Wait", RecvType: "WaitGroup", Native: func(args []any) (any, error) {
-		w := ensureNativeWG(args[0]); w.Wait(); return nil, nil
+	wgType.Methods["Wait"] = &Function{Name: "Wait", RecvType: "WaitGroup", NativeContext: func(ctx context.Context, args []any) (any, error) {
+		w := ensureNativeWG(args[0])
+		return nil, w.Wait(ctx)
 	}}
 	syncPkg := &Package{Name: "sync", Types: map[string]*TypeDef{"WaitGroup": wgType}}
 	vm.RegisterPackage("sync", syncPkg)
@@ -263,19 +339,25 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	regexType := &TypeDef{Name: "Regexp", Kind: "struct", Fields: []FieldDef{}, Methods: map[string]*Function{}}
 	vm.types[regexType.Name] = regexType
 	regexType.Methods["MatchString"] = &Function{Name: "MatchString", RecvType: "Regexp", Params: []string{"s"}, Native: func(args []any) (any, error) {
-		r := ensureNativeRegexp(args[0]); return r.MatchString(ToString(args[1])), nil
+		r := ensureNativeRegexp(args[0])
+		return r.MatchString(ToString(args[1])), nil
 	}}
 	regexType.Methods["FindStringSubmatch"] = &Function{Name: "FindStringSubmatch", RecvType: "Regexp", Params: []string{"s"}, Native: func(args []any) (any, error) {
-		r := ensureNativeRegexp(args[0]); subs := r.FindStringSubmatch(ToString(args[1]))
+		r := ensureNativeRegexp(args[0])
+		subs := r.FindStringSubmatch(ToString(args[1]))
 		// Convert to []string slice value
 		out := &SliceVal{ElementType: "string", Data: []any{}}
-		for _, s := range subs { out.Data = append(out.Data, s) }
+		for _, s := range subs {
+			out.Data = append(out.Data, s)
+		}
 		return out, nil
 	}}
 	regPkg := &Package{Name: "regexp", Funcs: map[string]*Function{}, Types: map[string]*TypeDef{"Regexp": regexType}}
 	regPkg.Funcs["Compile"] = &Function{Name: "Compile", Params: []string{"pattern"}, Native: func(args []any) (any, error) {
 		r, err := regexp.Compile(ToString(args[0]))
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		// Store native pointer in field "__native"
 		return &StructVal{TypeName: "Regexp", Fields: map[string]any{"__native": r}}, nil
 	}}
@@ -289,7 +371,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 			// join args
 			out := ""
 			for i, a := range args {
-				if i > 0 { out += " " }
+				if i > 0 {
+					out += " "
+				}
 				out += ToString(a)
 			}
 			_, _ = n([]any{out})
@@ -297,63 +381,103 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return nil, nil
 	}}
 	browserPkg.Funcs["ConsoleWarn"] = &Function{Name: "ConsoleWarn", IsVariadic: true, Native: func(args []any) (any, error) {
-		if n, ok := vm.natives["ConsoleWarn"]; ok { _, _ = n([]any{ToString(args[0])}) }
+		if n, ok := vm.natives["ConsoleWarn"]; ok {
+			_, _ = n([]any{ToString(args[0])})
+		}
 		return nil, nil
 	}}
 	browserPkg.Funcs["ConsoleError"] = &Function{Name: "ConsoleError", IsVariadic: true, Native: func(args []any) (any, error) {
-		if n, ok := vm.natives["ConsoleError"]; ok { _, _ = n([]any{ToString(args[0])}) }
+		if n, ok := vm.natives["ConsoleError"]; ok {
+			_, _ = n([]any{ToString(args[0])})
+		}
 		return nil, nil
 	}}
 
 	// DOM / Element helpers
 	browserPkg.Funcs["SetHTML"] = &Function{Name: "SetHTML", Native: func(args []any) (any, error) {
 		if len(args) >= 2 {
-			if n, ok := vm.natives["SetInnerHTML"]; ok { _, _ = n([]any{ToString(args[0]), ToString(args[1])}) }
+			if n, ok := vm.natives["SetInnerHTML"]; ok {
+				_, _ = n([]any{ToString(args[0]), ToString(args[1])})
+			}
 		}
 		return nil, nil
 	}}
 	browserPkg.Funcs["GetHTML"] = &Function{Name: "GetHTML", Native: func(args []any) (any, error) {
 		if len(args) >= 1 {
-			if n, ok := vm.natives["GetInnerHTML"]; ok { v, _ := n([]any{ToString(args[0])}); return v, nil }
+			if n, ok := vm.natives["GetInnerHTML"]; ok {
+				v, _ := n([]any{ToString(args[0])})
+				return v, nil
+			}
 		}
 		return "", nil
 	}}
 	browserPkg.Funcs["SetValue"] = &Function{Name: "SetValue", Native: func(args []any) (any, error) {
-		if len(args) >= 2 { if n, ok := vm.natives["SetValue"]; ok { _, _ = n([]any{ToString(args[0]), ToString(args[1])}) } }
+		if len(args) >= 2 {
+			if n, ok := vm.natives["SetValue"]; ok {
+				_, _ = n([]any{ToString(args[0]), ToString(args[1])})
+			}
+		}
 		return nil, nil
 	}}
 	browserPkg.Funcs["GetValue"] = &Function{Name: "GetValue", Native: func(args []any) (any, error) {
-		if len(args) >= 1 { if n, ok := vm.natives["GetValue"]; ok { v, _ := n([]any{ToString(args[0])}); return v, nil } }
+		if len(args) >= 1 {
+			if n, ok := vm.natives["GetValue"]; ok {
+				v, _ := n([]any{ToString(args[0])})
+				return v, nil
+			}
+		}
 		return "", nil
 	}}
 	browserPkg.Funcs["AddClass"] = &Function{Name: "AddClass", Native: func(args []any) (any, error) {
-		if len(args) >= 2 { if n, ok := vm.natives["AddClass"]; ok { _, _ = n([]any{ToString(args[0]), ToString(args[1])}) } }
+		if len(args) >= 2 {
+			if n, ok := vm.natives["AddClass"]; ok {
+				_, _ = n([]any{ToString(args[0]), ToString(args[1])})
+			}
+		}
 		return nil, nil
 	}}
 	browserPkg.Funcs["RemoveClass"] = &Function{Name: "RemoveClass", Native: func(args []any) (any, error) {
-		if len(args) >= 2 { if n, ok := vm.natives["RemoveClass"]; ok { _, _ = n([]any{ToString(args[0]), ToString(args[1])}) } }
+		if len(args) >= 2 {
+			if n, ok := vm.natives["RemoveClass"]; ok {
+				_, _ = n([]any{ToString(args[0]), ToString(args[1])})
+			}
+		}
 		return nil, nil
 	}}
 	browserPkg.Funcs["Open"] = &Function{Name: "Open", Native: func(args []any) (any, error) {
-		if len(args) >= 1 { if n, ok := vm.natives["OpenWindow"]; ok { _, _ = n([]any{ToString(args[0])}) } }
+		if len(args) >= 1 {
+			if n, ok := vm.natives["OpenWindow"]; ok {
+				_, _ = n([]any{ToString(args[0])})
+			}
+		}
 		return nil, nil
 	}}
 	browserPkg.Funcs["Alert"] = &Function{Name: "Alert", Native: func(args []any) (any, error) {
-		if len(args) >= 1 { if n, ok := vm.natives["Alert"]; ok { _, _ = n([]any{ToString(args[0])}) } }
+		if len(args) >= 1 {
+			if n, ok := vm.natives["Alert"]; ok {
+				_, _ = n([]any{ToString(args[0])})
+			}
+		}
 		return nil, nil
 	}}
 
 	// Canvas passthrough
 	browserPkg.Funcs["CanvasSize"] = &Function{Name: "CanvasSize", Native: func(args []any) (any, error) {
-		if n, ok := vm.natives["CanvasSize"]; ok { _, _ = n(args) }
+		if n, ok := vm.natives["CanvasSize"]; ok {
+			_, _ = n(args)
+		}
 		return nil, nil
 	}}
 	browserPkg.Funcs["CanvasSet"] = &Function{Name: "CanvasSet", Native: func(args []any) (any, error) {
-		if n, ok := vm.natives["CanvasSet"]; ok { _, _ = n(args) }
+		if n, ok := vm.natives["CanvasSet"]; ok {
+			_, _ = n(args)
+		}
 		return nil, nil
 	}}
 	browserPkg.Funcs["CanvasFlush"] = &Function{Name: "CanvasFlush", Native: func(args []any) (any, error) {
-		if n, ok := vm.natives["CanvasFlush"]; ok { _, _ = n(args) }
+		if n, ok := vm.natives["CanvasFlush"]; ok {
+			_, _ = n(args)
+		}
 		return nil, nil
 	}}
 
@@ -366,38 +490,95 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	jqType.Methods["Text"] = &Function{Name: "Text", RecvType: "JQ", Params: []string{"sel"}, Native: func(args []any) (any, error) {
 		// args[0] receiver, args[1] selector
 		sel := ""
-		if len(args) >= 2 { sel = ToString(args[1]) } else if sv, ok := args[0].(*StructVal); ok { if s, ok2 := sv.Fields["__sel"].(string); ok2 { sel = s } }
+		if len(args) >= 2 {
+			sel = ToString(args[1])
+		} else if sv, ok := args[0].(*StructVal); ok {
+			if s, ok2 := sv.Fields["__sel"].(string); ok2 {
+				sel = s
+			}
+		}
 		if sel != "" {
-			if n, ok := vm.natives["GetInnerHTML"]; ok { v, _ := n([]any{sel}); return v, nil }
+			if n, ok := vm.natives["GetInnerHTML"]; ok {
+				v, _ := n([]any{sel})
+				return v, nil
+			}
 		}
 		return "", nil
 	}}
-	jqType.Methods["Html"] = &Function{Name: "Html", RecvType: "JQ", Params: []string{"sel","html"}, Native: func(args []any) (any, error) {
-		sel := ""; html := ""
-		if len(args) >= 3 { sel = ToString(args[1]); html = ToString(args[2]) } else if sv, ok := args[0].(*StructVal); ok { if s, ok2 := sv.Fields["__sel"].(string); ok2 { sel = s } }
-		if sel != "" { if n, ok := vm.natives["SetInnerHTML"]; ok { _, _ = n([]any{sel, html}) } }
+	jqType.Methods["Html"] = &Function{Name: "Html", RecvType: "JQ", Params: []string{"sel", "html"}, Native: func(args []any) (any, error) {
+		sel := ""
+		html := ""
+		if len(args) >= 3 {
+			sel = ToString(args[1])
+			html = ToString(args[2])
+		} else if sv, ok := args[0].(*StructVal); ok {
+			if s, ok2 := sv.Fields["__sel"].(string); ok2 {
+				sel = s
+			}
+		}
+		if sel != "" {
+			if n, ok := vm.natives["SetInnerHTML"]; ok {
+				_, _ = n([]any{sel, html})
+			}
+		}
 		return nil, nil
 	}}
-	jqType.Methods["Set"] = &Function{Name: "Set", RecvType: "JQ", Params: []string{"sel","val"}, Native: func(args []any) (any, error) {
-		sel := ""; val := ""
-		if len(args) >= 3 { sel = ToString(args[1]); val = ToString(args[2]) } else if sv, ok := args[0].(*StructVal); ok { if s, ok2 := sv.Fields["__sel"].(string); ok2 { sel = s } }
-		if sel != "" { if n, ok := vm.natives["SetValue"]; ok { _, _ = n([]any{sel, val}) } }
+	jqType.Methods["Set"] = &Function{Name: "Set", RecvType: "JQ", Params: []string{"sel", "val"}, Native: func(args []any) (any, error) {
+		sel := ""
+		val := ""
+		if len(args) >= 3 {
+			sel = ToString(args[1])
+			val = ToString(args[2])
+		} else if sv, ok := args[0].(*StructVal); ok {
+			if s, ok2 := sv.Fields["__sel"].(string); ok2 {
+				sel = s
+			}
+		}
+		if sel != "" {
+			if n, ok := vm.natives["SetValue"]; ok {
+				_, _ = n([]any{sel, val})
+			}
+		}
 		return nil, nil
 	}}
-	jqType.Methods["AddClass"] = &Function{Name: "AddClass", RecvType: "JQ", Params: []string{"sel","class"}, Native: func(args []any) (any, error) {
-		sel := ""; cl := ""
-		if len(args) >= 3 { sel = ToString(args[1]); cl = ToString(args[2]) } else if sv, ok := args[0].(*StructVal); ok { if s, ok2 := sv.Fields["__sel"].(string); ok2 { sel = s } }
-		if sel != "" { if n, ok := vm.natives["AddClass"]; ok { _, _ = n([]any{sel, cl}) } }
+	jqType.Methods["AddClass"] = &Function{Name: "AddClass", RecvType: "JQ", Params: []string{"sel", "class"}, Native: func(args []any) (any, error) {
+		sel := ""
+		cl := ""
+		if len(args) >= 3 {
+			sel = ToString(args[1])
+			cl = ToString(args[2])
+		} else if sv, ok := args[0].(*StructVal); ok {
+			if s, ok2 := sv.Fields["__sel"].(string); ok2 {
+				sel = s
+			}
+		}
+		if sel != "" {
+			if n, ok := vm.natives["AddClass"]; ok {
+				_, _ = n([]any{sel, cl})
+			}
+		}
 		return nil, nil
 	}}
-	jqType.Methods["RemoveClass"] = &Function{Name: "RemoveClass", RecvType: "JQ", Params: []string{"sel","class"}, Native: func(args []any) (any, error) {
-		sel := ""; cl := ""
-		if len(args) >= 3 { sel = ToString(args[1]); cl = ToString(args[2]) } else if sv, ok := args[0].(*StructVal); ok { if s, ok2 := sv.Fields["__sel"].(string); ok2 { sel = s } }
-		if sel != "" { if n, ok := vm.natives["RemoveClass"]; ok { _, _ = n([]any{sel, cl}) } }
+	jqType.Methods["RemoveClass"] = &Function{Name: "RemoveClass", RecvType: "JQ", Params: []string{"sel", "class"}, Native: func(args []any) (any, error) {
+		sel := ""
+		cl := ""
+		if len(args) >= 3 {
+			sel = ToString(args[1])
+			cl = ToString(args[2])
+		} else if sv, ok := args[0].(*StructVal); ok {
+			if s, ok2 := sv.Fields["__sel"].(string); ok2 {
+				sel = s
+			}
+		}
+		if sel != "" {
+			if n, ok := vm.natives["RemoveClass"]; ok {
+				_, _ = n([]any{sel, cl})
+			}
+		}
 		return nil, nil
 	}}
 	// On(event string, handler func()) is a no-op: we cannot register actual JS callbacks easily from the interpreter; leave as placeholder
-	jqType.Methods["On"] = &Function{Name: "On", RecvType: "JQ", Params: []string{"sel","event"}, Native: func(args []any) (any, error) {
+	jqType.Methods["On"] = &Function{Name: "On", RecvType: "JQ", Params: []string{"sel", "event"}, Native: func(args []any) (any, error) {
 		return nil, nil
 	}}
 
@@ -405,7 +586,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	browserPkg.Funcs["$"] = &Function{Name: "$", Params: []string{"sel"}, Native: func(args []any) (any, error) {
 		// Return a struct value representing the selector; store selector in field "__sel"
 		sel := ""
-		if len(args) >= 1 { sel = ToString(args[0]) }
+		if len(args) >= 1 {
+			sel = ToString(args[0])
+		}
 		sv := &StructVal{TypeName: "JQ", Fields: map[string]any{"__sel": sel}}
 		return sv, nil
 	}}
@@ -415,15 +598,23 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	// --- text/template (simple RenderString helper) ---
 	tplPkg := &Package{Name: "text/template", Funcs: map[string]*Function{}}
 	tplPkg.Funcs["RenderString"] = &Function{Name: "RenderString", Native: func(args []any) (any, error) {
-		if len(args) == 0 { return "", nil }
+		if len(args) == 0 {
+			return "", nil
+		}
 		tmpl := ToString(args[0])
 		var data any = nil
-		if len(args) > 1 { data = args[1] }
+		if len(args) > 1 {
+			data = args[1]
+		}
 		t, err := template.New("tpl").Parse(tmpl)
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		var buf bytes.Buffer
 		nativeData := ToNativeValue(data)
-		if err := t.Execute(&buf, nativeData); err != nil { return "", err }
+		if err := t.Execute(&buf, nativeData); err != nil {
+			return "", err
+		}
 		return buf.String(), nil
 	}}
 	vm.RegisterPackage("text/template", tplPkg)
@@ -440,9 +631,13 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	httpPkg.Funcs["PostText"] = &Function{Name: "PostText", IsVariadic: true, Native: func(args []any) (any, error) {
 		// PostText(url, body [, contentType])
 		// contentType defaults to "application/json" when omitted.
-		if len(args) < 2 { return "", nil }
+		if len(args) < 2 {
+			return "", nil
+		}
 		contentType := "application/json"
-		if len(args) >= 3 { contentType = ToString(args[2]) }
+		if len(args) >= 3 {
+			contentType = ToString(args[2])
+		}
 		if n, ok := vm.natives["HTTPPostText"]; ok {
 			v, err := n([]any{ToString(args[0]), ToString(args[1]), contentType})
 			return v, err
@@ -464,12 +659,17 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 
 	// --- storage (localStorage: SetItem/GetItem) ---
 	storPkg := &Package{Name: "storage", Funcs: map[string]*Function{}}
-	storPkg.Funcs["SetItem"] = &Function{Name: "SetItem", Params: []string{"key","value"}, Native: func(args []any) (any, error) {
-		if n, ok := vm.natives["LocalStorageSetItem"]; ok { _, _ = n([]any{ToString(args[0]), ToString(args[1])}) }
+	storPkg.Funcs["SetItem"] = &Function{Name: "SetItem", Params: []string{"key", "value"}, Native: func(args []any) (any, error) {
+		if n, ok := vm.natives["LocalStorageSetItem"]; ok {
+			_, _ = n([]any{ToString(args[0]), ToString(args[1])})
+		}
 		return nil, nil
 	}}
 	storPkg.Funcs["GetItem"] = &Function{Name: "GetItem", Params: []string{"key"}, Native: func(args []any) (any, error) {
-		if n, ok := vm.natives["LocalStorageGetItem"]; ok { v, _ := n([]any{ToString(args[0])}); return v, nil }
+		if n, ok := vm.natives["LocalStorageGetItem"]; ok {
+			v, _ := n([]any{ToString(args[0])})
+			return v, nil
+		}
 		return "", nil
 	}}
 	vm.RegisterPackage("storage", storPkg)
@@ -478,17 +678,63 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	registerOsPackage(vm)
 }
 
-// ensureNativeWG returns the *sync.WaitGroup associated with a StructVal.
-func ensureNativeWG(v any) *sync.WaitGroup {
+// nativeWaitGroup is intentionally context-aware. sync.WaitGroup.Wait cannot
+// be selected with a context, which would otherwise let guest code make a
+// timed-out execution wait forever.
+type nativeWaitGroup struct {
+	mu   sync.Mutex
+	n    int
+	done chan struct{}
+}
+
+func newNativeWaitGroup() *nativeWaitGroup {
+	done := make(chan struct{})
+	close(done)
+	return &nativeWaitGroup{done: done}
+}
+
+func (w *nativeWaitGroup) Add(delta int) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	next := w.n + delta
+	if next < 0 {
+		return NewRuntimeError("sync: negative WaitGroup counter")
+	}
+	if w.n == 0 && next > 0 {
+		w.done = make(chan struct{})
+	}
+	w.n = next
+	if w.n > 0 && next == 0 {
+		close(w.done)
+	}
+	return nil
+}
+
+func (w *nativeWaitGroup) Wait(ctx context.Context) error {
+	w.mu.Lock()
+	done := w.done
+	w.mu.Unlock()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return contextError(ctx)
+	}
+}
+
+// ensureNativeWG returns the nativeWaitGroup associated with a StructVal.
+func ensureNativeWG(v any) *nativeWaitGroup {
 	if sv, ok := v.(*StructVal); ok {
 		if wgi, ok := sv.Fields["__native"]; ok {
-			if wg, ok := wgi.(*sync.WaitGroup); ok { return wg }
+			if wg, ok := wgi.(*nativeWaitGroup); ok {
+				return wg
+			}
 		}
-		wg := &sync.WaitGroup{}
+		wg := newNativeWaitGroup()
 		sv.Fields["__native"] = wg
 		return wg
 	}
-	return &sync.WaitGroup{}
+	return newNativeWaitGroup()
 }
 
 type nativeTimer struct {
@@ -505,14 +751,16 @@ func (timer *nativeTimer) Stop() bool {
 	return stopped
 }
 
-func newNativeTimer(milliseconds int, repeating bool) (*StructVal, error) {
+func newNativeTimer(ctx context.Context, milliseconds int, repeating bool) (*StructVal, error) {
 	if milliseconds <= 0 {
 		return nil, NewRuntimeError("timer duration must be positive")
 	}
 	channel := &ChannelVal{ElementType: "int", C: make(chan any, 1)}
 	timer := &nativeTimer{stop: make(chan struct{})}
 	typeName := "Timer"
-	if repeating { typeName = "Ticker" }
+	if repeating {
+		typeName = "Ticker"
+	}
 	value := &StructVal{TypeName: typeName, Fields: map[string]any{"C": channel, "__nativeTimer": timer}}
 	duration := time.Duration(milliseconds) * time.Millisecond
 
@@ -520,8 +768,9 @@ func newNativeTimer(milliseconds int, repeating bool) (*StructVal, error) {
 		if !repeating {
 			select {
 			case <-time.After(duration):
-				channel.C <- int(time.Now().UnixMilli())
+				_, _ = channel.TrySend(int(time.Now().UnixMilli()))
 			case <-timer.stop:
+			case <-ctx.Done():
 			}
 			return
 		}
@@ -531,11 +780,10 @@ func newNativeTimer(milliseconds int, repeating bool) (*StructVal, error) {
 		for {
 			select {
 			case now := <-ticker.C:
-				select {
-				case channel.C <- int(now.UnixMilli()):
-				default:
-				}
+				_, _ = channel.TrySend(int(now.UnixMilli()))
 			case <-timer.stop:
+				return
+			case <-ctx.Done():
 				return
 			}
 		}
@@ -556,7 +804,9 @@ func stopNativeTimer(v any) bool {
 func ensureNativeRegexp(v any) *regexp.Regexp {
 	if sv, ok := v.(*StructVal); ok {
 		if ri, ok := sv.Fields["__native"]; ok {
-			if r, ok := ri.(*regexp.Regexp); ok { return r }
+			if r, ok := ri.(*regexp.Regexp); ok {
+				return r
+			}
 		}
 	}
 	return regexp.MustCompile("$") // matches empty string; fallback
@@ -564,15 +814,23 @@ func ensureNativeRegexp(v any) *regexp.Regexp {
 
 // resolvePackageSelector returns a function/type from a package if sel refers to a package member.
 func (vm *Interpreter) resolvePackageSelector(pkg *Package, sel string) (any, bool) {
-	if pkg == nil { return nil, false }
+	if pkg == nil {
+		return nil, false
+	}
 	if pkg.Funcs != nil {
-		if f, ok := pkg.Funcs[sel]; ok { return f, true }
+		if f, ok := pkg.Funcs[sel]; ok {
+			return f, true
+		}
 	}
 	if pkg.Types != nil {
-		if t, ok := pkg.Types[sel]; ok { return t, true }
+		if t, ok := pkg.Types[sel]; ok {
+			return t, true
+		}
 	}
 	if pkg.Vars != nil {
-		if v, ok := pkg.Vars[sel]; ok { return v, true }
+		if v, ok := pkg.Vars[sel]; ok {
+			return v, true
+		}
 	}
 	return nil, false
 }
@@ -581,55 +839,89 @@ func (vm *Interpreter) resolvePackageSelector(pkg *Package, sel string) (any, bo
 func (vm *Interpreter) installImportedPackage(alias, path string) {
 	switch path {
 	case "fmt":
-		if _, ok := vm.packages["fmt"]; !ok { RegisterBuiltinPackages(vm) } // idempotent
+		if _, ok := vm.packages["fmt"]; !ok {
+			RegisterBuiltinPackages(vm)
+		} // idempotent
 		vm.globals.Vars[alias] = vm.packages["fmt"]
 	case "time":
-		if _, ok := vm.packages["time"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["time"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["time"]
 	case "math":
-		if _, ok := vm.packages["math"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["math"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["math"]
 	case "math/rand":
-		if _, ok := vm.packages["math/rand"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["math/rand"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["math/rand"]
 	case "encoding/json":
-		if _, ok := vm.packages["encoding/json"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["encoding/json"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["encoding/json"]
 	case "json":
-		if _, ok := vm.packages["encoding/json"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["encoding/json"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["encoding/json"]
 	case "strings":
-		if _, ok := vm.packages["strings"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["strings"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["strings"]
 	case "sort":
-		if _, ok := vm.packages["sort"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["sort"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["sort"]
 	case "strconv":
-		if _, ok := vm.packages["strconv"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["strconv"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["strconv"]
 	case "sync":
-		if _, ok := vm.packages["sync"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["sync"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["sync"]
 	case "regexp":
-		if _, ok := vm.packages["regexp"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["regexp"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["regexp"]
 	case "browser":
-		if _, ok := vm.packages["browser"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["browser"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["browser"]
 	case "text/template":
-		if _, ok := vm.packages["text/template"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["text/template"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["text/template"]
 	case "http":
-		if _, ok := vm.packages["http"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["http"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["http"]
 	case "storage":
-		if _, ok := vm.packages["storage"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["storage"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["storage"]
 	case "fs":
-		if _, ok := vm.packages["fs"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["fs"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["fs"]
 	case "os":
-		if _, ok := vm.packages["os"]; !ok { RegisterBuiltinPackages(vm) }
+		if _, ok := vm.packages["os"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
 		vm.globals.Vars[alias] = vm.packages["os"]
 	default:
 		_ = fmt.Sprintf("unknown import: %s", path)
@@ -669,27 +961,37 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Args
 	argsSlice := &SliceVal{ElementType: "string", Data: []any{}}
-	for _, a := range vm.Args { argsSlice.Data = append(argsSlice.Data, a) }
+	for _, a := range vm.Args {
+		argsSlice.Data = append(argsSlice.Data, a)
+	}
 	osPkg.Vars["Args"] = argsSlice
 
 	// os.Stdin / Stdout / Stderr — placeholder structs (no real I/O for now)
-	osPkg.Vars["Stdin"]  = &StructVal{TypeName: "File", Fields: map[string]any{"__fd": 0}}
+	osPkg.Vars["Stdin"] = &StructVal{TypeName: "File", Fields: map[string]any{"__fd": 0}}
 	osPkg.Vars["Stdout"] = &StructVal{TypeName: "File", Fields: map[string]any{"__fd": 1}}
 	osPkg.Vars["Stderr"] = &StructVal{TypeName: "File", Fields: map[string]any{"__fd": 2}}
 
 	// os.ReadFile(path) (string, error)
 	osPkg.Funcs["ReadFile"] = &Function{Name: "ReadFile", Params: []string{"path"}, Native: func(args []any) (any, error) {
-		if len(args) == 0 { return "", NewRuntimeError("ReadFile: missing path") }
+		if len(args) == 0 {
+			return "", NewRuntimeError("ReadFile: missing path")
+		}
 		data, err := vfs.ReadFile(ToString(args[0]))
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		return string(data), nil
 	}}
 
 	// os.WriteFile(path, data, perm)
 	osPkg.Funcs["WriteFile"] = &Function{Name: "WriteFile", Params: []string{"path", "data", "perm"}, Native: func(args []any) (any, error) {
-		if len(args) < 2 { return nil, NewRuntimeError("WriteFile: missing args") }
+		if len(args) < 2 {
+			return nil, NewRuntimeError("WriteFile: missing args")
+		}
 		mode := 0644
-		if len(args) >= 3 { mode = ToInt(args[2]) }
+		if len(args) >= 3 {
+			mode = ToInt(args[2])
+		}
 		var data []byte
 		switch v := args[1].(type) {
 		case []byte:
@@ -702,57 +1004,81 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Mkdir(path, perm)
 	osPkg.Funcs["Mkdir"] = &Function{Name: "Mkdir", Params: []string{"path", "perm"}, Native: func(args []any) (any, error) {
-		if len(args) == 0 { return nil, NewRuntimeError("Mkdir: missing path") }
+		if len(args) == 0 {
+			return nil, NewRuntimeError("Mkdir: missing path")
+		}
 		mode := 0755
-		if len(args) >= 2 { mode = ToInt(args[1]) }
+		if len(args) >= 2 {
+			mode = ToInt(args[1])
+		}
 		return nil, vfs.Mkdir(ToString(args[0]), mode)
 	}}
 
 	// os.MkdirAll(path, perm)
 	osPkg.Funcs["MkdirAll"] = &Function{Name: "MkdirAll", Params: []string{"path", "perm"}, Native: func(args []any) (any, error) {
-		if len(args) == 0 { return nil, NewRuntimeError("MkdirAll: missing path") }
+		if len(args) == 0 {
+			return nil, NewRuntimeError("MkdirAll: missing path")
+		}
 		mode := 0755
-		if len(args) >= 2 { mode = ToInt(args[1]) }
+		if len(args) >= 2 {
+			mode = ToInt(args[1])
+		}
 		return nil, vfs.MkdirAll(ToString(args[0]), mode)
 	}}
 
 	// os.Remove(path)
 	osPkg.Funcs["Remove"] = &Function{Name: "Remove", Params: []string{"path"}, Native: func(args []any) (any, error) {
-		if len(args) == 0 { return nil, NewRuntimeError("Remove: missing path") }
+		if len(args) == 0 {
+			return nil, NewRuntimeError("Remove: missing path")
+		}
 		return nil, vfs.Remove(ToString(args[0]))
 	}}
 
 	// os.RemoveAll(path)
 	osPkg.Funcs["RemoveAll"] = &Function{Name: "RemoveAll", Params: []string{"path"}, Native: func(args []any) (any, error) {
-		if len(args) == 0 { return nil, NewRuntimeError("RemoveAll: missing path") }
+		if len(args) == 0 {
+			return nil, NewRuntimeError("RemoveAll: missing path")
+		}
 		return nil, vfs.RemoveAll(ToString(args[0]))
 	}}
 
 	// os.Stat(path) (*FileInfo, error)
 	osPkg.Funcs["Stat"] = &Function{Name: "Stat", Params: []string{"path"}, Native: func(args []any) (any, error) {
-		if len(args) == 0 { return nil, NewRuntimeError("Stat: missing path") }
+		if len(args) == 0 {
+			return nil, NewRuntimeError("Stat: missing path")
+		}
 		fi, err := vfs.Stat(ToString(args[0]))
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		return fileInfoStruct(fi), nil
 	}}
 
 	// os.ReadDir(path) ([]DirEntry, error)
 	osPkg.Funcs["ReadDir"] = &Function{Name: "ReadDir", Params: []string{"path"}, Native: func(args []any) (any, error) {
-		if len(args) == 0 { return nil, NewRuntimeError("ReadDir: missing path") }
+		if len(args) == 0 {
+			return nil, NewRuntimeError("ReadDir: missing path")
+		}
 		entries, err := vfs.ReadDir(ToString(args[0]))
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		return dirEntrySlice(entries), nil
 	}}
 
 	// os.Getenv(key) string
 	osPkg.Funcs["Getenv"] = &Function{Name: "Getenv", Params: []string{"key"}, Native: func(args []any) (any, error) {
-		if len(args) == 0 { return "", nil }
+		if len(args) == 0 {
+			return "", nil
+		}
 		return vfs.Getenv(ToString(args[0])), nil
 	}}
 
 	// os.Setenv(key, value) error
 	osPkg.Funcs["Setenv"] = &Function{Name: "Setenv", Params: []string{"key", "value"}, Native: func(args []any) (any, error) {
-		if len(args) < 2 { return nil, NewRuntimeError("Setenv: need key and value") }
+		if len(args) < 2 {
+			return nil, NewRuntimeError("Setenv: need key and value")
+		}
 		vfs.Setenv(ToString(args[0]), ToString(args[1]))
 		return nil, nil
 	}}
@@ -761,7 +1087,9 @@ func registerOsPackage(vm *Interpreter) {
 	osPkg.Funcs["Environ"] = &Function{Name: "Environ", Native: func(args []any) (any, error) {
 		pairs := vfs.Environ()
 		sv := &SliceVal{ElementType: "string", Data: []any{}}
-		for _, p := range pairs { sv.Data = append(sv.Data, p) }
+		for _, p := range pairs {
+			sv.Data = append(sv.Data, p)
+		}
 		return sv, nil
 	}}
 
@@ -772,7 +1100,9 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Chdir(path) error
 	osPkg.Funcs["Chdir"] = &Function{Name: "Chdir", Params: []string{"path"}, Native: func(args []any) (any, error) {
-		if len(args) == 0 { return nil, NewRuntimeError("Chdir: missing path") }
+		if len(args) == 0 {
+			return nil, NewRuntimeError("Chdir: missing path")
+		}
 		return nil, vfs.Chdir(ToString(args[0]))
 	}}
 
@@ -789,7 +1119,9 @@ func registerOsPackage(vm *Interpreter) {
 	// os.Exit(code) — signals exit via a panic so the interpreter unwinds
 	osPkg.Funcs["Exit"] = &Function{Name: "Exit", Params: []string{"code"}, Native: func(args []any) (any, error) {
 		code := 0
-		if len(args) > 0 { code = ToInt(args[0]) }
+		if len(args) > 0 {
+			code = ToInt(args[0])
+		}
 		return nil, NewRuntimeError(fmt.Sprintf("os.Exit(%d)", code))
 	}}
 

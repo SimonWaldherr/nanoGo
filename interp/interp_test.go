@@ -1,9 +1,12 @@
 package interp
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestVM() (*Interpreter, *strings.Builder) {
@@ -1162,15 +1165,22 @@ func TestSharedVFSAcrossInterpreters(t *testing.T) {
 	var buf strings.Builder
 	registerTestNatives := func(vm *Interpreter) {
 		vm.RegisterNative("ConsoleLog", func(args []any) (any, error) {
-			if len(args) > 0 { buf.WriteString(ToString(args[0])); buf.WriteByte('\n') }
+			if len(args) > 0 {
+				buf.WriteString(ToString(args[0]))
+				buf.WriteByte('\n')
+			}
 			return nil, nil
 		})
 		vm.RegisterNative("ConsoleWarn", func(args []any) (any, error) { return nil, nil })
 		vm.RegisterNative("ConsoleError", func(args []any) (any, error) { return nil, nil })
 		vm.RegisterNative("__hostSprintf", func(args []any) (any, error) {
-			if len(args) == 0 { return "", nil }
+			if len(args) == 0 {
+				return "", nil
+			}
 			fmtArgs := make([]any, 0, len(args)-1)
-			for _, a := range args[1:] { fmtArgs = append(fmtArgs, a) }
+			for _, a := range args[1:] {
+				fmtArgs = append(fmtArgs, a)
+			}
 			return fmt.Sprintf(ToString(args[0]), fmtArgs...), nil
 		})
 		RegisterBuiltinPackages(vm)
@@ -1191,5 +1201,164 @@ func TestSharedVFSAcrossInterpreters(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "shared data") {
 		t.Errorf("expected 'shared data' read by vm2, got %q", buf.String())
+	}
+}
+
+func TestRunContextStopsBusyLoopAtDeadline(t *testing.T) {
+	vm, _ := newTestVM()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	err := vm.RunContext(ctx, `package main
+func main() { for { } }`)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunContext error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestRunContextInterruptsBlockingGuestChannel(t *testing.T) {
+	vm, _ := newTestVM()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	err := vm.RunContext(ctx, `package main
+func main() { ch := make(chan int); <-ch }`)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunContext error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestKillStopsRunningProgram(t *testing.T) {
+	vm, _ := newTestVM()
+	done := make(chan error, 1)
+	go func() {
+		done <- vm.RunContext(context.Background(), `package main
+func main() { ch := make(chan int); <-ch }`)
+	}()
+
+	deadline := time.After(time.Second)
+	for !vm.IsRunning() {
+		select {
+		case <-deadline:
+			t.Fatal("interpreter did not start")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if !vm.Kill() {
+		t.Fatal("Kill returned false while program was running")
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrKilled) {
+			t.Fatalf("RunContext error = %v, want ErrKilled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Kill did not unblock RunContext")
+	}
+}
+
+func TestHostChannelBridgeRoundTrip(t *testing.T) {
+	vm, _ := newTestVM()
+	bridge := NewHostChannel(1)
+	if err := vm.BindHostChannel("hostIn", "hostOut", bridge); err != nil {
+		t.Fatalf("BindHostChannel: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- vm.RunContext(context.Background(), `package main
+func main() {
+    request := <-hostIn
+    hostOut <- "echo: " + request
+}`)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bridge.Send(ctx, "ping"); err != nil {
+		t.Fatalf("bridge.Send: %v", err)
+	}
+	response, err := bridge.Receive(ctx)
+	if err != nil {
+		t.Fatalf("bridge.Receive: %v", err)
+	}
+	if response != "echo: ping" {
+		t.Fatalf("bridge response = %#v, want echo", response)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("RunContext: %v", err)
+	}
+}
+
+func TestHostChannelIsDirectionallyProtected(t *testing.T) {
+	vm, _ := newTestVM()
+	bridge := NewHostChannel(1)
+	if err := vm.BindHostChannel("hostIn", "hostOut", bridge); err != nil {
+		t.Fatalf("BindHostChannel: %v", err)
+	}
+	err := vm.Run(`package main
+func main() { hostIn <- "forbidden" }`)
+	if err == nil || !strings.Contains(err.Error(), "receive-only host channel") {
+		t.Fatalf("Run error = %v, want protected input failure", err)
+	}
+}
+
+func TestHostChannelInputCloseLooksClosedToGuest(t *testing.T) {
+	vm, _ := newTestVM()
+	bridge := NewHostChannel(1)
+	if err := vm.BindHostChannel("hostIn", "hostOut", bridge); err != nil {
+		t.Fatalf("BindHostChannel: %v", err)
+	}
+	bridge.CloseInput()
+	if err := vm.Run(`package main
+func main() {
+    _, open := <-hostIn
+    if !open { hostOut <- "closed" }
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	value, err := bridge.Receive(ctx)
+	if err != nil {
+		t.Fatalf("bridge.Receive: %v", err)
+	}
+	if value != "closed" {
+		t.Fatalf("bridge close response = %#v, want closed", value)
+	}
+}
+
+func TestMakeRejectsUnsafeSizes(t *testing.T) {
+	vm, _ := newTestVM()
+	err := vm.Run(`package main
+func main() { _ = make([]int, -1) }`)
+	if err == nil || !strings.Contains(err.Error(), "negative size") {
+		t.Fatalf("Run error = %v, want negative size failure", err)
+	}
+	err = vm.Run(`package main
+func main() { _ = make(chan int, 2000000) }`)
+	if err == nil || !strings.Contains(err.Error(), "interpreter limit") {
+		t.Fatalf("Run error = %v, want container-limit failure", err)
+	}
+}
+
+func TestExecutionStepLimitStopsBusyLoop(t *testing.T) {
+	vm, _ := newTestVM()
+	vm.Limits = ExecutionLimits{MaxSteps: 50}
+	err := vm.Run(`package main
+func main() { for { } }`)
+	if !errors.Is(err, ErrStepLimit) {
+		t.Fatalf("Run error = %v, want ErrStepLimit", err)
+	}
+}
+
+func TestExecutionGoroutineLimitRejectsExcessGuests(t *testing.T) {
+	vm, _ := newTestVM()
+	vm.Limits = ExecutionLimits{MaxGoroutines: 1}
+	err := vm.Run(`package main
+func main() {
+    block := make(chan int)
+    go func() { <-block }()
+    go func() { <-block }()
+}`)
+	if !errors.Is(err, ErrGoroutineLimit) {
+		t.Fatalf("Run error = %v, want ErrGoroutineLimit", err)
 	}
 }
