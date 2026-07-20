@@ -25,7 +25,12 @@ func readmeGoExamples(t *testing.T) []string {
 			inGoBlock = true
 			source.Reset()
 		case line == "```" && inGoBlock:
-			examples = append(examples, source.String())
+			// README also contains host-integration snippets. Only complete
+			// nanoGo programs (which begin with package main) can be executed by
+			// this interpreter-level regression test.
+			if strings.HasPrefix(strings.TrimSpace(source.String()), "package main") {
+				examples = append(examples, source.String())
+			}
 			inGoBlock = false
 		case inGoBlock:
 			source.WriteString(line)

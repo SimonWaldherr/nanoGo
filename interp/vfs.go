@@ -76,6 +76,14 @@ func (fs *VFS) Getwd() string {
 	return fs.cwd
 }
 
+// ResolvePath returns p as a clean, absolute VFS path using the current
+// working directory. It performs no I/O and is useful for capability checks.
+func (fs *VFS) ResolvePath(p string) string {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	return cleanPath(p, fs.cwd)
+}
+
 // Chdir changes the current working directory.
 func (fs *VFS) Chdir(p string) error {
 	fs.mu.Lock()

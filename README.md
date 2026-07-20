@@ -270,6 +270,40 @@ the current `context.Context`. The default interpreter also limits allocations
 made through `make` and `append` to `DefaultMaxContainerSize` entries; set
 `vm.MaxContainerSize` before execution when a trusted workload needs more.
 
+### Request context across the host boundary
+
+`RunContext` already passes cancellation and deadlines through the interpreter:
+they interrupt evaluation, guest channel operations, and context-aware host
+natives. Go context values are intentionally opaque and cannot be safely
+enumerated, so nanoGo does **not** receive a raw `context.Context`. Instead,
+allow-list the small set of serializable request fields that the guest needs.
+
+```go
+type contextKey string
+const requestIDKey contextKey = "request-id"
+
+ctx = context.WithValue(ctx, requestIDKey, "req-7f8c")
+if err := vm.BindHostContext("hostContext", ctx,
+    interp.ContextField{Name: "requestID", Key: requestIDKey},
+); err != nil {
+    log.Fatal(err)
+}
+
+// Use the same context, or a child of it, for execution.
+if err := vm.RunContext(ctx, source); err != nil { /* ... */ }
+```
+
+The guest sees a copied map such as
+`hostContext["values"]["requestID"]`, plus `hasDeadline` and
+`deadlineUnixMilli`. It can mutate its local copy without changing host data.
+Useful shared data is request/trace IDs, tenant-safe identifiers, locale,
+feature flags, and bounded input/configuration. Keep credentials, session
+tokens, raw user profiles, database handles, host functions, and capability
+objects on the host side. Use `HostChannel` for live request/response events
+and a deliberately scoped VFS only when persistent guest data is required.
+
+See [examples/host_context](examples/host_context) for a runnable program.
+
 For deterministic limits in addition to a wall-clock context, configure
 `vm.Limits`. `MaxSteps` caps evaluator checkpoints and `MaxGoroutines` caps
 simultaneously active guest goroutines. Set an individual value to `0` only for
@@ -282,11 +316,13 @@ vm.Limits = interp.ExecutionLimits{
 }
 ```
 
-Runnable host integrations are available in [examples/host_bridge](examples/host_bridge)
-and [examples/resource_limits](examples/resource_limits):
+Runnable host integrations are available in [examples/host_bridge](examples/host_bridge),
+[examples/host_context](examples/host_context), and
+[examples/resource_limits](examples/resource_limits):
 
 ```bash
 go run ./examples/host_bridge
+go run ./examples/host_context
 go run ./examples/resource_limits
 ```
 
@@ -300,7 +336,10 @@ the interpreter before `RunContext`.
 vm.Capabilities = interp.Capabilities{
     FileSystem: interp.FileSystemCapabilities{
         Read:  true,
-        Write: false, // os.WriteFile, Remove, Mkdir, Chdir, Setenv stay denied
+        Write: false, // os.WriteFile, Remove, Mkdir, Setenv stay denied
+        // Optional absolute VFS roots; relative guest paths and ".." are
+        // resolved before this allow-list is checked.
+        ReadPaths: []string{"/home/user/project/assets"},
     },
     Network: interp.NetworkCapabilities{
         HTTP:         true,
@@ -316,6 +355,13 @@ The transport native must still enforce DNS/IP egress restrictions, because DNS
 can resolve a permitted hostname to an internal IP address. `FullCapabilities()`
 exists for trusted development code only. Direct `RegisterNative` functions are
 explicit host capabilities and must enforce their own authorization.
+
+`ReadPaths` and `WritePaths` are optional VFS-root allow-lists. A matching root
+grants access to the root and its descendants; an empty list permits every VFS
+path after the respective `Read` or `Write` bit has been granted. Policy roots
+must be absolute. This is also applied to host-proxied `fs.ReadFile`, which
+receives the canonical, checked absolute VFS path. A host native must still
+enforce the equivalent policy when it maps that VFS path onto real files.
 
 ### Local debugging timeline
 

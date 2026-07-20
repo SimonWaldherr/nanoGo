@@ -672,11 +672,15 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	// --- fs (read-only, host-proxied) ---
 	fsPkg := &Package{Name: "fs", Funcs: map[string]*Function{}}
 	fsPkg.Funcs["ReadFile"] = &Function{Name: "ReadFile", Params: []string{"path"}, Native: func(args []any) (any, error) {
-		if err := vm.requireFileRead("fs.ReadFile"); err != nil {
+		if len(args) == 0 {
+			return "", NewRuntimeError("fs.ReadFile: missing path")
+		}
+		filePath, err := vm.requireFileRead("fs.ReadFile", ToString(args[0]))
+		if err != nil {
 			return "", err
 		}
 		if n, ok := vm.natives["HostReadFile"]; ok {
-			v, err := n([]any{ToString(args[0])})
+			v, err := n([]any{filePath})
 			return v, err
 		}
 		return "", NewRuntimeError("host readfile not available")
@@ -963,8 +967,8 @@ func (vm *Interpreter) installImportedPackage(alias, path string) {
 // It mirrors the most commonly used functions from the standard library os package.
 func registerOsPackage(vm *Interpreter) {
 	vfs := vm.VFS
-	requireRead := func(operation string) error { return vm.requireFileRead(operation) }
-	requireWrite := func(operation string) error { return vm.requireFileWrite(operation) }
+	requireRead := func(operation, filePath string) (string, error) { return vm.requireFileRead(operation, filePath) }
+	requireWrite := func(operation, filePath string) (string, error) { return vm.requireFileWrite(operation, filePath) }
 
 	// Helper: build a *StructVal representing a FileInfo.
 	fileInfoStruct := func(fi *VFSFileInfo) *StructVal {
@@ -1006,13 +1010,14 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.ReadFile(path) (string, error)
 	osPkg.Funcs["ReadFile"] = &Function{Name: "ReadFile", Params: []string{"path"}, Native: func(args []any) (any, error) {
-		if err := requireRead("os.ReadFile"); err != nil {
-			return "", err
-		}
 		if len(args) == 0 {
 			return "", NewRuntimeError("ReadFile: missing path")
 		}
-		data, err := vfs.ReadFile(ToString(args[0]))
+		filePath, err := requireRead("os.ReadFile", ToString(args[0]))
+		if err != nil {
+			return "", err
+		}
+		data, err := vfs.ReadFile(filePath)
 		if err != nil {
 			return "", err
 		}
@@ -1021,11 +1026,12 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.WriteFile(path, data, perm)
 	osPkg.Funcs["WriteFile"] = &Function{Name: "WriteFile", Params: []string{"path", "data", "perm"}, Native: func(args []any) (any, error) {
-		if err := requireWrite("os.WriteFile"); err != nil {
-			return nil, err
-		}
 		if len(args) < 2 {
 			return nil, NewRuntimeError("WriteFile: missing args")
+		}
+		filePath, err := requireWrite("os.WriteFile", ToString(args[0]))
+		if err != nil {
+			return nil, err
 		}
 		mode := 0644
 		if len(args) >= 3 {
@@ -1038,70 +1044,75 @@ func registerOsPackage(vm *Interpreter) {
 		default:
 			data = []byte(ToString(args[1]))
 		}
-		return nil, vfs.WriteFile(ToString(args[0]), data, mode)
+		return nil, vfs.WriteFile(filePath, data, mode)
 	}}
 
 	// os.Mkdir(path, perm)
 	osPkg.Funcs["Mkdir"] = &Function{Name: "Mkdir", Params: []string{"path", "perm"}, Native: func(args []any) (any, error) {
-		if err := requireWrite("os.Mkdir"); err != nil {
-			return nil, err
-		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("Mkdir: missing path")
+		}
+		filePath, err := requireWrite("os.Mkdir", ToString(args[0]))
+		if err != nil {
+			return nil, err
 		}
 		mode := 0755
 		if len(args) >= 2 {
 			mode = ToInt(args[1])
 		}
-		return nil, vfs.Mkdir(ToString(args[0]), mode)
+		return nil, vfs.Mkdir(filePath, mode)
 	}}
 
 	// os.MkdirAll(path, perm)
 	osPkg.Funcs["MkdirAll"] = &Function{Name: "MkdirAll", Params: []string{"path", "perm"}, Native: func(args []any) (any, error) {
-		if err := requireWrite("os.MkdirAll"); err != nil {
-			return nil, err
-		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("MkdirAll: missing path")
+		}
+		filePath, err := requireWrite("os.MkdirAll", ToString(args[0]))
+		if err != nil {
+			return nil, err
 		}
 		mode := 0755
 		if len(args) >= 2 {
 			mode = ToInt(args[1])
 		}
-		return nil, vfs.MkdirAll(ToString(args[0]), mode)
+		return nil, vfs.MkdirAll(filePath, mode)
 	}}
 
 	// os.Remove(path)
 	osPkg.Funcs["Remove"] = &Function{Name: "Remove", Params: []string{"path"}, Native: func(args []any) (any, error) {
-		if err := requireWrite("os.Remove"); err != nil {
-			return nil, err
-		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("Remove: missing path")
 		}
-		return nil, vfs.Remove(ToString(args[0]))
+		filePath, err := requireWrite("os.Remove", ToString(args[0]))
+		if err != nil {
+			return nil, err
+		}
+		return nil, vfs.Remove(filePath)
 	}}
 
 	// os.RemoveAll(path)
 	osPkg.Funcs["RemoveAll"] = &Function{Name: "RemoveAll", Params: []string{"path"}, Native: func(args []any) (any, error) {
-		if err := requireWrite("os.RemoveAll"); err != nil {
-			return nil, err
-		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("RemoveAll: missing path")
 		}
-		return nil, vfs.RemoveAll(ToString(args[0]))
+		filePath, err := requireWrite("os.RemoveAll", ToString(args[0]))
+		if err != nil {
+			return nil, err
+		}
+		return nil, vfs.RemoveAll(filePath)
 	}}
 
 	// os.Stat(path) (*FileInfo, error)
 	osPkg.Funcs["Stat"] = &Function{Name: "Stat", Params: []string{"path"}, Native: func(args []any) (any, error) {
-		if err := requireRead("os.Stat"); err != nil {
-			return nil, err
-		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("Stat: missing path")
 		}
-		fi, err := vfs.Stat(ToString(args[0]))
+		filePath, err := requireRead("os.Stat", ToString(args[0]))
+		if err != nil {
+			return nil, err
+		}
+		fi, err := vfs.Stat(filePath)
 		if err != nil {
 			return nil, err
 		}
@@ -1110,13 +1121,14 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.ReadDir(path) ([]DirEntry, error)
 	osPkg.Funcs["ReadDir"] = &Function{Name: "ReadDir", Params: []string{"path"}, Native: func(args []any) (any, error) {
-		if err := requireRead("os.ReadDir"); err != nil {
-			return nil, err
-		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("ReadDir: missing path")
 		}
-		entries, err := vfs.ReadDir(ToString(args[0]))
+		filePath, err := requireRead("os.ReadDir", ToString(args[0]))
+		if err != nil {
+			return nil, err
+		}
+		entries, err := vfs.ReadDir(filePath)
 		if err != nil {
 			return nil, err
 		}
@@ -1125,7 +1137,7 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Getenv(key) string
 	osPkg.Funcs["Getenv"] = &Function{Name: "Getenv", Params: []string{"key"}, Native: func(args []any) (any, error) {
-		if err := requireRead("os.Getenv"); err != nil {
+		if _, err := requireRead("os.Getenv", ""); err != nil {
 			return "", err
 		}
 		if len(args) == 0 {
@@ -1136,7 +1148,7 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Setenv(key, value) error
 	osPkg.Funcs["Setenv"] = &Function{Name: "Setenv", Params: []string{"key", "value"}, Native: func(args []any) (any, error) {
-		if err := requireWrite("os.Setenv"); err != nil {
+		if _, err := requireWrite("os.Setenv", ""); err != nil {
 			return nil, err
 		}
 		if len(args) < 2 {
@@ -1148,7 +1160,7 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Environ() []string
 	osPkg.Funcs["Environ"] = &Function{Name: "Environ", Native: func(args []any) (any, error) {
-		if err := requireRead("os.Environ"); err != nil {
+		if _, err := requireRead("os.Environ", ""); err != nil {
 			return nil, err
 		}
 		pairs := vfs.Environ()
@@ -1166,13 +1178,14 @@ func registerOsPackage(vm *Interpreter) {
 
 	// os.Chdir(path) error
 	osPkg.Funcs["Chdir"] = &Function{Name: "Chdir", Params: []string{"path"}, Native: func(args []any) (any, error) {
-		if err := requireWrite("os.Chdir"); err != nil {
-			return nil, err
-		}
 		if len(args) == 0 {
 			return nil, NewRuntimeError("Chdir: missing path")
 		}
-		return nil, vfs.Chdir(ToString(args[0]))
+		filePath, err := requireRead("os.Chdir", ToString(args[0]))
+		if err != nil {
+			return nil, err
+		}
+		return nil, vfs.Chdir(filePath)
 	}}
 
 	// os.TempDir() string

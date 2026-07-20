@@ -1330,6 +1330,68 @@ func main() {
 	}
 }
 
+type hostContextTestKey string
+
+func TestBindHostContextExposesOnlySelectedCopiedValues(t *testing.T) {
+	const requestIDKey hostContextTestKey = "request-id"
+	const flagsKey hostContextTestKey = "flags"
+	const secretKey hostContextTestKey = "secret"
+	flags := map[string]any{"beta": true}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	ctx = context.WithValue(ctx, requestIDKey, "req-42")
+	ctx = context.WithValue(ctx, flagsKey, flags)
+	ctx = context.WithValue(ctx, secretKey, "must-not-leak")
+	snapshot, err := ContextSnapshot(ctx, ContextField{Name: "requestID", Key: requestIDKey})
+	if err != nil {
+		t.Fatalf("ContextSnapshot: %v", err)
+	}
+	if !snapshot["hasDeadline"].(bool) || snapshot["deadlineUnixMilli"].(int64) <= time.Now().UnixMilli() {
+		t.Fatalf("snapshot deadline = %#v, want a future deadline", snapshot)
+	}
+
+	vm, out := newTestVM()
+	if err := vm.BindHostContext("hostContext", ctx,
+		ContextField{Name: "requestID", Key: requestIDKey},
+		ContextField{Name: "flags", Key: flagsKey},
+	); err != nil {
+		t.Fatalf("BindHostContext: %v", err)
+	}
+	// Binding is a snapshot. A host mutation after it returns is invisible to
+	// the guest program.
+	flags["beta"] = false
+
+	err = vm.RunContext(ctx, `package main
+import "fmt"
+func main() {
+    values := hostContext["values"]
+    fmt.Println(values["requestID"])
+    fmt.Println(values["flags"]["beta"])
+    fmt.Println(hostContext["hasDeadline"])
+    if values["secret"] != nil { panic("secret leaked") }
+}`)
+	if err != nil {
+		t.Fatalf("RunContext: %v", err)
+	}
+	if got, want := out.String(), "req-42\ntrue\ntrue\n"; got != want {
+		t.Fatalf("guest context output = %q, want %q", got, want)
+	}
+}
+
+func TestContextSnapshotRejectsUnsafeValuesAndFields(t *testing.T) {
+	const valueKey hostContextTestKey = "value"
+	ctx := context.WithValue(context.Background(), valueKey, make(chan int))
+	if _, err := ContextSnapshot(ctx, ContextField{Name: "value", Key: valueKey}); err == nil || !strings.Contains(err.Error(), "unsupported host channel value") {
+		t.Fatalf("unsafe context value error = %v, want bridge rejection", err)
+	}
+	if _, err := ContextSnapshot(context.Background(), ContextField{Name: "", Key: valueKey}); err == nil {
+		t.Fatal("empty context field name was accepted")
+	}
+	if _, err := ContextSnapshot(context.Background(), ContextField{Name: "bad", Key: []string{"not", "comparable"}}); err == nil || !strings.Contains(err.Error(), "non-comparable") {
+		t.Fatalf("non-comparable context key error = %v", err)
+	}
+}
+
 func TestMakeRejectsUnsafeSizes(t *testing.T) {
 	vm, _ := newTestVM()
 	err := vm.Run(`package main
@@ -1422,6 +1484,59 @@ import "http"
 func main() { http.GetText("http://127.0.0.1:8080/") }`)
 	if err == nil || !strings.Contains(err.Error(), "host 127.0.0.1") {
 		t.Fatalf("private host error = %v, want denied host", err)
+	}
+}
+
+func TestCapabilitiesRestrictFilesystemPaths(t *testing.T) {
+	vm := NewInterpreter()
+	vm.Capabilities = Capabilities{FileSystem: FileSystemCapabilities{
+		Read:       true,
+		Write:      true,
+		ReadPaths:  []string{"/home/user/sandbox"},
+		WritePaths: []string{"/home/user/sandbox"},
+	}}
+	if err := vm.VFS.Mkdir("/home/user/sandbox", 0755); err != nil {
+		t.Fatalf("prepare VFS: %v", err)
+	}
+	RegisterBuiltinPackages(vm)
+
+	if err := vm.Run(`package main
+import "os"
+func main() { os.WriteFile("sandbox/note.txt", "ok", 0644) }`); err != nil {
+		t.Fatalf("allowed write: %v", err)
+	}
+	if got, err := vm.VFS.ReadFile("/home/user/sandbox/note.txt"); err != nil || string(got) != "ok" {
+		t.Fatalf("allowed write result = %q, %v", got, err)
+	}
+	if err := vm.Run(`package main
+import "os"
+func main() { os.WriteFile("../escape.txt", "no", 0644) }`); err == nil || !strings.Contains(err.Error(), "filesystem write denied") {
+		t.Fatalf("escaped write error = %v, want denied", err)
+	}
+	if err := vm.Run(`package main
+import "os"
+func main() { os.ReadDir("/") }`); err == nil || !strings.Contains(err.Error(), "filesystem read denied") {
+		t.Fatalf("root directory read error = %v, want denied", err)
+	}
+}
+
+func TestFSReadFilePassesCanonicalAuthorizedPathToHost(t *testing.T) {
+	vm := NewInterpreter()
+	vm.Capabilities = Capabilities{FileSystem: FileSystemCapabilities{
+		Read:      true,
+		ReadPaths: []string{"/home/user/sandbox"},
+	}}
+	vm.RegisterNative("HostReadFile", func(args []any) (any, error) {
+		if len(args) != 1 || ToString(args[0]) != "/home/user/sandbox/note.txt" {
+			t.Fatalf("HostReadFile path = %#v, want canonical allowed path", args)
+		}
+		return "ok", nil
+	})
+	RegisterBuiltinPackages(vm)
+	if err := vm.Run(`package main
+import "fs"
+func main() { fs.ReadFile("sandbox/../sandbox/note.txt") }`); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 }
 

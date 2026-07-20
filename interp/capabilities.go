@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path"
 	"strings"
 )
 
@@ -22,6 +23,13 @@ type Capabilities struct {
 type FileSystemCapabilities struct {
 	Read  bool
 	Write bool
+
+	// ReadPaths and WritePaths optionally restrict operations to absolute VFS
+	// paths. A configured path grants access to that path and its descendants.
+	// An empty list means every VFS path is allowed for the corresponding
+	// operation. Paths are matched after resolving relative paths and "..".
+	ReadPaths  []string
+	WritePaths []string
 }
 
 // NetworkCapabilities applies to the built-in http package. HTTP enables
@@ -48,20 +56,48 @@ func FullCapabilities() Capabilities {
 	}
 }
 
-func (vm *Interpreter) requireFileRead(operation string) error {
-	if vm.Capabilities.FileSystem.Read {
-		return nil
+func (vm *Interpreter) requireFileRead(operation, filePath string) (string, error) {
+	policy := vm.Capabilities.FileSystem
+	resolvedPath := vm.resolveFilePath(filePath)
+	if policy.Read && filePathAllowed(resolvedPath, policy.ReadPaths) {
+		return resolvedPath, nil
 	}
-	vm.emitTrace("capability_denied", operation, "filesystem read", nil)
-	return NewRuntimeError("filesystem read denied: " + operation)
+	vm.emitTrace("capability_denied", operation, "filesystem read "+filePath, nil)
+	return "", NewRuntimeError("filesystem read denied: " + operation)
 }
 
-func (vm *Interpreter) requireFileWrite(operation string) error {
-	if vm.Capabilities.FileSystem.Write {
-		return nil
+func (vm *Interpreter) requireFileWrite(operation, filePath string) (string, error) {
+	policy := vm.Capabilities.FileSystem
+	resolvedPath := vm.resolveFilePath(filePath)
+	if policy.Write && filePathAllowed(resolvedPath, policy.WritePaths) {
+		return resolvedPath, nil
 	}
-	vm.emitTrace("capability_denied", operation, "filesystem write", nil)
-	return NewRuntimeError("filesystem write denied: " + operation)
+	vm.emitTrace("capability_denied", operation, "filesystem write "+filePath, nil)
+	return "", NewRuntimeError("filesystem write denied: " + operation)
+}
+
+func (vm *Interpreter) resolveFilePath(filePath string) string {
+	// Environment access is governed by Read/Write but is not a filesystem path.
+	if filePath == "" {
+		return ""
+	}
+	return vm.VFS.ResolvePath(filePath)
+}
+
+func filePathAllowed(resolvedPath string, allowedPaths []string) bool {
+	if resolvedPath == "" || len(allowedPaths) == 0 {
+		return true
+	}
+	for _, allowed := range allowedPaths {
+		if !path.IsAbs(allowed) {
+			continue
+		}
+		root := path.Clean(allowed)
+		if root == "/" || resolvedPath == root || strings.HasPrefix(resolvedPath, root+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (vm *Interpreter) requireHTTP(rawURL string) error {

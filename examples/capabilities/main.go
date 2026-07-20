@@ -13,7 +13,12 @@ import (
 func main() {
 	vm := interp.NewInterpreter()
 	vm.Capabilities = interp.Capabilities{
-		FileSystem: interp.FileSystemCapabilities{Read: true, Write: true},
+		FileSystem: interp.FileSystemCapabilities{
+			Read:       true,
+			Write:      true,
+			ReadPaths:  []string{"/tmp/nanogo-example"},
+			WritePaths: []string{"/tmp/nanogo-example"},
+		},
 		Network: interp.NetworkCapabilities{
 			HTTP:         true,
 			AllowedHosts: []string{"api.example.com"},
@@ -44,8 +49,9 @@ import (
 )
 
 func main() {
-	os.WriteFile("/tmp/message.txt", "stored in the VFS", 0644)
-	message, _ := os.ReadFile("/tmp/message.txt")
+	os.MkdirAll("/tmp/nanogo-example", 0755)
+	os.WriteFile("/tmp/nanogo-example/message.txt", "stored in the VFS", 0644)
+	message, _ := os.ReadFile("/tmp/nanogo-example/message.txt")
 	fmt.Println(message)
 	fmt.Println(http.GetText("https://api.example.com/status"))
 }`)
