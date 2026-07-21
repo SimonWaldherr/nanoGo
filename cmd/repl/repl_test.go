@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"simonwaldherr.de/go/nanogo/interp"
 )
 
 func TestLooksLikeDecl(t *testing.T) {
@@ -52,13 +57,12 @@ func TestTryConvertShortVarDecl(t *testing.T) {
 }
 
 func TestBuildDeclSource(t *testing.T) {
-	imports := []string{`import "fmt"`}
-	src := buildDeclSource(imports, "func greet() {}")
+	src := buildDeclSource("func greet() {}")
 	if !strings.Contains(src, "package main") {
 		t.Error("missing package main")
 	}
-	if !strings.Contains(src, `import "fmt"`) {
-		t.Error("missing import")
+	if strings.Contains(src, "import ") {
+		t.Error("declaration source must not repeat prior imports")
 	}
 	if !strings.Contains(src, "func greet()") {
 		t.Error("missing declaration")
@@ -69,19 +73,46 @@ func TestBuildDeclSource(t *testing.T) {
 }
 
 func TestBuildStmtSource(t *testing.T) {
-	imports := []string{`import "fmt"`}
-	src := buildStmtSource(imports, `fmt.Println("hello")`)
+	src := buildStmtSource(`fmt.Println("hello")`)
 	if !strings.Contains(src, "package main") {
 		t.Error("missing package main")
 	}
-	if !strings.Contains(src, `import "fmt"`) {
-		t.Error("missing import")
+	if strings.Contains(src, "import ") {
+		t.Error("statement source must not repeat prior imports")
 	}
 	if !strings.Contains(src, "func main()") {
 		t.Error("missing main function")
 	}
 	if !strings.Contains(src, `fmt.Println("hello")`) {
 		t.Error("missing statement")
+	}
+}
+
+func TestImportedAliasPersistsWithoutRepeatedImports(t *testing.T) {
+	vm := interp.NewInterpreter()
+	interp.RegisterBuiltinPackages(vm)
+	if err := runREPLSource(vm, time.Second, "package main\nimport f \"fmt\"\nfunc main() {}\n"); err != nil {
+		t.Fatalf("import alias: %v", err)
+	}
+	if err := runREPLSource(vm, time.Second, buildStmtSource(`f.Println("ok")`)); err != nil {
+		t.Fatalf("use persisted alias: %v", err)
+	}
+}
+
+func TestREPLSourceTimeout(t *testing.T) {
+	vm := interp.NewInterpreter()
+	err := runREPLSource(vm, 20*time.Millisecond, "package main\nfunc main() { for { } }\n")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timeout error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestTimeoutDescription(t *testing.T) {
+	if got := timeoutDescription(0); got != "off" {
+		t.Fatalf("disabled timeout = %q", got)
+	}
+	if got := timeoutDescription(2 * time.Second); got != "2s" {
+		t.Fatalf("enabled timeout = %q", got)
 	}
 }
 

@@ -2,13 +2,18 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"time"
 	"unicode"
 
 	"simonwaldherr.de/go/nanogo/interp"
 )
+
+const defaultEvaluationTimeout = 10 * time.Second
 
 func main() {
 	vm := interp.NewInterpreter()
@@ -16,9 +21,26 @@ func main() {
 	interp.RegisterBuiltinPackages(vm)
 
 	fmt.Println("nanoGo REPL — enter declarations (func, var, const, type, import) or statements.")
-	fmt.Println("Special commands: :fmt <code>  :vet <code>  Ctrl-D to exit.")
+	fmt.Println("Commands: :fmt <code>  :vet <code>  :timeout <duration|off>  Ctrl-C to stop  Ctrl-D to exit.")
 	reader := bufio.NewReader(os.Stdin)
-	var importLines []string
+	timeout := defaultEvaluationTimeout
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	defer signal.Stop(interrupts)
+	stopSignals := make(chan struct{})
+	defer close(stopSignals)
+	go func() {
+		for {
+			select {
+			case <-stopSignals:
+				return
+			case <-interrupts:
+				if vm.Kill() {
+					fmt.Fprintln(os.Stderr, "\ninterrupted")
+				}
+			}
+		}
+	}()
 
 	for {
 		fmt.Print("ng> ")
@@ -36,6 +58,27 @@ func main() {
 		}
 
 		// Special REPL commands.
+		if strings.HasPrefix(line, ":timeout") {
+			value := strings.TrimSpace(strings.TrimPrefix(line, ":timeout"))
+			if value == "" {
+				fmt.Println("timeout:", timeoutDescription(timeout))
+				continue
+			}
+			if value == "off" {
+				timeout = 0
+				fmt.Println("timeout disabled")
+				continue
+			}
+			parsed, parseErr := time.ParseDuration(value)
+			if parseErr != nil || parsed <= 0 {
+				fmt.Println("usage: :timeout <positive duration|off> (for example: :timeout 2s)")
+				continue
+			}
+			timeout = parsed
+			fmt.Println("timeout:", timeoutDescription(timeout))
+			continue
+		}
+
 		if strings.HasPrefix(line, ":fmt ") || line == ":fmt" {
 			code := strings.TrimSpace(strings.TrimPrefix(line, ":fmt"))
 			if code == "" {
@@ -75,17 +118,16 @@ func main() {
 		}
 
 		if strings.HasPrefix(line, "import ") {
-			importLines = append(importLines, line)
 			src := "package main\n" + line + "\nfunc main() {}\n"
-			if err := vm.Run(src); err != nil {
+			if err := runREPLSource(vm, timeout, src); err != nil {
 				fmt.Println("error:", err)
 			}
 			continue
 		}
 
 		if looksLikeDecl(line) {
-			src := buildDeclSource(importLines, line)
-			if err := vm.Run(src); err != nil {
+			src := buildDeclSource(line)
+			if err := runREPLSource(vm, timeout, src); err != nil {
 				fmt.Println("error:", err)
 			}
 			continue
@@ -94,19 +136,35 @@ func main() {
 		// Convert simple short-variable declarations (x := expr) to top-level var
 		// declarations so their values persist in the VM's global state.
 		if converted, ok := tryConvertShortVarDecl(line); ok {
-			src := buildDeclSource(importLines, converted)
-			if err := vm.Run(src); err != nil {
+			src := buildDeclSource(converted)
+			if err := runREPLSource(vm, timeout, src); err != nil {
 				fmt.Println("error:", err)
 			}
 			continue
 		}
 
 		// Regular statement — executed in main() context with access to all globals.
-		src := buildStmtSource(importLines, line)
-		if err := vm.Run(src); err != nil {
+		src := buildStmtSource(line)
+		if err := runREPLSource(vm, timeout, src); err != nil {
 			fmt.Println("error:", err)
 		}
 	}
+}
+
+func runREPLSource(vm *interp.Interpreter, timeout time.Duration, src string) error {
+	if timeout <= 0 {
+		return vm.RunContext(context.Background(), src)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return vm.RunContext(ctx, src)
+}
+
+func timeoutDescription(timeout time.Duration) string {
+	if timeout <= 0 {
+		return "off"
+	}
+	return timeout.String()
 }
 
 // looksLikeDecl reports whether a line is a top-level Go declaration.
@@ -154,27 +212,23 @@ func isSimpleIdent(s string) bool {
 }
 
 // buildDeclSource wraps a single declaration in a minimal package main with a no-op main().
-func buildDeclSource(imports []string, decl string) string {
+// Imports are evaluated once and their package aliases persist in the VM, so
+// subsequent declarations do not repeatedly parse every prior import line.
+func buildDeclSource(decl string) string {
 	var b strings.Builder
+	b.Grow(len(decl) + 32)
 	b.WriteString("package main\n")
-	for _, imp := range imports {
-		b.WriteString(imp)
-		b.WriteString("\n")
-	}
 	b.WriteString(decl)
 	b.WriteString("\nfunc main() {}\n")
 	return b.String()
 }
 
 // buildStmtSource wraps a statement in a package main / main() so it runs in the
-// persistent VM's global context.
-func buildStmtSource(imports []string, stmt string) string {
+// persistent VM's global context. Imported aliases are already VM globals.
+func buildStmtSource(stmt string) string {
 	var b strings.Builder
+	b.Grow(len(stmt) + 32)
 	b.WriteString("package main\n")
-	for _, imp := range imports {
-		b.WriteString(imp)
-		b.WriteString("\n")
-	}
 	b.WriteString("func main() {\n")
 	b.WriteString(stmt)
 	b.WriteString("\n}\n")

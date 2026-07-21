@@ -506,6 +506,20 @@ make clean
 make tidy
 ```
 
+### REPL
+
+The REPL keeps declarations and imported aliases in one interpreter session,
+but no longer reparses every prior import for each statement. Each evaluation
+has a 10-second cancellation-aware timeout by default; `Ctrl-C` cooperatively
+stops a running guest program.
+
+```text
+:timeout 2s    # set a per-evaluation deadline
+:timeout off   # disable it for trusted experiments
+:fmt <code>    # format a snippet
+:vet <code>    # inspect a statement
+```
+
 ### Running the Web Playground
 
 ```bash
