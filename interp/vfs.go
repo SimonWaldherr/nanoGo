@@ -16,8 +16,18 @@ import (
 type VFS struct {
 	mu    sync.RWMutex
 	nodes map[string]*vfsNode
-	env   map[string]string
-	cwd   string
+
+	// children is a parent-path -> child-name index kept in sync with every
+	// nodes mutation, so ReadDir/Remove/RemoveAll cost O(children) instead
+	// of scanning every node in the whole VFS regardless of the target
+	// directory's size — the flat map alone has no parent->children
+	// relationship. Every method that adds or removes a node must call
+	// addChildLocked/removeChildLocked (or removeSubtreeLocked for a whole
+	// subtree) while holding mu, so the two stay consistent.
+	children map[string]map[string]struct{}
+
+	env map[string]string
+	cwd string
 }
 
 type vfsNode struct {
@@ -42,9 +52,10 @@ type VFSFileInfo struct {
 func NewVFS() *VFS {
 	now := time.Now()
 	fs := &VFS{
-		nodes: map[string]*vfsNode{},
-		env:   map[string]string{"HOME": "/home/user", "PATH": "/usr/bin:/bin", "USER": "user"},
-		cwd:   "/home/user",
+		nodes:    map[string]*vfsNode{},
+		children: map[string]map[string]struct{}{},
+		env:      map[string]string{"HOME": "/home/user", "PATH": "/usr/bin:/bin", "USER": "user"},
+		cwd:      "/home/user",
 	}
 	for _, dir := range []string{
 		"/", "/bin", "/etc", "/home", "/home/user",
@@ -56,8 +67,47 @@ func NewVFS() *VFS {
 			modTime: now,
 			mode:    0755,
 		}
+		if dir != "/" {
+			fs.addChildLocked(dir)
+		}
 	}
 	return fs
+}
+
+// addChildLocked records that childPath is a child of its parent directory in
+// the children index. Caller must hold fs.mu for writing. childPath must not
+// be "/" (the root has no parent to register into).
+func (fs *VFS) addChildLocked(childPath string) {
+	parent := path.Dir(childPath)
+	if fs.children[parent] == nil {
+		fs.children[parent] = map[string]struct{}{}
+	}
+	fs.children[parent][path.Base(childPath)] = struct{}{}
+}
+
+// removeChildLocked removes childPath from its parent's children index.
+// Caller must hold fs.mu for writing.
+func (fs *VFS) removeChildLocked(childPath string) {
+	parent := path.Dir(childPath)
+	if m, ok := fs.children[parent]; ok {
+		delete(m, path.Base(childPath))
+		if len(m) == 0 {
+			delete(fs.children, parent)
+		}
+	}
+}
+
+// removeSubtreeLocked deletes abs, and — if it is a directory — every
+// descendant reachable through the children index, from both fs.nodes and
+// fs.children. It does not touch abs's entry in its own parent's children
+// set; callers that remove a subtree's root also call removeChildLocked for
+// that top-level path. Caller must hold fs.mu for writing.
+func (fs *VFS) removeSubtreeLocked(abs string) {
+	for name := range fs.children[abs] {
+		fs.removeSubtreeLocked(path.Join(abs, name))
+	}
+	delete(fs.children, abs)
+	delete(fs.nodes, abs)
 }
 
 // cleanPath resolves a path to an absolute, cleaned path.
@@ -144,6 +194,7 @@ func (fs *VFS) WriteFile(p string, data []byte, mode int) error {
 		modTime: time.Now(),
 		mode:    mode,
 	}
+	fs.addChildLocked(abs)
 	return nil
 }
 
@@ -167,6 +218,7 @@ func (fs *VFS) Mkdir(p string, mode int) error {
 		mode = 0755
 	}
 	fs.nodes[abs] = &vfsNode{name: path.Base(abs), isDir: true, modTime: time.Now(), mode: mode}
+	fs.addChildLocked(abs)
 	return nil
 }
 
@@ -190,6 +242,7 @@ func (fs *VFS) MkdirAll(p string, mode int) error {
 		current = path.Join(current, part)
 		if _, ok := fs.nodes[current]; !ok {
 			fs.nodes[current] = &vfsNode{name: part, isDir: true, modTime: time.Now(), mode: mode}
+			fs.addChildLocked(current)
 		}
 	}
 	return nil
@@ -207,14 +260,11 @@ func (fs *VFS) Remove(p string) error {
 	if !ok {
 		return fmt.Errorf("remove %s: no such file or directory", p)
 	}
-	if node.isDir {
-		for existing := range fs.nodes {
-			if existing != abs && path.Dir(existing) == abs {
-				return fmt.Errorf("remove %s: directory not empty", p)
-			}
-		}
+	if node.isDir && len(fs.children[abs]) > 0 {
+		return fmt.Errorf("remove %s: directory not empty", p)
 	}
 	delete(fs.nodes, abs)
+	fs.removeChildLocked(abs)
 	return nil
 }
 
@@ -229,11 +279,8 @@ func (fs *VFS) RemoveAll(p string) error {
 	if _, ok := fs.nodes[abs]; !ok {
 		return nil // not an error per os.RemoveAll contract
 	}
-	for existing := range fs.nodes {
-		if existing == abs || strings.HasPrefix(existing, abs+"/") {
-			delete(fs.nodes, existing)
-		}
-	}
+	fs.removeSubtreeLocked(abs)
+	fs.removeChildLocked(abs)
 	return nil
 }
 
@@ -264,16 +311,18 @@ func (fs *VFS) ReadDir(p string) ([]*VFSFileInfo, error) {
 		return nil, fmt.Errorf("open %s: no such file or directory", p)
 	}
 	var infos []*VFSFileInfo
-	for nodePath, node := range fs.nodes {
-		if nodePath != abs && path.Dir(nodePath) == abs {
-			infos = append(infos, &VFSFileInfo{
-				Name:    node.name,
-				Size:    len(node.content),
-				IsDir:   node.isDir,
-				ModTime: node.modTime,
-				Mode:    node.mode,
-			})
+	for name := range fs.children[abs] {
+		node, ok := fs.nodes[path.Join(abs, name)]
+		if !ok {
+			continue // children index and nodes must stay in sync; defensive only
 		}
+		infos = append(infos, &VFSFileInfo{
+			Name:    node.name,
+			Size:    len(node.content),
+			IsDir:   node.isDir,
+			ModTime: node.modTime,
+			Mode:    node.mode,
+		})
 	}
 	sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
 	return infos, nil

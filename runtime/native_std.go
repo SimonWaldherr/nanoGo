@@ -421,28 +421,33 @@ func RegisterHostNatives(vm *interp.Interpreter, canvas *CanvasBinding) {
 		return nil, nil
 	})
 
-	// HTTP & Storage
-	vm.RegisterNative("HTTPGetText", func(args []any) (any, error) {
+	// HTTP & Storage. Registered with RegisterInternalNative (not
+	// RegisterNative): these must only be reachable through
+	// http.GetText/PostText/storage.SetItem/GetItem's own wrapper functions
+	// in interp/packages.go, never as bare guest-callable identifiers.
+	vm.RegisterInternalNative("HTTPGetText", func(args []any) (any, error) {
 		if len(args) == 0 {
 			return "", nil
 		}
 		return HTTPGetText(interp.ToString(args[0]))
 	})
-	vm.RegisterNative("HTTPPostText", func(args []any) (any, error) {
+	vm.RegisterInternalNative("HTTPPostText", func(args []any) (any, error) {
 		if len(args) < 2 {
 			return "", nil
 		}
 		contentType := "application/json"
-		if len(args) >= 3 { contentType = interp.ToString(args[2]) }
+		if len(args) >= 3 {
+			contentType = interp.ToString(args[2])
+		}
 		return HTTPPostText(interp.ToString(args[0]), interp.ToString(args[1]), contentType)
 	})
-	vm.RegisterNative("LocalStorageSetItem", func(args []any) (any, error) {
+	vm.RegisterInternalNative("LocalStorageSetItem", func(args []any) (any, error) {
 		if len(args) >= 2 {
 			LocalStorageSetItem(interp.ToString(args[0]), interp.ToString(args[1]))
 		}
 		return nil, nil
 	})
-	vm.RegisterNative("LocalStorageGetItem", func(args []any) (any, error) {
+	vm.RegisterInternalNative("LocalStorageGetItem", func(args []any) (any, error) {
 		if len(args) >= 1 {
 			return LocalStorageGetItem(interp.ToString(args[0])), nil
 		}

@@ -1,4 +1,5 @@
-const CACHE_NAME = 'nanogo-playground-__BUILD_ID__';
+// Bump this when shell assets change: most local assets are served cache-first.
+const CACHE_NAME = 'nanogo-playground-ui-v2';
 const PRECACHE_URLS = [
   './',
   './index.html',
@@ -10,7 +11,6 @@ const PRECACHE_URLS = [
   './app.js',
   './assets/logo.svg',
   'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css',
-  'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/theme/material.min.css',
   'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js'
 ];

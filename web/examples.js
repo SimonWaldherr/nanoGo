@@ -189,7 +189,9 @@ func lifeStep(g [][]int) [][]int {
 
 func main() {
   fmt.Println("Game of Life")
-  w, h := 48, 30
+  // Keep this intentionally small: the playground also runs a deterministic
+  // evaluator step limit, so a compact grid leaves room for animation.
+  w, h := 24, 16
   browser.CanvasSize(w, h)
   grid := make([][]int, h)
   for y := 0; y < h; y++ {
@@ -197,7 +199,7 @@ func main() {
     for x := 0; x < w; x++ { if (x*y + y) % 7 == 0 { row[x] = 1 } }
     grid[y] = row
   }
-  for i := 0; i < 72; i++ {
+  for i := 0; i < 20; i++ {
     for y := 0; y < h; y++ {
       for x := 0; x < w; x++ {
         browser.CanvasSet(x, y, grid[y][x] == 1)
@@ -213,13 +215,16 @@ func main() {
   "HTTP + Storage": `package main
 
 import (
+  "browser"
   "fmt"
+  "http"
+  "storage"
   "strings"
 )
 
 func main() {
   // Fetch a small text (same-origin or CORS allowed)
-  txt := http.GetText("examples.js")
+  txt := http.GetText("https://jsonplaceholder.typicode.com/todos/1")
   fmt.Println("fetched len:", len(txt))
 
   // Store in nanoGo's browser storage API
@@ -342,12 +347,13 @@ func main() {
 
 import (
   "fmt"
+  "http"
   "strings"
 )
 
 func main() {
-  fmt.Println("Fetching examples.js (first 120 chars):")
-  txt := http.GetText("examples.js")
+  fmt.Println("Fetching a JSON document (first 120 chars):")
+  txt := http.GetText("https://jsonplaceholder.typicode.com/todos/1")
   if len(txt) == 0 {
     fmt.Println("fetch failed or CORS blocked")
     return
@@ -462,7 +468,7 @@ func main() {
   fmt.Println("Content:", content)
 
   // Write a second file
-  _ = os.WriteFile("/tmp/data.txt", "line one\nline two\n", 0644)
+  _ = os.WriteFile("/tmp/data.txt", "line one\\nline two\\n", 0644)
 
   // List /tmp directory
   entries, err := os.ReadDir("/tmp")
@@ -604,7 +610,7 @@ func main() {
   if err != nil {
     fmt.Println("Atoi error:", err)
   } else {
-    fmt.Println("Atoi(\"123\"):", n)
+    fmt.Println("Atoi(\\"123\\"):", n)
   }
 
   // float formatting

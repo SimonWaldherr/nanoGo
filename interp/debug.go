@@ -21,6 +21,12 @@ type TraceEvent struct {
 	Function string
 	Message  string
 	Location SourceLocation
+
+	// Assertion is set only for testing.T Errorf/Fatalf events (see
+	// interp/testing_pkg.go). It carries the call's raw pieces separately
+	// from Message, so a host-side sanitizer can drop Args while keeping
+	// Format/Fatal/Location.
+	Assertion *AssertionEvent
 }
 
 // SourceLocation identifies guest source when an event has an AST origin.
@@ -28,6 +34,13 @@ type SourceLocation struct {
 	File   string
 	Line   int
 	Column int
+}
+
+// AssertionEvent carries the raw pieces of one testing.T.Errorf/Fatalf call.
+type AssertionEvent struct {
+	Format string
+	Args   []any
+	Fatal  bool
 }
 
 // Tracer is a bounded, concurrency-safe event timeline. Its ring buffer avoids
@@ -105,6 +118,23 @@ func (vm *Interpreter) SetTracer(tracer *Tracer) {
 // Tracer returns the currently configured tracer, or nil when tracing is off.
 func (vm *Interpreter) Tracer() *Tracer {
 	return vm.tracer.Load()
+}
+
+// emitAssertionTrace records a testing.T.Errorf/Fatalf call. Unlike
+// emitTrace, it has no AST node to resolve a Location from — Errorf/Fatalf
+// are plain natives, not specially intercepted in evalExpr the way
+// debug.Q/debug.Mark are — so Location stays zero-value, matching every
+// other native call's call_start/call_end trace events today.
+func (vm *Interpreter) emitAssertionTrace(function string, assertion AssertionEvent) {
+	tracer := vm.tracer.Load()
+	if tracer == nil {
+		return
+	}
+	kind := "test_error"
+	if assertion.Fatal {
+		kind = "test_fatal"
+	}
+	tracer.record(TraceEvent{Kind: kind, Function: function, Message: assertion.Format, Assertion: &assertion})
 }
 
 func (vm *Interpreter) emitTrace(kind, function, message string, node ast.Node) {

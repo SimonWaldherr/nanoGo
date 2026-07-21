@@ -4,6 +4,7 @@ package interp
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -79,7 +80,7 @@ func ToNativeValue(v any) any {
 	case *MapVal:
 		out := make(map[string]any, len(x.Data))
 		for hashedKey, value := range x.Data {
-			out[fmt.Sprint(x.Keys[hashedKey])] = ToNativeValue(value)
+			out[mapKeyToString(x.Keys[hashedKey])] = ToNativeValue(value)
 		}
 		return out
 	case *SliceVal:
@@ -137,9 +138,9 @@ const (
 func hashKey(v any) string {
 	switch t := v.(type) {
 	case int:
-		return fmt.Sprintf("i:%d", t)
+		return "i:" + strconv.Itoa(t)
 	case int64:
-		return fmt.Sprintf("I:%d", t)
+		return "I:" + strconv.FormatInt(t, 10)
 	case string:
 		return "s:" + t
 	case bool:
@@ -172,6 +173,23 @@ func hashKey(v any) string {
 		return b.String()
 	default:
 		return fmt.Sprintf("u:%T:%v", v, v)
+	}
+}
+
+// mapKeyToString renders a MapVal's original (unhashed) key as a plain Go
+// string, the form ToNativeValue and the host-channel bridge (host_channel.go's
+// bridgeToHost) both need for a native map[string]any's keys. It fast-paths
+// the overwhelmingly common string/int key cases, which fmt.Sprint would
+// otherwise handle identically but at extra per-call cost; any other key
+// type (bool, *StructVal, ...) falls back to fmt.Sprint for identical output.
+func mapKeyToString(k any) string {
+	switch key := k.(type) {
+	case string:
+		return key
+	case int:
+		return strconv.Itoa(key)
+	default:
+		return fmt.Sprint(k)
 	}
 }
 
@@ -274,11 +292,11 @@ func ToString(v any) string {
 	case string:
 		return x
 	case int:
-		return fmt.Sprintf("%d", x)
+		return strconv.Itoa(x)
 	case int64:
-		return fmt.Sprintf("%d", x)
+		return strconv.FormatInt(x, 10)
 	case float64:
-		return fmt.Sprintf("%g", x)
+		return strconv.FormatFloat(x, 'g', -1, 64)
 	case bool:
 		if x {
 			return "true"

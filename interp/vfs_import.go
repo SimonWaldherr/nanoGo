@@ -219,6 +219,7 @@ func (vfs *VFS) applyImport(prefix string, entries []vfsImportEntry, readOnly bo
 			mode = 0644
 		}
 		vfs.nodes[target] = &vfsNode{name: path.Base(target), content: content, modTime: entry.modTime, mode: mode, readOnly: readOnly}
+		vfs.addChildLocked(target)
 	}
 	return nil
 }
@@ -241,6 +242,7 @@ func (vfs *VFS) ensureDirectoryLocked(target string, readOnly bool) error {
 			continue
 		}
 		vfs.nodes[current] = &vfsNode{name: path.Base(current), isDir: true, readOnly: readOnly, modTime: time.Now(), mode: 0755}
+		vfs.addChildLocked(current)
 	}
 	return nil
 }

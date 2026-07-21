@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>nanoGo — Advanced WebAssembly Go Playground</title>
+  <title>nanoGo — Go in the browser</title>
   <link rel="icon" href="assets/logo.svg">
   <link rel="stylesheet" href="styles.css">
-  <!-- CodeMirror (simple editor for Go) -->
+  <!-- CodeMirror powers syntax highlighting and the editor gutter. These
+       scripts intentionally load before the inline application script. -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css" crossorigin="anonymous">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/theme/material.min.css" crossorigin="anonymous">
-  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js" crossorigin="anonymous"></script>
-  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js" crossorigin="anonymous"></script>
 </head>
 <body>
   <!-- Header -->
@@ -19,9 +19,9 @@
       <div class="brand">
         <img src="assets/logo.svg" alt="nanoGo">
         <span>nanoGo</span>
-        <span class="brand-subtitle">Advanced WebAssembly Playground</span>
+        <span class="brand-subtitle">Go playground · WebAssembly</span>
       </div>
-      <div class="header-actions" style="position:relative">
+      <div class="header-actions">
         <button id="themeBtn" title="Choose theme">🌗</button>
         <div id="themePopup" class="theme-popup" aria-hidden="true">
           <div class="theme-popup-grid">
@@ -40,11 +40,11 @@
         </div>
         <button id="shareBtn" title="Share code">📤 Share</button>
         <button id="downloadBtn" title="Download code">💾 Download</button>
-        <label title="Upload a .go file" style="cursor:pointer; display:inline-flex; align-items:center; gap:4px; padding:0.5rem 0.75rem; background:var(--panel-light); border:1px solid var(--border); border-radius:8px; font-size:0.875rem; transition:all 0.2s ease;">
+        <label class="upload-control" title="Upload a .go file">
           📂 Upload
           <input id="fileInput" type="file" accept=".go" style="display:none">
         </label>
-        <a href="https://github.com/SimonWaldherr/nanogo" target="_blank" style="color: var(--accent); text-decoration: none; padding:0.5rem 0.75rem; font-size:0.875rem;">
+        <a class="header-link" href="https://github.com/SimonWaldherr/nanogo" target="_blank" rel="noreferrer">
           📚 GitHub
         </a>
       </div>
@@ -60,7 +60,7 @@
           📚 Examples & Demos
         </div>
         <input id="exampleSearch" class="example-search" placeholder="Search examples..." aria-label="Search examples" />
-        <div id="tagFilters" style="padding: 0 1.25rem 0.5rem 1.25rem; display:flex; gap:6px; flex-wrap:wrap"></div>
+        <div id="tagFilters" class="tag-filters"></div>
         <div class="examples-list" id="examplesList">
           <!-- Examples will be populated by JavaScript -->
         </div>
@@ -76,10 +76,11 @@
 
     <!-- Editor Section -->
     <section class="editor-section">
-      <div class="editor-header">
-        <h2 class="section-title">
-          📝 Code Editor
-        </h2>
+      <div class="editor-header" style="display: none;">
+        <div>
+          <h2 class="section-title">Code editor</h2>
+          <!--<p class="editor-meta"><span></span> Go · syntax highlighting · line numbers</p>-->
+        </div>
         <div id="status" class="status loading">
           <div class="status-indicator"></div>
           Loading WebAssembly...
@@ -118,7 +119,7 @@
       </div>
 
       <div class="editor-container">
-        <textarea id="src" spellcheck="false" placeholder="// Select an example from the sidebar to get started
+        <textarea id="src" aria-label="Go source editor" spellcheck="false" placeholder="// Select an example from the sidebar to get started
 // or write your own Go code here...
 
 package main
@@ -151,8 +152,8 @@ func main() {
       <div class="output-panel active" id="consolePanel">
         <div class="output-header">
           <span>📋 Console Output</span>
-          <span style="display:flex;gap:8px;align-items:center">
-            <span id="execTime" style="font-size:0.75rem;color:var(--text-muted)"></span>
+          <span class="output-actions">
+            <span id="execTime"></span>
             <button id="copyLogBtn" class="copy-btn" title="Copy console output">Copy</button>
             <span class="example-badge">Text</span>
           </span>
@@ -181,7 +182,7 @@ Select an example from the sidebar to get started! 🚀</div>
   </main>
 
   <!-- Scripts -->
-  <script src="wasm_exec.js"></script>
+  <script src="wasm_exec.js?1"></script>
   <script>
     (function() {
       'use strict';
@@ -276,7 +277,7 @@ Select an example from the sidebar to get started! 🚀</div>
         if (examplesLoadPromise) return examplesLoadPromise;
         examplesLoadPromise = new Promise((resolve, reject) => {
           const script = document.createElement('script');
-          script.src = 'examples.js';
+          script.src = 'examples.js?1';
           script.async = true;
           script.dataset.nanogoExamples = 'true';
           script.onload = () => {
@@ -285,7 +286,7 @@ Select an example from the sidebar to get started! 🚀</div>
           };
           script.onerror = () => {
             examplesLoadPromise = null;
-            reject(new Error('Failed to load examples.js'));
+            reject(new Error('Failed to load examples.js?1'));
           };
           document.body.appendChild(script);
         });
@@ -523,10 +524,10 @@ Select an example from the sidebar to get started! 🚀</div>
           editor = CodeMirror.fromTextArea(srcEl, {
             mode: 'text/x-go',
             lineNumbers: true,
-            theme: 'material',
             indentUnit: 2,
             tabSize: 2,
-            lineWrapping: true
+            lineWrapping: true,
+            viewportMargin: 12
           });
           editor.setSize('100%', '100%');
         } catch (e) { editor = null; }
@@ -904,7 +905,7 @@ Select an example from the sidebar to get started! 🚀</div>
           return;
         }
 
-        worker = new Worker('wasm_worker.js');
+        worker = new Worker('wasm_worker.js?1');
         worker.onmessage = (ev) => {
           const m = ev.data;
           if (!m || !m.type) return;
@@ -1318,7 +1319,7 @@ Select an example from the sidebar to get started! 🚀</div>
       function registerServiceWorker() {
         if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
         window.addEventListener('load', () => {
-          navigator.serviceWorker.register('./sw.js').catch((err) => {
+          navigator.serviceWorker.register('./sw.js?1').catch((err) => {
             console.warn('service worker registration failed:', err);
           });
         }, { once: true });

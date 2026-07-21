@@ -22,8 +22,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"time"
 	"sync"
+	"time"
 )
 
 // --- Basic computation ---

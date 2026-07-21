@@ -175,30 +175,33 @@ func (vm *Interpreter) builtinAppend(slice any, elems ...any) (any, error) {
 	if len(elems) > vm.maxContainerSize()-len(s.Data) {
 		return nil, NewRuntimeError("append: size exceeds interpreter limit")
 	}
-	for _, e := range elems {
-		if s.ElementType == "byte" {
+	if s.ElementType == "byte" {
+		for _, e := range elems {
 			s.Data = append(s.Data, ToInt(e)&0xFF)
-		} else {
-			s.Data = append(s.Data, e)
 		}
+	} else {
+		// A single batched append lets the runtime compute the required
+		// capacity once, instead of potentially growing/copying the
+		// backing array once per element for large multi-value or
+		// spread (append(dst, src...)) calls.
+		s.Data = append(s.Data, elems...)
 	}
 	return s, nil
 }
 
+// builtinCopy mirrors Go's own copy(): SliceVal.Data values can alias the
+// same backing array (slicing shares it, see the SliceExpr case in
+// evaluator.go), so a forward-only element-by-element loop corrupts
+// overlapping copies (e.g. the "shift right to insert" idiom
+// copy(s[i+1:], s[i:])); Go's copy() is overlap-safe (memmove-based) and
+// also faster for the common non-overlapping case.
 func builtinCopy(dst any, src any) int {
 	d, ok1 := dst.(*SliceVal)
 	s, ok2 := src.(*SliceVal)
 	if !ok1 || !ok2 {
 		return 0
 	}
-	n := len(s.Data)
-	if len(d.Data) < n {
-		n = len(d.Data)
-	}
-	for i := 0; i < n; i++ {
-		d.Data[i] = s.Data[i]
-	}
-	return n
+	return copy(d.Data, s.Data)
 }
 
 func builtinClose(ch any) (any, error) {

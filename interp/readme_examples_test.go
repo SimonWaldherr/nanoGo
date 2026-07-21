@@ -45,7 +45,7 @@ func readmeGoExamples(t *testing.T) []string {
 
 func TestReadmeGoExamples(t *testing.T) {
 	examples := readmeGoExamples(t)
-	if len(examples) != 5 {
+	if len(examples) != 7 {
 		t.Fatalf("README has %d Go examples; add expectations for each one", len(examples))
 	}
 
@@ -94,6 +94,14 @@ func TestReadmeGoExamples(t *testing.T) {
 				}
 				if !strings.Contains(got, "Parsed: map[features:[wasm browser lightweight] name:nanoGo version:1.0]") {
 					t.Errorf("unexpected parsed JSON output: %q", got)
+				}
+			case 5:
+				if got != "square: 4\nsquare: 9\n" {
+					t.Errorf("unexpected output: %q", got)
+				}
+			case 6:
+				if got != "work\ncleanup 2\ncleanup 1\n" {
+					t.Errorf("unexpected output: %q", got)
 				}
 			}
 		})

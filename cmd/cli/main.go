@@ -177,12 +177,28 @@ func registerSafeNatives(vm *interp.Interpreter) {
 		return fmt.Sprintf(format, fmtArgs...), nil
 	})
 
-	// Host-proxied read-only file access (whitelist).
-	vm.RegisterNative("HostReadFile", func(args []any) (any, error) {
+	// Host-proxied read-only file access (whitelist). This is registered
+	// with RegisterInternalNative, not RegisterNative: it must only ever be
+	// reachable through fs.ReadFile's capability check (interp/packages.go),
+	// never as a directly guest-callable HostReadFile(...) identifier —
+	// registering it with RegisterNative would let guest code bypass the
+	// capability check (and this whitelist) entirely.
+	vm.RegisterInternalNative("HostReadFile", func(args []any) (any, error) {
 		if len(args) == 0 {
 			return "", nil
 		}
 		p := interp.ToString(args[0])
+		// fs.ReadFile resolves the guest-supplied path through the VFS's own
+		// cwd first (see interp.Capabilities/requireFileRead), so p arrives
+		// as an absolute VFS-style path such as "/home/user/README.md", not
+		// the bare relative path a guest wrote — the same convention
+		// interp's own tests pin (interp/fs_http_test.go,
+		// TestFSReadFilePassesCanonicalAuthorizedPathToHost in
+		// interp/interp_test.go). Strip that default VFS home prefix before
+		// applying the repo-relative whitelist below. A path outside that
+		// prefix (e.g. the guest changed the VFS cwd via os.Chdir first)
+		// is left as-is and simply won't match the whitelist.
+		p = strings.TrimPrefix(p, "/home/user/")
 		// Clean and forbid absolute or upward paths
 		clean := filepath.Clean(p)
 		if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, ".."+string(filepath.Separator)) {
@@ -270,14 +286,19 @@ func registerSafeNatives(vm *interp.Interpreter) {
 		return string(data), nil
 	}
 
-	vm.RegisterNativeContext("HTTPGetText", func(ctx context.Context, args []any) (any, error) {
+	// Registered with RegisterInternalNativeContext (not
+	// RegisterNativeContext) for the same reason as HostReadFile above:
+	// these must only be reachable through http.GetText/PostText's
+	// capability check (interp/packages.go), never as bare guest-callable
+	// identifiers.
+	vm.RegisterInternalNativeContext("HTTPGetText", func(ctx context.Context, args []any) (any, error) {
 		if len(args) == 0 {
 			return "", nil
 		}
 		return doHTTP(ctx, "GET", interp.ToString(args[0]), "", "")
 	})
 
-	vm.RegisterNativeContext("HTTPPostText", func(ctx context.Context, args []any) (any, error) {
+	vm.RegisterInternalNativeContext("HTTPPostText", func(ctx context.Context, args []any) (any, error) {
 		if len(args) < 2 {
 			return "", nil
 		}

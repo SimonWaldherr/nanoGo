@@ -10,7 +10,7 @@
 
 ## 🚀 Overview
 
-nanoGo is a **minimalist Go interpreter** that runs entirely in your web browser via WebAssembly. While projects like TinyGo focus on compiling Go to WASM, nanoGo takes a different approach: it provides an **interpreted Go runtime** with a footprint even smaller than TinyGo, enabling dynamic Go code execution directly in the browser.
+nanoGo is a **minimalist Go interpreter** written in Go. It can run Go source dynamically in a native host (CLI, REPL, or an embedding application) and, when built for `js/wasm`, in a browser. While projects like TinyGo compile Go programs to WASM, nanoGo instead compiles the interpreter to WASM and evaluates guest Go source at runtime.
 
 **Key Distinction:** Instead of compiling Go programs ahead-of-time to WASM, nanoGo is an interpreter written in Go, compiled to WASM, that can execute Go source code dynamically at runtime.
 
@@ -56,13 +56,14 @@ Running Go in the browser through WebAssembly opens up exciting possibilities th
 
 ### Core Capabilities
 - ✅ **Go Language Support**: Variables, functions, structs, interfaces, slices, maps
-- ✅ **Concurrency**: Full goroutine and channel support in the browser
-- ✅ **Built-in Packages**: `fmt`, `time`, `sync`, `math`, `strings`, `regexp`, `json`, `sort`, and more
+- ✅ **Concurrency**: Goroutines and channels, including cancellation-aware waits
+- ✅ **Built-in Packages**: A curated subset including `fmt`, `time`, `sync`, `math`, `strings`, `regexp`, `json`, `sort`, `os`, `fs`, and `testing`
 - ✅ **Browser Integration**: Special `browser` package for DOM manipulation and canvas drawing
 - ✅ **HTTP Client**: Make HTTP requests from Go code in the browser
 - ✅ **Template Engine**: `text/template` support for dynamic content generation
 - ✅ **Browser Storage**: Persist data for the active playground session
 - ✅ **Math & Random**: Full `math` and `math/rand` package support
+- ✅ **Multi-Package Modules**: Load multi-file, multi-package programs from a VFS module, run/hot-swap individual functions, and run tests and benchmarks that use nanoGo's supported `testing` subset (see [interp/loader](interp/loader) and [interp/index](interp/index))
 
 ### Execution Modes
 - **🌐 Web Playground**: Interactive browser-based Go editor with live execution
@@ -72,7 +73,7 @@ Running Go in the browser through WebAssembly opens up exciting possibilities th
 ### Safety Features
 - **Sandboxed Execution**: Safe interpreter environment prevents malicious code
 - **Controlled Natives**: Limited host function access for security
-- **No File System Access**: Browser environment restrictions enforced
+- **No Direct Host File System Access**: Guest access goes through a capability-checked VFS or explicitly registered host native
 
 ## 🎮 Quick Start
 
@@ -128,34 +129,25 @@ func main() {
 }
 ```
 
-### Example 2: Goroutines & Channels
+### Example 2: Buffered Channels
 
 ```go
 package main
 
 import (
     "fmt"
-    "sync"
 )
 
 func main() {
-    ch := make(chan int, 3)
-    var wg sync.WaitGroup
-    
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        for i := 0; i < 5; i++ {
-            ch <- i * 2
-        }
-        close(ch)
-    }()
-    
+    ch := make(chan int, 5)
+    for i := 0; i < 5; i++ {
+        ch <- i * 2
+    }
+    close(ch)
+
     for val := range ch {
         fmt.Println("Received:", val)
     }
-    
-    wg.Wait()
     fmt.Println("Done!")
 }
 ```
@@ -222,6 +214,60 @@ func main() {
     
     parsed := json.Unmarshal(jsonStr)
     fmt.Println("Parsed:", parsed)
+}
+```
+
+### Example 6: WaitGroup, Goroutine, Channel, and `defer`
+
+This pattern waits for a worker before the result channel is closed. The
+deferred `Done` call runs even when the worker returns early.
+
+```go
+package main
+
+import (
+    "fmt"
+    "sync"
+)
+
+func main() {
+    jobs := make(chan int, 2)
+    results := make(chan int, 2)
+    jobs <- 2
+    jobs <- 3
+    close(jobs)
+
+    var wg sync.WaitGroup
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        for job := range jobs {
+            results <- job * job
+        }
+    }()
+
+    wg.Wait()
+    close(results)
+    for result := range results {
+        fmt.Println("square:", result)
+    }
+}
+```
+
+### Example 7: Deferred calls run in LIFO order
+
+`defer` records a call when it is encountered and runs deferred calls when the
+surrounding function returns, last registered first.
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+    defer fmt.Println("cleanup 1")
+    defer fmt.Println("cleanup 2")
+    fmt.Println("work")
 }
 ```
 
@@ -459,10 +505,110 @@ nanoGo implements a **tree-walking interpreter** that parses Go source code into
 nanoGo includes a curated set of built-in packages:
 
 - **Core**: `fmt`, `sync`, `time`
-- **Data**: `json`, `strings`, `regexp`, `sort`
+- **Data**: `encoding/json` (also available as `json`), `strings`, `regexp`, `sort`, `strconv`
 - **Math**: `math`, `math/rand`
-- **Text**: `text/template`
-- **Web**: `http`, `browser`, `storage`
+- **Text & tooling**: `text/template`, `debug`, and a supported subset of `testing`
+- **Host-bound APIs**: `browser`, `storage`, `fs`, `os`, and `http`; filesystem/network calls require `Capabilities`, while APIs that reach host resources require the corresponding host native
+
+This is deliberately not the full Go standard library. In particular,
+`encoding/json.Unmarshal` returns the decoded value instead of filling a
+pointer, so guest code should follow nanoGo's API rather than assume complete
+stdlib compatibility.
+
+### Multi-Package Programs & Tooling
+
+Beyond a single `package main` file, nanoGo can load a small multi-file,
+multi-package module straight from its VFS:
+
+- **`interp.ParsePackageDir`/`PackageScope`**: merge every `.go` file in one
+  directory into a single scope, two-phase (collect every type/func first,
+  then evaluate var initializers), so forward references across files work
+  regardless of file order.
+- **`interp/loader`**: `LoadModule` walks a VFS tree, resolves local imports
+  against a `go.mod` module path (only the `module` line is parsed — no
+  `go.sum`, no downloads) and nanoGo's curated builtin packages, detects
+  import cycles, and topologically orders packages so `init()`/package-level
+  `var` initialization runs dependency-first. `RunProgram` then builds and
+  runs the whole program. `RunFunctionTest`/`RunFunctionBench` call one
+  function directly against data-driven cases (useful for exercise grading).
+  `RunPackageTests`/`RunPackageBenchmarks` run `TestXxx(t *testing.T)` and
+  `BenchmarkXxx(b *testing.B)` functions from `_test.go` files when they use
+  nanoGo's supported `testing` subset (`T.Errorf`, `T.Fatalf`, `T.Run`,
+  `T.Helper`, and `B.N`/timer controls). Those test files can use the normal
+  Go `testing` package unchanged under real `go test` as well.
+  `ReplaceFunction` hot-swaps one function's implementation without
+  reloading the rest of the program.
+- **`interp/index`**: pure `go/parser`/`go/ast` static analysis (no
+  `go/types`) over a VFS tree — one entry per function/method with a
+  best-effort, typeless call graph (`Calls`/`CalledBy`), which tests call
+  which functions, and simple AST-based metrics (cyclomatic complexity,
+  nesting depth, LOC).
+
+**Known limitation**: struct types are registered in one shared, global
+registry across every loaded package (matching `Run`/`RunContext`'s
+existing behavior) — they are not namespaced per package, so two different
+packages defining a same-named struct type collide (the last one registered
+wins). Functions and package-level vars are properly isolated per package,
+with Go's normal export rule (only capitalized names are visible through an
+import alias).
+
+Runnable examples: [examples/multi_package](examples/multi_package),
+[examples/function_test](examples/function_test),
+[examples/benchmark](examples/benchmark), and
+[examples/index](examples/index). Additional focused examples cover
+[concurrency](examples/concurrency) (`WaitGroup`, goroutines, channels, and
+`defer`) and [hot-swap](examples/hot_swap) (`ReplaceFunction`):
+
+```bash
+go run ./examples/multi_package
+go run ./examples/function_test
+go run ./examples/benchmark
+go run ./examples/index
+go run ./examples/concurrency
+go run ./examples/hot_swap
+```
+
+### Use loader, tests, hot-swap, and index from a host application
+
+After populating `vm.VFS` with a module (including its `go.mod`), load it once
+and register the curated packages before running it:
+
+```go
+ctx := context.Background()
+vm := interp.NewInterpreter()
+interp.RegisterBuiltinPackages(vm)
+
+prog, err := loader.LoadModule(vm.VFS, "/app", loader.Options{})
+if err != nil { /* handle the invalid module */ }
+if err := loader.RunProgram(ctx, vm, prog, "main"); err != nil { /* handle */ }
+```
+
+`RunFunctionTest` builds the program when needed and returns one classified
+result per case. Once the program is built, `ReplaceFunction` changes the
+implementation for later calls without reloading imports or other packages:
+
+```go
+results, err := loader.RunFunctionTest(ctx, vm, prog, "main.Add", []loader.TestCase{
+    {Args: []any{2, 3}, Want: 5},
+})
+if err != nil { /* handle */ }
+_ = results
+
+if err := loader.ReplaceFunction(vm, prog, "main", "Add", `
+func Add(a, b int) int { return a - b }
+`); err != nil { /* handle */ }
+```
+
+For static analysis, `index.Scan` works directly from the same VFS and does
+not execute guest code:
+
+```go
+entries, err := index.Scan(vm.VFS, "/app", index.Options{})
+if err != nil { /* handle */ }
+for _, entry := range entries {
+    fmt.Println(entry.ID, entry.Calls, entry.Metrics.CyclomaticComplexity)
+}
+```
 
 ## 🔨 Building & Development
 
@@ -535,15 +681,20 @@ python3 -m http.server 8080 --directory web
 ### Testing
 
 ```bash
-# Run interpreter tests
-go test ./interp
-
-# Run CLI tests
-go test ./cmd/cli
-
-# Run all tests
+# Run the native test suite: interpreter, module loader, static index, and CLI
 make test
+
+# Or run a single package while working on it
+go test ./interp
+go test ./interp/loader
+go test ./interp/index
+go test ./cmd/cli
 ```
+
+`go test ./...` is not the native test command for this repository: `cmd/wasm`
+and `runtime` import `syscall/js` and must be built for `GOOS=js GOARCH=wasm`,
+while `samples/` intentionally contains multiple independent `main` programs.
+Use `make build-wasm` to verify the WASM target instead.
 
 ## ⚡ Performance & Deployment
 
@@ -705,10 +856,10 @@ git push origin feature/amazing-feature
 - [ ] **Enhanced Package Support**: More stdlib packages
 - [ ] **Debugger Integration**: Step-through debugging in browser
 - [ ] **Performance Optimizations**: JIT compilation, bytecode caching
-- [ ] **Module System**: Support for importing external packages
+- [x] **Module System**: Multi-file/multi-package programs loaded from a VFS module (local packages + `go.mod` module path only — no external package downloads); see [interp/loader](interp/loader)
 - [ ] **Advanced Types**: Better interface and generics support
 - [ ] **IDE Features**: Code completion, syntax highlighting improvements
-- [ ] **Testing Framework**: Built-in Go testing support
+- [x] **Testing Framework**: A `testing.T`/`testing.B` subset runs unmodified `TestXxx`/`BenchmarkXxx` functions, plus a data-driven function test/benchmark harness and hot-swap; see [interp/loader](interp/loader)
 
 ## 📄 License
 

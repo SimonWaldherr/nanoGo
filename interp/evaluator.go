@@ -432,7 +432,13 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 		// Package function call: fmt.Printf, time.Now, ...
 		if sel, ok := ex.Fun.(*ast.SelectorExpr); ok {
 			if pid, ok := sel.X.(*ast.Ident); ok {
-				if p, ok := vm.get(pid.Name, vm.globals); ok {
+				// Resolve the package identifier starting at the caller's own
+				// lexical env (not always vm.globals) so per-package import
+				// scopes (see PackageScope) stay isolated from sibling
+				// packages. For every program reachable via Run/RunContext,
+				// vm.globals is always an ancestor of env, so this is
+				// behavior-preserving there.
+				if p, ok := vm.get(pid.Name, env); ok {
 					if p, ok := p.(*Package); ok {
 						if p.Name == "debug" {
 							switch sel.Sel.Name {
@@ -451,7 +457,7 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 							return nil, NewRuntimeError("package member is not function")
 						}
 						// Evaluate args (including ... expansion)
-						var args []any
+						args := make([]any, 0, len(ex.Args))
 						if ex.Ellipsis != token.NoPos && len(ex.Args) > 0 {
 							for i, a := range ex.Args {
 								if i == len(ex.Args)-1 {
@@ -502,7 +508,8 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 			if fn == nil {
 				return nil, NewRuntimeError("method not found: " + recvType + "." + sel.Sel.Name)
 			}
-			args := []any{recv}
+			args := make([]any, 1, len(ex.Args)+1)
+			args[0] = recv
 			// Evaluate args (support last ... expansion)
 			if ex.Ellipsis != token.NoPos && len(ex.Args) > 0 {
 				for i, a := range ex.Args {
@@ -543,7 +550,7 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 		}
 		switch fn := callee.(type) {
 		case *Function:
-			var args []any
+			args := make([]any, 0, len(ex.Args))
 			// Handle foo(slice...) expansion
 			if ex.Ellipsis != token.NoPos && len(ex.Args) > 0 {
 				for i, a := range ex.Args {
@@ -653,7 +660,9 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 	case *ast.SelectorExpr:
 		// Package selector (pkg.Member)
 		if id, ok := ex.X.(*ast.Ident); ok {
-			if p, ok := vm.get(id.Name, vm.globals); ok {
+			// See the matching comment in the CallExpr case above: resolve
+			// against the caller's own env, not unconditionally vm.globals.
+			if p, ok := vm.get(id.Name, env); ok {
 				if p, ok := p.(*Package); ok {
 					m, ok2 := vm.resolvePackageSelector(p, ex.Sel.Name)
 					if !ok2 {
@@ -1576,24 +1585,28 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 		// Package function?
 		if pid, ok := sel.X.(*ast.Ident); ok {
-			if p, ok := vm.globals.Vars[pid.Name].(*Package); ok {
-				m, ok2 := vm.resolvePackageSelector(p, sel.Sel.Name)
-				if !ok2 {
-					return nil, nil, nil, NewRuntimeError("unknown package member")
-				}
-				fn, ok3 := m.(*Function)
-				if !ok3 {
-					return nil, nil, nil, NewRuntimeError("member not function")
-				}
-				var args []any
-				for _, a := range call.Args {
-					v, err := vm.evalExpr(a, env)
-					if err != nil {
-						return nil, nil, nil, err
+			// Resolve against the caller's own env, matching evalExpr's
+			// CallExpr/SelectorExpr handling above.
+			if v, ok := vm.get(pid.Name, env); ok {
+				if p, ok := v.(*Package); ok {
+					m, ok2 := vm.resolvePackageSelector(p, sel.Sel.Name)
+					if !ok2 {
+						return nil, nil, nil, NewRuntimeError("unknown package member")
 					}
-					args = append(args, v)
+					fn, ok3 := m.(*Function)
+					if !ok3 {
+						return nil, nil, nil, NewRuntimeError("member not function")
+					}
+					args := make([]any, 0, len(call.Args))
+					for _, a := range call.Args {
+						v, err := vm.evalExpr(a, env)
+						if err != nil {
+							return nil, nil, nil, err
+						}
+						args = append(args, v)
+					}
+					return fn, nil, args, nil
 				}
-				return fn, nil, args, nil
 			}
 		}
 		// Method call on struct
@@ -1610,7 +1623,7 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 		if fn == nil {
 			return nil, nil, nil, NewRuntimeError("method not found")
 		}
-		var args []any
+		args := make([]any, 0, len(call.Args))
 		for _, a := range call.Args {
 			v, err := vm.evalExpr(a, env)
 			if err != nil {
@@ -1629,7 +1642,7 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 	if !ok {
 		return nil, nil, nil, NewRuntimeError("not a function")
 	}
-	var args []any
+	args := make([]any, 0, len(call.Args))
 	for _, a := range call.Args {
 		v, err := vm.evalExpr(a, env)
 		if err != nil {

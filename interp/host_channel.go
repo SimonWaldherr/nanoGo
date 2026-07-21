@@ -217,7 +217,7 @@ func bridgeToHost(value any) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			out[fmt.Sprint(v.Keys[hashed])] = converted
+			out[mapKeyToString(v.Keys[hashed])] = converted
 		}
 		return out, nil
 	case *StructVal:
@@ -237,3 +237,14 @@ func bridgeToHost(value any) (any, error) {
 		return nil, fmt.Errorf("nanogo: unsupported guest channel value %T", value)
 	}
 }
+
+// BridgeToGuest converts an ordinary Go value into nanoGo's internal runtime
+// representation (e.g. []int -> *SliceVal), the same conversion used at the
+// host-channel boundary. Hosts building a data-driven function-call harness
+// (see interp/loader's RunFunctionTest) use it to turn plain Go arguments
+// into values callable functions accept.
+func BridgeToGuest(value any) (any, error) { return bridgeToGuest(value) }
+
+// BridgeToHost converts a nanoGo runtime value back into ordinary Go values
+// (e.g. *SliceVal -> []any), the inverse of BridgeToGuest.
+func BridgeToHost(value any) (any, error) { return bridgeToHost(value) }

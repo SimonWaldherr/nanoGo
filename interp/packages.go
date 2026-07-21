@@ -642,7 +642,7 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		if err := vm.requireHTTP(ToString(args[0])); err != nil {
 			return "", err
 		}
-		if n, ok := vm.natives["HTTPGetText"]; ok {
+		if n, ok := vm.hostNative("HTTPGetText"); ok {
 			v, err := n([]any{ToString(args[0])})
 			return v, err
 		}
@@ -661,7 +661,7 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		if len(args) >= 3 {
 			contentType = ToString(args[2])
 		}
-		if n, ok := vm.natives["HTTPPostText"]; ok {
+		if n, ok := vm.hostNative("HTTPPostText"); ok {
 			v, err := n([]any{ToString(args[0]), ToString(args[1]), contentType})
 			return v, err
 		}
@@ -679,7 +679,7 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		if err != nil {
 			return "", err
 		}
-		if n, ok := vm.natives["HostReadFile"]; ok {
+		if n, ok := vm.hostNative("HostReadFile"); ok {
 			v, err := n([]any{filePath})
 			return v, err
 		}
@@ -690,13 +690,13 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	// --- storage (localStorage: SetItem/GetItem) ---
 	storPkg := &Package{Name: "storage", Funcs: map[string]*Function{}}
 	storPkg.Funcs["SetItem"] = &Function{Name: "SetItem", Params: []string{"key", "value"}, Native: func(args []any) (any, error) {
-		if n, ok := vm.natives["LocalStorageSetItem"]; ok {
+		if n, ok := vm.hostNative("LocalStorageSetItem"); ok {
 			_, _ = n([]any{ToString(args[0]), ToString(args[1])})
 		}
 		return nil, nil
 	}}
 	storPkg.Funcs["GetItem"] = &Function{Name: "GetItem", Params: []string{"key"}, Native: func(args []any) (any, error) {
-		if n, ok := vm.natives["LocalStorageGetItem"]; ok {
+		if n, ok := vm.hostNative("LocalStorageGetItem"); ok {
 			v, _ := n([]any{ToString(args[0])})
 			return v, nil
 		}
@@ -706,6 +706,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 
 	// --- os (backed by VFS) ---
 	registerOsPackage(vm)
+
+	// --- testing (minimal *testing.T subset) ---
+	registerTestingPackage(vm)
 }
 
 // nativeWaitGroup is intentionally context-aware. sync.WaitGroup.Wait cannot
@@ -726,15 +729,16 @@ func newNativeWaitGroup() *nativeWaitGroup {
 func (w *nativeWaitGroup) Add(delta int) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	next := w.n + delta
+	previous := w.n
+	next := previous + delta
 	if next < 0 {
 		return NewRuntimeError("sync: negative WaitGroup counter")
 	}
-	if w.n == 0 && next > 0 {
+	if previous == 0 && next > 0 {
 		w.done = make(chan struct{})
 	}
 	w.n = next
-	if w.n > 0 && next == 0 {
+	if previous > 0 && next == 0 {
 		close(w.done)
 	}
 	return nil
@@ -847,6 +851,8 @@ func (vm *Interpreter) resolvePackageSelector(pkg *Package, sel string) (any, bo
 	if pkg == nil {
 		return nil, false
 	}
+	pkg.mu.RLock()
+	defer pkg.mu.RUnlock()
 	if pkg.Funcs != nil {
 		if f, ok := pkg.Funcs[sel]; ok {
 			return f, true
@@ -958,6 +964,11 @@ func (vm *Interpreter) installImportedPackage(alias, path string) {
 			RegisterBuiltinPackages(vm)
 		}
 		vm.globals.Vars[alias] = vm.packages["os"]
+	case "testing":
+		if _, ok := vm.packages["testing"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
+		vm.globals.Vars[alias] = vm.packages["testing"]
 	default:
 		_ = fmt.Sprintf("unknown import: %s", path)
 	}

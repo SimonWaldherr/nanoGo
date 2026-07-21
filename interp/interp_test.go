@@ -237,6 +237,25 @@ func main() {
 	}
 }
 
+// TestSliceCopyOverlapping proves builtinCopy is overlap-safe (memmove-based,
+// like real Go's copy()) rather than a naive forward-only element loop,
+// which would corrupt data on the classic "shift right to insert" idiom
+// exercised here — dst and src alias the same backing array via slicing.
+func TestSliceCopyOverlapping(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	s := []int{1, 2, 3, 4, 0}
+	copy(s[1:], s[0:4])
+	fmt.Println(s[0], s[1], s[2], s[3], s[4])
+}
+`)
+	if !strings.Contains(out, "1 1 2 3 4") {
+		t.Errorf("expected '1 1 2 3 4', got %q", out)
+	}
+}
+
 func TestMapLiteral(t *testing.T) {
 	out := runAndCapture(t, `
 package main
@@ -1016,6 +1035,77 @@ func TestVFSRemove(t *testing.T) {
 	}
 	if _, err := fs.ReadFile("/tmp/rm.txt"); err == nil {
 		t.Error("expected error after removal")
+	}
+}
+
+// TestVFSRemoveRejectsNonEmptyDir proves Remove's "directory not empty"
+// check (now backed by the children index's O(1) len check instead of a
+// full-map scan) still correctly rejects removing a directory that has
+// children, and that removing the child first lets a subsequent Remove of
+// the (now empty) parent succeed.
+func TestVFSRemoveRejectsNonEmptyDir(t *testing.T) {
+	fs := NewVFS()
+	if err := fs.Mkdir("/tmp/nonempty", 0755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := fs.WriteFile("/tmp/nonempty/child.txt", []byte("x"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := fs.Remove("/tmp/nonempty"); err == nil {
+		t.Fatal("expected Remove to reject a non-empty directory")
+	}
+	if err := fs.Remove("/tmp/nonempty/child.txt"); err != nil {
+		t.Fatalf("Remove child: %v", err)
+	}
+	if err := fs.Remove("/tmp/nonempty"); err != nil {
+		t.Errorf("expected Remove to succeed once the directory is empty, got %v", err)
+	}
+}
+
+// TestVFSRemoveAllNestedTreeAndReadDirIsolation proves the children-index
+// bookkeeping (addChildLocked/removeChildLocked/removeSubtreeLocked) stays
+// correct for a multi-level tree: RemoveAll deletes every descendant (not
+// just the top-level node), and ReadDir on a surviving sibling directory
+// never leaks entries from the removed subtree or from unrelated directories
+// elsewhere in the VFS (the exact bug an incorrectly-maintained parent-path
+// index could introduce).
+func TestVFSRemoveAllNestedTreeAndReadDirIsolation(t *testing.T) {
+	fs := NewVFS()
+	if err := fs.MkdirAll("/tmp/tree/a/b", 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := fs.WriteFile("/tmp/tree/a/b/leaf.txt", []byte("x"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := fs.MkdirAll("/tmp/sibling", 0755); err != nil {
+		t.Fatalf("MkdirAll sibling: %v", err)
+	}
+	if err := fs.WriteFile("/tmp/sibling/keep.txt", []byte("keep"), 0644); err != nil {
+		t.Fatalf("WriteFile sibling: %v", err)
+	}
+
+	if err := fs.RemoveAll("/tmp/tree"); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	for _, p := range []string{"/tmp/tree", "/tmp/tree/a", "/tmp/tree/a/b", "/tmp/tree/a/b/leaf.txt"} {
+		if _, err := fs.Stat(p); err == nil {
+			t.Errorf("expected %s to be gone after RemoveAll, but Stat succeeded", p)
+		}
+	}
+	// /tmp itself must survive with exactly its one remaining child.
+	entries, err := fs.ReadDir("/tmp")
+	if err != nil {
+		t.Fatalf("ReadDir /tmp: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "sibling" {
+		t.Errorf("expected /tmp to contain only 'sibling' after RemoveAll, got %v", entries)
+	}
+	siblingEntries, err := fs.ReadDir("/tmp/sibling")
+	if err != nil {
+		t.Fatalf("ReadDir /tmp/sibling: %v", err)
+	}
+	if len(siblingEntries) != 1 || siblingEntries[0].Name != "keep.txt" {
+		t.Errorf("expected /tmp/sibling to still contain keep.txt, got %v", siblingEntries)
 	}
 }
 

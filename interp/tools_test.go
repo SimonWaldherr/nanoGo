@@ -186,9 +186,9 @@ func TestCountPrintfVerbs(t *testing.T) {
 		{"%-10s", 1},
 		{"%05.2f", 1},
 		{"%5d %s", 2},
-		{"% d", 1},  // space flag
-		{"%+d", 1},  // plus flag
-		{"%#v", 1},  // hash flag
+		{"% d", 1}, // space flag
+		{"%+d", 1}, // plus flag
+		{"%#v", 1}, // hash flag
 	}
 	for _, c := range cases {
 		got := countPrintfVerbs(c.format)
