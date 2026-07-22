@@ -46,6 +46,7 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 	if err != nil {
 		return err
 	}
+	exec.litCache = buildLitCache(file)
 	if file.Name.Name != "main" {
 		return NewRuntimeError(`only "package main" is supported`)
 	}
@@ -176,7 +177,23 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 
 // ---------------- Expression evaluation ---------------------------
 
+// evalExpr evaluates e and, if it fails, tags the error with e's source
+// position — but only the first time, i.e. only if the error doesn't already
+// carry one. Errors are created deep inside evalExprNode's switch (an
+// undefined identifier, a bad conversion, ...) and then bubble up through
+// every enclosing expression's own evalExpr call on their way out; tagging
+// unconditionally at each level would keep overwriting the precise failure
+// site with each successively coarser enclosing expression. First-write-wins
+// keeps it pinned to the innermost (most useful) location instead.
 func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
+	v, err := vm.evalExprNode(e, env)
+	if err != nil {
+		attachRuntimeErrorLocation(err, vm.traceLocation(e.Pos()))
+	}
+	return v, err
+}
+
+func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 	if err := vm.executionError(); err != nil {
 		return nil, err
 	}
@@ -184,6 +201,11 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 	case *ast.BasicLit:
 		switch ex.Kind {
 		case token.INT:
+			if exec := vm.activeExecution; exec != nil {
+				if n, ok := exec.litCache[ex]; ok {
+					return n, nil
+				}
+			}
 			// Use strconv to correctly handle 0x, 0o, 0b, and underscored literals.
 			// We pass strconv.IntSize as the bitSize so strconv itself returns an
 			// error for values that don't fit in the platform's `int` type
@@ -303,6 +325,52 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 		}
 
 	case *ast.BinaryExpr:
+		// Keep pure integer arithmetic out of interface{} until the result
+		// crosses an actual dynamic-value boundary. The regular evaluator
+		// returns an any for every AST node, which makes large integer
+		// intermediates escape to the heap. Tight counter/arithmetic loops are
+		// therefore allocation-heavy even though all their intermediate values
+		// are plain ints. This path preserves the normal checkpoint cadence (one
+		// per AST node) and falls back before evaluating anything effectful when
+		// an expression is not statically an integer expression.
+		if n, ok, err := vm.tryEvalIntExpr(ex, env, false); err != nil {
+			return nil, err
+		} else if ok {
+			return n, nil
+		}
+
+		// Integer comparisons are similarly common loop conditions. Evaluating
+		// both operands as ints avoids boxing large literal bounds (for example
+		// i < 100000) on every iteration.
+		if isIntComparison(ex.Op) {
+			left, leftOK, err := vm.tryEvalIntExpr(ex.X, env, true)
+			if err != nil {
+				return nil, err
+			}
+			if leftOK {
+				right, rightOK, err := vm.tryEvalIntExpr(ex.Y, env, true)
+				if err != nil {
+					return nil, err
+				}
+				if rightOK {
+					switch ex.Op {
+					case token.EQL:
+						return left == right, nil
+					case token.NEQ:
+						return left != right, nil
+					case token.LSS:
+						return left < right, nil
+					case token.GTR:
+						return left > right, nil
+					case token.LEQ:
+						return left <= right, nil
+					case token.GEQ:
+						return left >= right, nil
+					}
+				}
+			}
+		}
+
 		l, err := vm.evalExpr(ex.X, env)
 		if err != nil {
 			return nil, err
@@ -446,6 +514,10 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 								return vm.traceDebugQ(ex, env)
 							case "Mark":
 								return vm.traceDebugMark(ex, env)
+							case "Stack":
+								return vm.traceDebugStack(ex, env)
+							case "Vars":
+								return vm.traceDebugVars(ex, env)
 							}
 						}
 						member, ok2 := vm.resolvePackageSelector(p, sel.Sel.Name)
@@ -761,6 +833,124 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 	}
 }
 
+// tryEvalIntExpr evaluates the integer-only subset without allocating an any
+// result for every intermediate expression. handled is false when evaluating
+// the expression through the ordinary dynamic evaluator is necessary.
+//
+// The initial call from evalExprNode has already consumed its checkpoint;
+// recursive calls must checkpoint their own nodes just as evalExpr would.
+func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (value int, handled bool, err error) {
+	if checkpoint {
+		if err := vm.executionError(); err != nil {
+			return 0, false, err
+		}
+	}
+
+	switch ex := e.(type) {
+	case *ast.BasicLit:
+		if ex.Kind != token.INT {
+			return 0, false, nil
+		}
+		if exec := vm.activeExecution; exec != nil {
+			if n, ok := exec.litCache[ex]; ok {
+				return n, true, nil
+			}
+		}
+		n, parseErr := strconv.ParseInt(ex.Value, 0, strconv.IntSize)
+		if parseErr != nil {
+			err := NewRuntimeError("invalid integer literal: " + ex.Value)
+			attachRuntimeErrorLocation(err, vm.traceLocation(ex.Pos()))
+			return 0, true, err
+		}
+		return int(n), true, nil
+
+	case *ast.Ident:
+		n, ok := vm.getInt(ex.Name, env)
+		return n, ok, nil
+
+	case *ast.ParenExpr:
+		return vm.tryEvalIntExpr(ex.X, env, true)
+
+	case *ast.UnaryExpr:
+		if ex.Op != token.ADD && ex.Op != token.SUB && ex.Op != token.XOR {
+			return 0, false, nil
+		}
+		n, ok, err := vm.tryEvalIntExpr(ex.X, env, true)
+		if err != nil || !ok {
+			return 0, ok, err
+		}
+		switch ex.Op {
+		case token.ADD:
+			return n, true, nil
+		case token.SUB:
+			return -n, true, nil
+		default:
+			return ^n, true, nil
+		}
+
+	case *ast.BinaryExpr:
+		if !isIntArithmetic(ex.Op) {
+			return 0, false, nil
+		}
+		left, leftOK, err := vm.tryEvalIntExpr(ex.X, env, true)
+		if err != nil || !leftOK {
+			return 0, leftOK, err
+		}
+		right, rightOK, err := vm.tryEvalIntExpr(ex.Y, env, true)
+		if err != nil || !rightOK {
+			return 0, rightOK, err
+		}
+		switch ex.Op {
+		case token.ADD:
+			return left + right, true, nil
+		case token.SUB:
+			return left - right, true, nil
+		case token.MUL:
+			return left * right, true, nil
+		case token.REM:
+			if right == 0 {
+				err := NewRuntimeError("integer divide by zero")
+				attachRuntimeErrorLocation(err, vm.traceLocation(ex.Pos()))
+				return 0, true, err
+			}
+			return left % right, true, nil
+		case token.SHL:
+			return left << uint(right), true, nil
+		case token.SHR:
+			return left >> uint(right), true, nil
+		case token.AND:
+			return left & right, true, nil
+		case token.OR:
+			return left | right, true, nil
+		case token.XOR:
+			return left ^ right, true, nil
+		case token.AND_NOT:
+			return left &^ right, true, nil
+		}
+	}
+
+	return 0, false, nil
+}
+
+func isIntArithmetic(op token.Token) bool {
+	switch op {
+	case token.ADD, token.SUB, token.MUL, token.REM, token.SHL, token.SHR,
+		token.AND, token.OR, token.XOR, token.AND_NOT:
+		return true
+	default:
+		return false
+	}
+}
+
+func isIntComparison(op token.Token) bool {
+	switch op {
+	case token.EQL, token.NEQ, token.LSS, token.GTR, token.LEQ, token.GEQ:
+		return true
+	default:
+		return false
+	}
+}
+
 // ---------------- Statement evaluation ----------------------------
 
 type controlKind int
@@ -777,7 +967,56 @@ type controlFlow struct {
 	val  any
 }
 
+// blockNeedsOwnScope reports whether any top-level statement in block can
+// declare a name directly into whatever env the block itself evaluates in —
+// only *ast.AssignStmt with token.DEFINE (:=) and *ast.DeclStmt (var/const)
+// do that (see the vm.declare call sites in evalStmtNode's AssignStmt and
+// DeclStmt cases). Everything else either doesn't declare at all, or
+// declares into a scope it creates for itself (a nested block, an if/for's
+// own body, a switch case) — so it makes this same decision independently
+// and doesn't affect whether THIS block needs a scope of its own.
+//
+// Only the block's immediate statement list is inspected, not nested
+// blocks: a nested block's own declarations are scoped to itself regardless
+// of whether this outer block forked, by the same recursive application of
+// this rule when that inner block is evaluated.
+func blockNeedsOwnScope(block *ast.BlockStmt) bool {
+	for _, s := range block.List {
+		switch s := s.(type) {
+		case *ast.AssignStmt:
+			if s.Tok == token.DEFINE {
+				return true
+			}
+		case *ast.DeclStmt:
+			return true
+		}
+	}
+	return false
+}
+
+// evalStmt mirrors evalExpr's location tagging (see its comment): the first
+// (innermost) statement whose evaluation fails wins the position tag as the
+// error bubbles up through enclosing statements' own evalStmt calls.
+//
+// It also feeds the optional line profiler (see profile.go): every
+// statement evaluation — regardless of call depth or which goroutine it
+// runs in — counts as one hit on its source line, which is exactly what a
+// "how often was this line executed" heatmap wants. The atomic Load keeps
+// the cost of having no profiler installed to a single pointer read; only
+// resolving the actual line number (traceLocation) is skipped entirely in
+// that (default) case.
 func (vm *Interpreter) evalStmt(s ast.Stmt, env *Env) (controlFlow, error) {
+	if p := vm.lineProfile.Load(); p != nil {
+		p.hit(vm.traceLocation(s.Pos()).Line)
+	}
+	cf, err := vm.evalStmtNode(s, env)
+	if err != nil {
+		attachRuntimeErrorLocation(err, vm.traceLocation(s.Pos()))
+	}
+	return cf, err
+}
+
+func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 	if err := vm.executionError(); err != nil {
 		return controlFlow{}, err
 	}
@@ -802,6 +1041,36 @@ func (vm *Interpreter) evalStmt(s ast.Stmt, env *Env) (controlFlow, error) {
 		return controlFlow{}, ch.Send(vm.Context(), val)
 
 	case *ast.AssignStmt:
+		// The common counter/accumulator shapes (i := 0, sum = sum+i, ...) can
+		// retain their result in Env.intVars all the way through the assignment.
+		// Do this before allocating the generic RHS []any used by the complete
+		// assignment implementation below.
+		if len(st.Lhs) == 1 && len(st.Rhs) == 1 {
+			if id, ok := st.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
+				switch st.Tok {
+				case token.DEFINE:
+					n, intOK, err := vm.tryEvalIntExpr(st.Rhs[0], env, true)
+					if err != nil {
+						return controlFlow{}, err
+					}
+					if intOK {
+						vm.declareInt(id.Name, n, env)
+						return controlFlow{}, nil
+					}
+				case token.ASSIGN:
+					if _, exists := vm.getInt(id.Name, env); exists {
+						n, intOK, err := vm.tryEvalIntExpr(st.Rhs[0], env, true)
+						if err != nil {
+							return controlFlow{}, err
+						}
+						if intOK && vm.setInt(id.Name, n, env) {
+							return controlFlow{}, nil
+						}
+					}
+				}
+			}
+		}
+
 		// Evaluate RHS first
 		rightVals := make([]any, len(st.Rhs))
 
@@ -867,40 +1136,48 @@ func (vm *Interpreter) evalStmt(s ast.Stmt, env *Env) (controlFlow, error) {
 			rightVals[i] = v
 		}
 	RHS_DONE:
-		// Resolve LHS references
-		leftRefs := make([]Ref, len(st.Lhs))
-		for i, l := range st.Lhs {
-			ref, err := vm.resolveRef(l, env)
-			if err != nil {
-				return controlFlow{}, err
-			}
-			leftRefs[i] = ref
-		}
+		// LHS references are resolved per assignment kind below rather than
+		// upfront into a []Ref: token.DEFINE never touches a Ref at all (its
+		// LHS is always plain identifiers, handled directly via declare),
+		// and even for ASSIGN/augmented-assign, a plain identifier target
+		// (the overwhelmingly common case: x = ..., x += ...) goes straight
+		// through vm.get/vm.set instead of allocating a *varRef to wrap
+		// exactly the same two calls behind the Ref interface — resolveRef
+		// remains the fallback for index/selector lvalues (a[i] = ...,
+		// s.Field = ...), which do need it.
 		switch st.Tok {
 		case token.DEFINE:
 			for i, l := range st.Lhs {
-				if id, ok := l.(*ast.Ident); ok {
-					if id.Name == "_" {
-						continue
-					}
-					var v any
-					if len(rightVals) == 1 {
-						v = rightVals[0]
-					} else {
-						v = rightVals[i]
-					}
-					vm.declare(id.Name, v, env)
-				} else {
+				id, ok := l.(*ast.Ident)
+				if !ok {
 					return controlFlow{}, NewRuntimeError("invalid := lhs")
 				}
-			}
-		case token.ASSIGN:
-			for i, ref := range leftRefs {
+				if id.Name == "_" {
+					continue
+				}
 				var v any
 				if len(rightVals) == 1 {
 					v = rightVals[0]
 				} else {
 					v = rightVals[i]
+				}
+				vm.declare(id.Name, v, env)
+			}
+		case token.ASSIGN:
+			for i, l := range st.Lhs {
+				var v any
+				if len(rightVals) == 1 {
+					v = rightVals[0]
+				} else {
+					v = rightVals[i]
+				}
+				if id, ok := l.(*ast.Ident); ok {
+					vm.set(id.Name, v, env)
+					continue
+				}
+				ref, err := vm.resolveRef(l, env)
+				if err != nil {
+					return controlFlow{}, err
 				}
 				if err := ref.Set(v); err != nil {
 					return controlFlow{}, err
@@ -908,10 +1185,9 @@ func (vm *Interpreter) evalStmt(s ast.Stmt, env *Env) (controlFlow, error) {
 			}
 		default:
 			// augmented assignments supported via applyBinaryOp
-			if len(leftRefs) != 1 || len(rightVals) != 1 {
+			if len(st.Lhs) != 1 || len(rightVals) != 1 {
 				return controlFlow{}, NewRuntimeError("augmented assignment expects 1 lhs and 1 rhs")
 			}
-			cur := leftRefs[0].Get()
 			var base token.Token
 			switch st.Tok {
 			case token.ADD_ASSIGN:
@@ -939,17 +1215,48 @@ func (vm *Interpreter) evalStmt(s ast.Stmt, env *Env) (controlFlow, error) {
 			default:
 				return controlFlow{}, NewRuntimeError("unsupported assignment token")
 			}
-			newVal, err := vm.applyBinaryOp(base, cur, rightVals[0])
+			if id, ok := st.Lhs[0].(*ast.Ident); ok {
+				cur, _ := vm.get(id.Name, env)
+				newVal, err := vm.applyBinaryOp(base, cur, rightVals[0])
+				if err != nil {
+					return controlFlow{}, err
+				}
+				vm.set(id.Name, newVal, env)
+				return controlFlow{}, nil
+			}
+			ref, err := vm.resolveRef(st.Lhs[0], env)
 			if err != nil {
 				return controlFlow{}, err
 			}
-			if err := leftRefs[0].Set(newVal); err != nil {
+			newVal, err := vm.applyBinaryOp(base, ref.Get(), rightVals[0])
+			if err != nil {
+				return controlFlow{}, err
+			}
+			if err := ref.Set(newVal); err != nil {
 				return controlFlow{}, err
 			}
 		}
 		return controlFlow{}, nil
 
 	case *ast.IncDecStmt:
+		if id, ok := st.X.(*ast.Ident); ok {
+			if cur, ok := vm.getInt(id.Name, env); ok {
+				if st.Tok == token.INC {
+					vm.setInt(id.Name, cur+1, env)
+				} else {
+					vm.setInt(id.Name, cur-1, env)
+				}
+				return controlFlow{}, nil
+			}
+			v, _ := vm.get(id.Name, env)
+			cur := ToInt(v)
+			if st.Tok == token.INC {
+				vm.set(id.Name, cur+1, env)
+			} else {
+				vm.set(id.Name, cur-1, env)
+			}
+			return controlFlow{}, nil
+		}
 		ref, err := vm.resolveRef(st.X, env)
 		if err != nil {
 			return controlFlow{}, err
@@ -989,7 +1296,22 @@ func (vm *Interpreter) evalStmt(s ast.Stmt, env *Env) (controlFlow, error) {
 		return controlFlow{}, nil
 
 	case *ast.BlockStmt:
-		local := NewEnv(env)
+		// A fresh child scope is only actually needed when this block can
+		// declare a name directly into it (:= or var/const — the two
+		// statement kinds that call vm.declare with whatever env got passed
+		// to them; see blockNeedsOwnScope). A block that only assigns to
+		// outer variables or calls functions — the common shape of a loop
+		// body or if-body — can evaluate its statements directly in the
+		// parent's env instead, skipping an Env allocation (struct + mutex)
+		// on every single iteration/entry. Nested statements that manage
+		// their own scoping (nested blocks, for/range, switch cases) are
+		// unaffected: each makes this same decision independently for
+		// itself, so correctness (in particular per-iteration closure
+		// isolation for a block that DOES declare) is unchanged either way.
+		local := env
+		if blockNeedsOwnScope(st) {
+			local = NewEnv(env)
+		}
 		for _, s2 := range st.List {
 			c, err := vm.evalStmt(s2, local)
 			if err != nil {
@@ -1494,7 +1816,9 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 	}
 	vm.emitTrace("call_start", fn.Name, "", nil)
 	// Run defers in LIFO order on exit; also handle panic unwinding.
-	frame := &callFrame{defers: []func(){}}
+	// caller: env.frame is the call site's own active frame (nil at the
+	// outermost call), letting debug.Stack() walk this chain later.
+	frame := &callFrame{defers: []func(){}, funcName: fn.Name, caller: env.frame}
 	defer func() {
 		// Execute defers in reverse order
 		for i := len(frame.defers) - 1; i >= 0; i-- {

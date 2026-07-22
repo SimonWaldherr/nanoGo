@@ -1,15 +1,26 @@
 // cmd/mcp/main.go — nanoGo MCP (Model Context Protocol) server.
 //
-// The server reads JSON-RPC 2.0 messages from stdin (one per line) and writes
-// responses to stdout, following the MCP stdio transport specification.
-// Log/debug output goes to stderr so it never pollutes the protocol stream.
+// The server speaks two interchangeable transports over the identical
+// JSON-RPC handler (handleMethod), so any MCP client can reach it regardless
+// of whether it can spawn a local subprocess:
+//
+//   - stdio (default): newline-delimited JSON-RPC on stdin/stdout, log
+//     output on stderr. This is what Claude Desktop, Claude Code, and most
+//     editor integrations expect to launch as a private subprocess.
+//   - Streamable HTTP (-http addr, see http.go): a single POST/GET/DELETE
+//     endpoint per the MCP spec's HTTP transport, for clients that reach
+//     the server over a network instead of spawning it — web-based
+//     clients, remote/hosted agents, or one server shared by several
+//     clients at once.
 //
 // Exposed MCP tools include safe single-file and multi-file execution,
 // package tests, static source/module analysis, and a session virtual
 // filesystem. See the nanogo://guide resource for a suggested workflow.
 //
-// The server maintains a single VFS per process lifetime; code executed with
-// run_code can read/write files that were created with the vfs_* tools.
+// Each client gets its own isolated VFS (see session.go): the stdio
+// transport serves one implicit client for the process's lifetime, while
+// the HTTP transport allocates one session per Mcp-Session-Id so concurrent
+// clients never see each other's files.
 package main
 
 import (
@@ -18,6 +29,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"go/ast"
 	"os"
@@ -111,13 +123,25 @@ type mcpResourceContent struct {
 	Text     string `json:"text"`
 }
 
-// ── server state ─────────────────────────────────────────────────────────────
-
-var sessionVFS = interp.NewVFS()
-
 // ── entry point ──────────────────────────────────────────────────────────────
 
 func main() {
+	httpAddr := flag.String("http", os.Getenv("NANOGO_MCP_HTTP_ADDR"), "serve MCP over Streamable HTTP at this address (e.g. :8080) instead of stdio")
+	flag.Parse()
+
+	if *httpAddr != "" {
+		runHTTPServer(*httpAddr)
+		return
+	}
+	runStdioServer()
+}
+
+// runStdioServer implements the MCP stdio transport: newline-delimited
+// JSON-RPC on stdin/stdout, diagnostics on stderr. It serves exactly one
+// implicit client (defaultSession) for the life of the process, matching
+// how every existing stdio-only MCP client (Claude Desktop, Claude Code,
+// most IDE integrations) expects to launch and own a private subprocess.
+func runStdioServer() {
 	scanner := bufio.NewScanner(os.Stdin)
 	// Increase scanner buffer for large code payloads (up to 4 MiB).
 	buf := make([]byte, 0, 64*1024)
@@ -159,7 +183,7 @@ func main() {
 		// Notifications (requests without an ID) are fire-and-forget.
 		isNotification := req.ID == nil
 
-		result, rpcErr := handleMethod(req.Method, req.Params)
+		result, rpcErr := handleMethod(req.Method, req.Params, defaultSession)
 
 		if isNotification {
 			// Do not send a response for notifications.
@@ -183,8 +207,11 @@ func main() {
 	}
 }
 
-// handleMethod dispatches a JSON-RPC method to the appropriate handler.
-func handleMethod(method string, rawParams json.RawMessage) (any, *jsonRPCError) {
+// handleMethod dispatches a JSON-RPC method to the appropriate handler. sess
+// is the calling client's session (see session.go); only tools/call uses it,
+// but every transport (stdio, HTTP) threads one through uniformly so a tool
+// added later can rely on it being present regardless of transport.
+func handleMethod(method string, rawParams json.RawMessage, sess *session) (any, *jsonRPCError) {
 	switch method {
 	case "initialize":
 		return handleInitialize(rawParams)
@@ -193,7 +220,7 @@ func handleMethod(method string, rawParams json.RawMessage) (any, *jsonRPCError)
 	case "tools/list":
 		return handleToolsList()
 	case "tools/call":
-		return handleToolCall(rawParams)
+		return handleToolCall(rawParams, sess)
 	case "resources/list":
 		return handleResourcesList()
 	case "resources/read":
@@ -456,7 +483,7 @@ func schema(properties map[string]any, required ...string) map[string]any {
 
 // ── tools/call ────────────────────────────────────────────────────────────────
 
-func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
+func handleToolCall(rawParams json.RawMessage, sess *session) (any, *jsonRPCError) {
 	var params mcpToolCallParams
 	if err := json.Unmarshal(rawParams, &params); err != nil {
 		return nil, &jsonRPCError{Code: -32602, Message: "Invalid params: " + err.Error()}
@@ -464,6 +491,10 @@ func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
 	if params.Name == "" {
 		return nil, &jsonRPCError{Code: -32602, Message: "Invalid params: tool name is required"}
 	}
+	if sess == nil {
+		return nil, &jsonRPCError{Code: -32603, Message: "Internal error: no active session"}
+	}
+	sess.touch()
 	args, rpcErr := decodeToolArgs(params.Arguments)
 	if rpcErr != nil {
 		return nil, rpcErr
@@ -500,7 +531,7 @@ func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
 		if err != nil {
 			return failure(err)
 		}
-		output, err := runCode(code, sessionVFS, duration)
+		output, err := runCode(code, sess.vfs, duration)
 		return executionResult(result, output, err)
 
 	case "fmt_code":
@@ -595,7 +626,7 @@ func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
 		if err != nil {
 			return failure(err)
 		}
-		output, err := runModule(root, entry, sessionVFS, duration)
+		output, err := runModule(root, entry, sess.vfs, duration)
 		return executionResult(result, output, err)
 
 	case "test_module":
@@ -611,7 +642,7 @@ func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
 		if err != nil {
 			return failure(err)
 		}
-		summary, err := testModule(root, packageName, sessionVFS, duration)
+		summary, err := testModule(root, packageName, sess.vfs, duration)
 		if err != nil {
 			return failure(err)
 		}
@@ -626,7 +657,7 @@ func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
 		if err != nil {
 			return failure(err)
 		}
-		indexResult, err := indexModule(root, sessionVFS, maxFunctions)
+		indexResult, err := indexModule(root, sess.vfs, maxFunctions)
 		if err != nil {
 			return failure(err)
 		}
@@ -637,7 +668,7 @@ func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
 		if err != nil {
 			return failure(err)
 		}
-		data, err := sessionVFS.ReadFile(filePath)
+		data, err := sess.vfs.ReadFile(filePath)
 		if err != nil {
 			return failure(err)
 		}
@@ -657,21 +688,21 @@ func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
 			return failure(err)
 		}
 		if createParents {
-			if err := sessionVFS.MkdirAll(path.Dir(sessionVFS.ResolvePath(filePath)), 0755); err != nil {
+			if err := sess.vfs.MkdirAll(path.Dir(sess.vfs.ResolvePath(filePath)), 0755); err != nil {
 				return failure(err)
 			}
 		}
-		if err := sessionVFS.WriteFile(filePath, []byte(content), 0644); err != nil {
+		if err := sess.vfs.WriteFile(filePath, []byte(content), 0644); err != nil {
 			return failure(err)
 		}
-		return result(fmt.Sprintf("wrote %d bytes to %s", len(content), sessionVFS.ResolvePath(filePath)), false)
+		return result(fmt.Sprintf("wrote %d bytes to %s", len(content), sess.vfs.ResolvePath(filePath)), false)
 
 	case "vfs_list":
-		dirPath, err := args.string("path", sessionVFS.Getwd())
+		dirPath, err := args.string("path", sess.vfs.Getwd())
 		if err != nil {
 			return failure(err)
 		}
-		entries, err := sessionVFS.ReadDir(dirPath)
+		entries, err := sess.vfs.ReadDir(dirPath)
 		if err != nil {
 			return failure(err)
 		}
@@ -693,13 +724,13 @@ func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
 		if err != nil {
 			return failure(err)
 		}
-		if err := sessionVFS.MkdirAll(dirPath, 0755); err != nil {
+		if err := sess.vfs.MkdirAll(dirPath, 0755); err != nil {
 			return failure(err)
 		}
-		return result("created "+sessionVFS.ResolvePath(dirPath), false)
+		return result("created "+sess.vfs.ResolvePath(dirPath), false)
 
 	case "vfs_tree":
-		dirPath, err := args.string("path", sessionVFS.Getwd())
+		dirPath, err := args.string("path", sess.vfs.Getwd())
 		if err != nil {
 			return failure(err)
 		}
@@ -711,7 +742,7 @@ func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
 		if err != nil {
 			return failure(err)
 		}
-		tree, err := vfsTree(sessionVFS, dirPath, maxDepth, maxEntries)
+		tree, err := vfsTree(sess.vfs, dirPath, maxDepth, maxEntries)
 		if err != nil {
 			return failure(err)
 		}
@@ -722,28 +753,28 @@ func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
 		if err != nil {
 			return failure(err)
 		}
-		info, err := sessionVFS.Stat(filePath)
+		info, err := sess.vfs.Stat(filePath)
 		if err != nil {
 			return failure(err)
 		}
-		return jsonResult(result, vfsMetadata(sessionVFS.ResolvePath(filePath), info), false)
+		return jsonResult(result, vfsMetadata(sess.vfs.ResolvePath(filePath), info), false)
 
 	case "vfs_chdir":
 		dirPath, err := requiredString("path")
 		if err != nil {
 			return failure(err)
 		}
-		if err := sessionVFS.Chdir(dirPath); err != nil {
+		if err := sess.vfs.Chdir(dirPath); err != nil {
 			return failure(err)
 		}
-		return result(sessionVFS.Getwd(), false)
+		return result(sess.vfs.Getwd(), false)
 
 	case "vfs_remove":
 		filePath, err := requiredString("path")
 		if err != nil {
 			return failure(err)
 		}
-		if sessionVFS.ResolvePath(filePath) == "/" {
+		if sess.vfs.ResolvePath(filePath) == "/" {
 			return failure(errors.New("refusing to remove the VFS root"))
 		}
 		recursive, err := args.bool("recursive", false)
@@ -751,14 +782,14 @@ func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
 			return failure(err)
 		}
 		if recursive {
-			err = sessionVFS.RemoveAll(filePath)
+			err = sess.vfs.RemoveAll(filePath)
 		} else {
-			err = sessionVFS.Remove(filePath)
+			err = sess.vfs.Remove(filePath)
 		}
 		if err != nil {
 			return failure(err)
 		}
-		return result("removed "+sessionVFS.ResolvePath(filePath), false)
+		return result("removed "+sess.vfs.ResolvePath(filePath), false)
 
 	default:
 		return nil, &jsonRPCError{Code: -32602, Message: "Unknown tool: " + params.Name}

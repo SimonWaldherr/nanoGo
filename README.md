@@ -96,15 +96,25 @@ This makes it useful for:
   program; and
 - building agent workflows that need no access to the host disk or network.
 
-Build the stdio server with:
+Build the server with:
 
 ```bash
 make build-mcp
 ```
 
-Then configure an MCP-capable client to launch the produced executable. The
-exact configuration location is client-specific; its command entry follows
-this shape:
+The same executable speaks two interchangeable transports, so it can be
+reached by the widest possible range of MCP clients and tooling:
+
+- **stdio** (default) — JSON-RPC messages on stdin/stdout, diagnostics on
+  stderr. This is what Claude Desktop, Claude Code, and most editor
+  integrations expect to launch as a private subprocess.
+- **Streamable HTTP** (`-http addr`) — a single `/mcp` endpoint per the MCP
+  spec's HTTP transport, for anything that reaches the server over a
+  network instead of spawning it: web-based MCP clients, remote or hosted
+  agents, or several clients sharing one running server.
+
+Configure a stdio-based client (exact configuration location is
+client-specific) with a command entry shaped like:
 
 ```json
 {
@@ -116,10 +126,29 @@ this shape:
 }
 ```
 
-The server implements the MCP stdio transport: JSON-RPC messages use stdin and
-stdout, while diagnostic messages go only to stderr. It negotiates MCP
-versions from `2024-11-05` through `2025-11-25`, and exposes the
-`nanogo://guide` resource with its workflow and safety notes.
+For an HTTP-based client, start the server listening on a port:
+
+```bash
+build/nanogo-mcp -http :8080
+# or: NANOGO_MCP_HTTP_ADDR=:8080 build/nanogo-mcp
+```
+
+and point the client at `http://localhost:8080/mcp`. `GET /` and
+`GET /healthz` are unauthenticated plain-text/JSON probes useful for a quick
+`curl` check or a container health check; CORS is open to any origin so
+browser-based clients can reach it directly.
+
+Each client gets its own isolated in-memory workspace: the stdio transport
+serves one implicit session for the process's lifetime, while the HTTP
+transport allocates a fresh session (and `Mcp-Session-Id` header) on every
+`initialize` call, so concurrent clients never see each other's files.
+Idle HTTP sessions are reclaimed automatically after 30 minutes; a client can
+also end one explicitly with `DELETE /mcp` (`Mcp-Session-Id` header
+required).
+
+Either transport negotiates MCP protocol versions from `2024-11-05` through
+`2025-11-25`, and exposes the `nanogo://guide` resource with its workflow and
+safety notes.
 
 ### Agent workflow and tools
 
@@ -144,12 +173,16 @@ code. Their result sizes are bounded by `max_functions`, `max_depth`, or
 
 ### Safety model and limits
 
-The VFS is held only for the lifetime of the MCP server process and is removed
-when that process exits. Guest Go code can read and write that VFS, but it
+Each session's VFS lives only as long as that session does — the whole
+process for stdio, or until it idles out or is explicitly deleted for HTTP —
+and is never the host disk. Guest Go code can read and write that VFS, but it
 cannot access the host filesystem or network through this server. Execution
 timeouts default to 10 seconds and are limited to 1–60 seconds, in addition to
 nanoGo's interpreter resource limits. Static analysis is syntactic and
 best-effort; it complements rather than replaces the Go compiler or `go vet`.
+The HTTP transport's CORS policy and lack of authentication assume a trusted
+network (localhost or an internal one) — put it behind your own auth/reverse
+proxy before exposing it beyond that.
 
 ### Project Structure
 
@@ -500,15 +533,25 @@ the guest direct access to the host directory or Reader. See
 
 `debug.Q` is a q-style probe: it preserves the guest expression and its value,
 but records it in a host-owned tracer rather than writing to guest stdout.
-`debug.Mark` adds a named timeline marker. `Tracer.Events()` provides a bounded,
-chronological trace of runs, calls, guest goroutines, denied capabilities, and
-debug probes—well suited to a traceGL-like timeline or a custom local UI.
+`debug.Mark` adds a named timeline marker. `debug.Stack` returns the current
+guest call stack (innermost call first) as a string, including across `go`
+statements — a spawned goroutine's stack chains back through its launch site.
+`debug.Vars` returns every local binding visible at the call site (innermost
+scope wins on shadowing) as sorted `name = value` lines. `debug.Assert(cond,
+msg...)` fails the run with `msg` (default `"assertion failed"`) when `cond`
+is false, and records the failure on the tracer even without guest stdout.
+`Tracer.Events()` provides a bounded, chronological trace of runs, calls,
+guest goroutines, denied capabilities, and debug probes—well suited to a
+traceGL-like timeline or a custom local UI.
 
 ```go
 tracer := interp.NewTracer(2_048)
 vm.SetTracer(tracer)
 
-// Guest source: import "debug"; debug.Q(total); debug.Mark("before send")
+// Guest source: import "debug"
+// debug.Q(total); debug.Mark("before send")
+// fmt.Println(debug.Stack()); fmt.Println(debug.Vars())
+// debug.Assert(total > 0, "total must be positive")
 if err := vm.RunContext(ctx, source); err != nil { /* ... */ }
 for _, event := range tracer.Events() {
     fmt.Println(event.Sequence, event.Kind, event.Location, event.Message)
@@ -518,6 +561,34 @@ for _, event := range tracer.Events() {
 The tracer is in-memory and bounded; it does not grant the guest filesystem or
 network access. See [examples/capabilities](examples/capabilities) and
 [examples/debug_trace](examples/debug_trace) for runnable host programs.
+
+### Host runtime trace integration
+
+The browser inspector intentionally uses nanoGo's compact `Tracer`: it records
+guest-level events and can be sent as small JSON to the page. A native embedding
+host can additionally mirror those same high-level events as user annotations
+in Go's execution trace. This is opt-in, keeps the normal fast path free of
+trace formatting, and combines with the Go runtime's own scheduler, GC, and
+host-goroutine events:
+
+```go
+f, err := os.Create("nanogo-trace.out")
+if err != nil { panic(err) }
+defer f.Close()
+
+if err := runtimeTrace.Start(f); err != nil { panic(err) }
+vm.SetRuntimeTraceAnnotations(true)
+err = vm.RunContext(ctx, source)
+runtimeTrace.Stop()
+if err != nil { /* handle guest error */ }
+
+// Inspect with: go tool trace nanogo-trace.out
+```
+
+The annotations use categories such as `nanogo.call_start` and
+`nanogo.goroutine_start`. `golang.org/x/exp/trace` is deliberately not a runtime
+dependency: it is an experimental trace reader, and Go 1.25's stable
+`runtime/trace.FlightRecorder` supersedes its recorder for new host code.
 
 ## 🏗️ Architecture
 
@@ -700,6 +771,19 @@ make build-repl
 
 # Run tests
 make test
+
+# Static checks, races and a short coverage-guided fuzz pass
+make vet
+make test-race
+make fuzz
+
+# Host benchmarks (time + allocations) and an on-demand CPU profile
+make benchmark-go
+make profile-cpu  # then: go tool pprof build/nanogo-cpu.pprof
+make profile-mem  # then: go tool pprof -alloc_space build/nanogo-mem.pprof
+
+# Native Go execution trace with nanoGo user annotations
+make trace        # then: go tool trace build/nanogo.trace
 
 # Run a quick timing benchmark of the demo program
 make benchmark

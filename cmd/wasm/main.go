@@ -3,6 +3,7 @@ package main
 
 import (
 	"encoding/json"
+	"sort"
 	"syscall/js"
 	"time"
 
@@ -47,18 +48,48 @@ type traceEventJSON struct {
 
 // runStats is what jsNanoGoRun returns (as a JSON string) so the host can
 // show execution details: interpreter wall time, deterministic step count,
-// and an optional bounded trace timeline.
+// an optional bounded trace timeline, and an optional per-line hit-count
+// profile (see profileToJSON) for a "how often was this line executed"
+// heatmap.
 type runStats struct {
 	ElapsedMs float64          `json:"elapsedMs"`
 	Steps     uint64           `json:"steps"`
 	Error     string           `json:"error,omitempty"`
 	Trace     []traceEventJSON `json:"trace,omitempty"`
 	TraceCap  int              `json:"traceCap,omitempty"`
+	Profile   []lineHit        `json:"profile,omitempty"`
+}
+
+// lineHit is one entry of a line-execution profile: how many times line's
+// statements were reached. See interp.LineProfile.
+type lineHit struct {
+	Line  int    `json:"line"`
+	Count uint64 `json:"count"`
+}
+
+// profileToJSON snapshots profile into a line-ascending slice — a shape
+// that's both compact JSON and already in the order the UI wants to walk
+// it (top of file to bottom) without needing to sort client-side.
+func profileToJSON(profile *interp.LineProfile) []lineHit {
+	if profile == nil {
+		return nil
+	}
+	counts := profile.Counts()
+	if len(counts) == 0 {
+		return nil
+	}
+	hits := make([]lineHit, 0, len(counts))
+	for line, count := range counts {
+		hits = append(hits, lineHit{Line: line, Count: count})
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].Line < hits[j].Line })
+	return hits
 }
 
 // jsNanoGoRun runs nanoGo on a source string coming from JS. An optional
-// truthy second argument enables local tracing; the result is a JSON string
-// with elapsedMs/steps/error/trace so hosts can surface run details.
+// truthy second argument enables local tracing; an optional truthy third
+// argument enables the line-execution profile. The result is a JSON string
+// with elapsedMs/steps/error/trace/profile so hosts can surface run details.
 func jsNanoGoRun(this js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		runtime.ConsoleError("nanoGoRun: missing source")
@@ -66,14 +97,24 @@ func jsNanoGoRun(this js.Value, args []js.Value) any {
 	}
 	source := args[0].String()
 	wantTrace := len(args) >= 2 && args[1].Truthy()
+	wantProfile := len(args) >= 3 && args[2].Truthy()
 
 	vm := newPlaygroundVM()
+	// A worker-side CanvasBinding batches cell updates to avoid one Go→JS
+	// callback per cell. Ensure a program that omits CanvasFlush still paints
+	// its final frame before control returns to the worker.
+	defer activeCanvas.Flush()
 
 	const traceCapacity = 4096
 	var tracer *interp.Tracer
 	if wantTrace {
 		tracer = interp.NewTracer(traceCapacity)
 		vm.SetTracer(tracer)
+	}
+	var profile *interp.LineProfile
+	if wantProfile {
+		profile = interp.NewLineProfile()
+		vm.SetLineProfile(profile)
 	}
 
 	stats := runStats{}
@@ -106,6 +147,7 @@ func jsNanoGoRun(this js.Value, args []js.Value) any {
 			})
 		}
 	}
+	stats.Profile = profileToJSON(profile)
 
 	b, jsonErr := json.Marshal(stats)
 	if jsonErr != nil {
@@ -164,6 +206,12 @@ type benchStats struct {
 	MaxMs      float64   `json:"maxMs"`
 	RunsMs     []float64 `json:"runsMs"`
 	Error      string    `json:"error,omitempty"`
+	// Profile is accumulated across every iteration (one shared LineProfile
+	// reused for all N fresh interpreters), so a line inside a hot loop
+	// shows N× the hits a cold one-off line does — the benchmark's own
+	// repetition becomes signal for "which lines actually cost time" rather
+	// than needing a separate profiling run.
+	Profile []lineHit `json:"profile,omitempty"`
 }
 
 // jsNanoGoBench runs the whole program N times, each on a fresh interpreter,
@@ -184,13 +232,22 @@ func jsNanoGoBench(this js.Value, args []js.Value) any {
 	if n > 100 {
 		n = 100
 	}
+	wantProfile := len(args) >= 3 && args[2].Truthy()
+	var profile *interp.LineProfile
+	if wantProfile {
+		profile = interp.NewLineProfile()
+	}
 
 	stats := benchStats{Iterations: n, RunsMs: make([]float64, 0, n)}
 	var totalMs float64
 	for i := 0; i < n; i++ {
 		vm := newPlaygroundVM()
+		if profile != nil {
+			vm.SetLineProfile(profile)
+		}
 		start := time.Now()
 		err := vm.Run(source)
+		activeCanvas.Flush()
 		elapsedMs := float64(time.Since(start).Microseconds()) / 1000
 		if err != nil {
 			stats.Error = err.Error()
@@ -209,6 +266,7 @@ func jsNanoGoBench(this js.Value, args []js.Value) any {
 	if len(stats.RunsMs) > 0 {
 		stats.AvgMs = totalMs / float64(len(stats.RunsMs))
 	}
+	stats.Profile = profileToJSON(profile)
 
 	b, jsonErr := json.Marshal(stats)
 	if jsonErr != nil {
@@ -271,6 +329,7 @@ func jsNanoGoVersion(this js.Value, args []js.Value) any {
 		"hasTrace":     true,
 		"hasStats":     true,
 		"hasCallGraph": true,
+		"hasProfile":   true,
 	}
 	b, _ := json.Marshal(info)
 	return string(b)

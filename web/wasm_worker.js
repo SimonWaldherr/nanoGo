@@ -20,7 +20,7 @@ const _readyPromise = new Promise((resolve) => { _readyResolve = resolve; });
 // or on the next microtask once the synchronous Go slice yields (covers
 // animated demos that time.Sleep between frames).
 // ---------------------------------------------------------------------------
-const BATCHABLE = { 'log': 1, 'warn': 1, 'canvas-set': 1, 'canvas-size': 1, 'canvas-flush': 1 };
+const BATCHABLE = { 'log': 1, 'warn': 1, 'canvas-set': 1, 'canvas-set-level': 1, 'canvas-size': 1, 'canvas-flush': 1, 'canvas-frame': 1 };
 const BATCH_LIMIT = 2048;
 let _batch = [];
 let _batchScheduled = false;
@@ -41,7 +41,10 @@ function postFromGuest(msg) {
   const t = msg && msg.type;
   if (t && BATCHABLE[t]) {
     _batch.push(msg);
-    if (t === 'canvas-flush' || _batch.length >= BATCH_LIMIT) {
+    // canvas-frame is an explicit guest flush. Deliver it immediately so an
+    // animation's frame order survives even when Go yields faster than the
+    // browser's next paint.
+    if (t === 'canvas-flush' || t === 'canvas-frame' || _batch.length >= BATCH_LIMIT) {
       flushBatch();
     } else if (!_batchScheduled) {
       _batchScheduled = true;
@@ -101,7 +104,7 @@ self.onmessage = async function (ev) {
         const buffer = [];
         self.postMessage = function (m) { buffer.push(m); };
         try {
-          stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace));
+          stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace, !!msg.profile));
         } finally {
           flushBatch();
           self.postMessage = origPost;
@@ -109,7 +112,7 @@ self.onmessage = async function (ev) {
           origPost.call(self, { type: 'done', elapsed: Date.now() - t0, stats: stats });
         }
       } else {
-        stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace));
+        stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace, !!msg.profile));
         flushBatch();
         self.postMessage({ type: 'done', elapsed: Date.now() - t0, stats: stats });
       }
@@ -173,7 +176,7 @@ self.onmessage = async function (ev) {
       suppressed++;
     };
     try {
-      const res = parseStats(self.nanoGoBench(msg.source || '', Number(msg.iterations) | 0));
+      const res = parseStats(self.nanoGoBench(msg.source || '', Number(msg.iterations) | 0, !!msg.profile));
       if (!res) {
         self.postMessage({ type: 'bench-result', error: 'benchmark returned no data' });
       } else if (res.error) {
@@ -266,12 +269,19 @@ async function initWasmWorker() {
   // Routed through the batching layer above.
   self.nanoGoPostMessage = postFromGuest;
 
+  // Bump this whenever nanogo.wasm is rebuilt. Unlike the other assets here,
+  // the .wasm binary was fetched by plain URL with no cache-busting query at
+  // all — on a browser that never installs (or hasn't yet activated) the
+  // service worker, the plain HTTP cache could keep serving a stale
+  // interpreter build indefinitely after a deploy.
+  const WASM_URL = 'nanogo.wasm?7';
+
   // Prefer streaming instantiation: starts compilation while bytes are
   // still arriving and avoids buffering the full module in memory.
   let instance;
   try {
     if (typeof WebAssembly.instantiateStreaming === 'function') {
-      const result = await WebAssembly.instantiateStreaming(fetch('nanogo.wasm'), go.importObject);
+      const result = await WebAssembly.instantiateStreaming(fetch(WASM_URL), go.importObject);
       instance = result.instance;
     } else {
       throw new Error('instantiateStreaming unavailable');
@@ -279,7 +289,7 @@ async function initWasmWorker() {
   } catch (e) {
     // Fallback path for servers that don't serve application/wasm with
     // the correct MIME type, or for older runtimes.
-    const resp = await fetch('nanogo.wasm');
+    const resp = await fetch(WASM_URL);
     const buf = await resp.arrayBuffer();
     const result = await WebAssembly.instantiate(buf, go.importObject);
     instance = result.instance;

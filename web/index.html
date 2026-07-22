@@ -9,7 +9,7 @@
        loads before styles.css so the playground theme rules win the cascade;
        the scripts intentionally load before the inline application script. -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css" crossorigin="anonymous">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?6">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js" crossorigin="anonymous" defer></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js" crossorigin="anonymous" defer></script>
 </head>
@@ -231,9 +231,14 @@ Select an example from the sidebar to get started! 🚀</div>
             <summary>📞 Functions <span class="inspector-hint" id="callGraphMeta"></span></summary>
             <div class="inspector-actions">
               <button id="callGraphBtn" class="mini-btn">Analyze functions</button>
+              <div class="view-switch" id="callGraphViewSwitch" role="tablist" aria-label="Call graph view">
+                <button class="view-switch-btn active" data-view="list" type="button">☰ List</button>
+                <button class="view-switch-btn" data-view="diagram" type="button">🕸️ Diagram</button>
+              </div>
               <span class="inspector-note">Who calls whom — click a function, a call, or a caller to jump to it.</span>
             </div>
             <div id="callGraphList" class="callgraph-list"></div>
+            <div id="callGraphDiagram" class="callgraph-diagram" hidden></div>
           </details>
 
           <details class="inspector-section" id="benchSection">
@@ -258,6 +263,18 @@ Select an example from the sidebar to get started! 🚀</div>
             </div>
             <div id="traceTable" class="trace-table"></div>
           </details>
+
+          <details class="inspector-section" id="heatmapSection">
+            <summary>🔥 Heatmap <span class="inspector-hint" id="heatmapMeta"></span></summary>
+            <div class="inspector-actions">
+              <label class="inspector-field trace-toggle">
+                <input id="heatmapToggle" type="checkbox"> Record line heatmap (Run &amp; Benchmark)
+              </label>
+              <button id="heatmapClearBtn" class="mini-btn">Clear</button>
+              <span class="inspector-note">Darker = executed more often. Benchmark accumulates hits across all its iterations.</span>
+            </div>
+            <div id="heatmapList" class="heatmap-list"></div>
+          </details>
         </div>
       </div>
     </section>
@@ -279,7 +296,8 @@ Select an example from the sidebar to get started! 🚀</div>
         'Canvas': {
           output: 'canvas',
           description: 'Basic canvas drawing and pixel manipulation',
-          badge: 'Graphics'
+          badge: 'Graphics',
+          tags: ['Graphics', 'Fundamentals']
         },
         'Channels': {
           output: 'console',
@@ -323,21 +341,31 @@ Select an example from the sidebar to get started! 🚀</div>
         },
         'Life': {
           output: 'canvas',
-          description: 'Conway\'s Game of Life animation',
-          badge: 'Simulation'
+          description: 'Two 100-generation Conway Life rounds with fresh random seeds',
+          badge: 'Simulation',
+          tags: ['Simulation', 'Animation', 'Graphics']
         },
-        'HTTP + Storage': {
+        'HTTP Client + Storage': {
           output: 'dom',
-          description: 'CORS-bound HTTP and worker-session storage',
+          description: 'GET with explicit error handling and worker-session storage',
           badge: 'Web APIs'
         }
         ,
         'FizzBuzz': { output: 'console', description: 'Classic FizzBuzz printing', badge: 'Algorithms' },
         'Fibonacci': { output: 'console', description: 'Recursive Fibonacci example', badge: 'Algorithms' },
         'Prime Sieve': { output: 'console', description: 'Sieve of Eratosthenes', badge: 'Algorithms' },
-        'Checkerboard': { output: 'canvas', description: 'Simple checkerboard canvas demo', badge: 'Graphics' },
-        'Bouncing Ball': { output: 'canvas', description: 'Animated bouncing pixel demo', badge: 'Animation' }
-        , 'HTTP Fetch JSON': { output: 'console', description: 'Fetch text (CORS permitting) and display snippet', badge: 'Web' }
+        'Checkerboard': { output: 'canvas', description: 'Simple checkerboard canvas demo', badge: 'Graphics', tags: ['Graphics', 'Fundamentals'] },
+        'Bouncing Ball': { output: 'canvas', description: 'Animated bouncing pixel demo', badge: 'Animation', tags: ['Animation', 'Graphics'] },
+        'Plasma Waves': { output: 'canvas', description: 'Animated integer plasma field', badge: 'Graphics', tags: ['Graphics', 'Animation', 'Math'] },
+        'Starfield': { output: 'canvas', description: 'Deterministic moving particle field', badge: 'Animation', tags: ['Animation', 'Graphics'] },
+        'Scanner': { output: 'canvas', description: 'Sweeping scanner with pulsing targets', badge: 'Animation', tags: ['Animation', 'Graphics', 'Simulation'] },
+        'Mandelbrot Set': { output: 'canvas', description: 'Escape-time fractal using floating-point arithmetic', badge: 'Graphics', tags: ['Graphics', 'Math', 'Algorithms'] },
+        "Langton's Ant": { output: 'canvas', description: 'Rule-driven cellular path with animated frames', badge: 'Simulation', tags: ['Simulation', 'Animation', 'Graphics', 'Algorithms'] },
+        'Sorting Visualizer': { output: 'canvas', description: 'Animated bubble-sort passes rendered as bars', badge: 'Algorithms', tags: ['Algorithms', 'Animation', 'Graphics'] }
+        , 'HTTP Client GET': { output: 'console', description: 'GET JSON and display a response snippet', badge: 'Web' }
+        , 'HTTP Client POST': { output: 'console', description: 'POST JSON with response and CORS error handling', badge: 'Web' }
+        , 'HTTP Client Errors': { output: 'console', description: 'Handle a non-2xx HTTP response with text, err', badge: 'Web' }
+        , 'HTTP Server Router (simulated)': { output: 'console', description: 'Model server-side routing without a network listener', badge: 'Web' }
         , 'Pipeline': { output: 'console', description: 'Simple producer -> squarer pipeline using channels', badge: 'Concurrency' }
         , 'Structs & Methods': { output: 'console', description: 'Define structs and pointer vs value methods', badge: 'Types' }
         , 'Maps & Ranges': { output: 'console', description: 'Map creation and range iteration', badge: 'Utilities' }
@@ -367,7 +395,7 @@ Select an example from the sidebar to get started! 🚀</div>
         if (examplesLoadPromise) return examplesLoadPromise;
         examplesLoadPromise = new Promise((resolve, reject) => {
           const script = document.createElement('script');
-          script.src = 'examples.js?1';
+          script.src = 'examples.js?6';
           script.async = true;
           script.dataset.nanogoExamples = 'true';
           script.onload = () => {
@@ -376,7 +404,7 @@ Select an example from the sidebar to get started! 🚀</div>
           };
           script.onerror = () => {
             examplesLoadPromise = null;
-            reject(new Error('Failed to load examples.js?1'));
+            reject(new Error('Failed to load examples.js?6'));
           };
           document.body.appendChild(script);
         });
@@ -400,7 +428,8 @@ Select an example from the sidebar to get started! 🚀</div>
           <p>Shows how to draw pixels on a canvas using browser-specific functions.</p>
           <ul>
             <li><code>browser.CanvasSize(w, h)</code> - Set canvas dimensions</li>
-            <li><code>browser.CanvasSet(x, y, on)</code> - Set pixel state</li>
+            <li><code>browser.CanvasSet(x, y, on)</code> - Set binary pixel state</li>
+            <li><code>browser.CanvasSetLevel(x, y, level)</code> - Set palette level (0–7)</li>
             <li><code>browser.CanvasFlush()</code> - Update display</li>
           </ul>
         `,
@@ -478,7 +507,7 @@ Select an example from the sidebar to get started! 🚀</div>
         `,
         'Life': `
           <p><strong>Game of Life Simulation</strong></p>
-          <p>Conway's Game of Life - a cellular automaton demonstrating complex behavior from simple rules.</p>
+          <p>Conway's Game of Life — 100 animated generations, then a freshly seeded second round.</p>
           <ul>
             <li>2D grid simulation</li>
             <li>Animation loops</li>
@@ -486,9 +515,9 @@ Select an example from the sidebar to get started! 🚀</div>
             <li>Real-time canvas updates</li>
           </ul>
         `,
-        'HTTP + Storage': `
+        'HTTP Client + Storage': `
           <p><strong>Web APIs Integration</strong></p>
-          <p>Demonstrates nanoGo's browser HTTP and worker-session storage facades. Requests remain subject to CORS; storage is reset when the worker is restarted.</p>
+          <p>Uses <code>text, err := http.GetText(...)</code> with nanoGo's browser HTTP and worker-session storage facades. Requests remain subject to CORS; storage is reset when the worker is restarted.</p>
           <ul>
             <li><code>http.GetText()</code> - Fetch text content</li>
             <li><code>storage.SetItem()</code> - Save through nanoGo storage</li>
@@ -514,11 +543,47 @@ Select an example from the sidebar to get started! 🚀</div>
         `,
         'Bouncing Ball': `
           <p><strong>Bouncing Ball</strong></p>
-          <p>Simple animated bouncing pixel to demonstrate canvas updates & timing.</p>
+          <p>Simple animated bouncing pixel to demonstrate frame updates & timing.</p>
+        `,
+        'Plasma Waves': `
+          <p><strong>Plasma Waves</strong></p>
+          <p>A full-frame integer pattern that demonstrates efficient batched canvas updates.</p>
+        `,
+        'Starfield': `
+          <p><strong>Starfield</strong></p>
+          <p>Deterministic particles redraw as a moving star field.</p>
+        `,
+        'Scanner': `
+          <p><strong>Scanner</strong></p>
+          <p>A sweeping scan line reveals pulsing targets across the grid.</p>
         `
-        , 'HTTP Fetch JSON': `
-          <p><strong>HTTP Fetch JSON</strong></p>
-          <p>Fetch a text resource (examples.js) and display a short snippet — subject to CORS.</p>
+        , 'Mandelbrot Set': `
+          <p><strong>Mandelbrot Set</strong></p>
+          <p>An 80×48 escape-time fractal sampled with floating-point arithmetic. Palette levels reveal its escape bands while the set itself stays deep blue-black.</p>
+        `
+        , "Langton's Ant": `
+          <p><strong>Langton's Ant</strong></p>
+          <p>A tiny two-rule automaton turns and flips each visited cell. Its apparently simple rules generate a long, structured path.</p>
+        `
+        , 'Sorting Visualizer': `
+          <p><strong>Sorting Visualizer</strong></p>
+          <p>Bubble sort updates an integer bar chart after each pass, connecting a classic algorithm with visible intermediate state.</p>
+        `
+        , 'HTTP Client GET': `
+          <p><strong>HTTP Client: GET</strong></p>
+          <p>Fetches a public JSON resource, checks <code>err</code>, then trims the response for console output. Browser requests require the target to permit CORS.</p>
+        `,
+        'HTTP Client POST': `
+          <p><strong>HTTP Client: JSON POST</strong></p>
+          <p>Sends a JSON request through <code>http.PostText()</code> and shows a compact response. The default content type is <code>application/json</code>; CORS still applies.</p>
+        `,
+        'HTTP Client Errors': `
+          <p><strong>HTTP Client: Errors</strong></p>
+          <p>Uses a deliberately missing route to demonstrate the idiomatic <code>body, err := ...</code> pattern for non-2xx responses.</p>
+        `,
+        'HTTP Server Router (simulated)': `
+          <p><strong>HTTP Server Router (simulation)</strong></p>
+          <p>GitHub Pages serves static files, so browser WASM cannot bind a listening HTTP port. This example models a server handler with GET, POST and 404 routing decisions entirely in nanoGo.</p>
         `,
         'Pipeline': `
           <p><strong>Pipeline</strong></p>
@@ -650,6 +715,8 @@ Select an example from the sidebar to get started! 🚀</div>
       const callGraphBtn = document.getElementById("callGraphBtn");
       const callGraphListEl = document.getElementById("callGraphList");
       const callGraphMetaEl = document.getElementById("callGraphMeta");
+      const callGraphDiagramEl = document.getElementById("callGraphDiagram");
+      const callGraphViewSwitchEl = document.getElementById("callGraphViewSwitch");
       const benchBtn = document.getElementById("benchBtn");
       const benchIterationsEl = document.getElementById("benchIterations");
       const benchResultsEl = document.getElementById("benchResults");
@@ -658,6 +725,11 @@ Select an example from the sidebar to get started! 🚀</div>
       const traceTableEl = document.getElementById("traceTable");
       const traceMetaEl = document.getElementById("traceMeta");
       const traceSectionEl = document.getElementById("traceSection");
+      const heatmapToggle = document.getElementById("heatmapToggle");
+      const heatmapListEl = document.getElementById("heatmapList");
+      const heatmapMetaEl = document.getElementById("heatmapMeta");
+      const heatmapSectionEl = document.getElementById("heatmapSection");
+      const heatmapClearBtn = document.getElementById("heatmapClearBtn");
       const benchSectionEl = document.getElementById("benchSection");
       const statWallEl = document.getElementById("statWall");
       const statInterpEl = document.getElementById("statInterp");
@@ -691,6 +763,10 @@ Select an example from the sidebar to get started! 🚀</div>
           });
           editor.setSize('100%', '100%');
           if (fontSizeSelect) applyFontSize(fontSizeSelect.value);
+          // Editing invalidates any error highlight left over from the last
+          // run — the line numbers it was anchored to may no longer mean
+          // the same thing once the user starts changing the code.
+          editor.on('change', () => { clearErrorHighlight(); clearHeatmap(); });
           // CodeMirror creates its own hidden input for capturing keystrokes;
           // it does not inherit these attributes from the original textarea,
           // so mobile keyboards (iOS) would otherwise autocorrect/autocapitalize
@@ -857,9 +933,21 @@ Select an example from the sidebar to get started! 🚀</div>
       let pendingLogLines = [];
       let logFlushScheduled = false;
 
-      function logMessage(message, type) {
-        pendingLogLines.push({ message: String(message), type: type || 'output' });
+      // Matches the "line:col: " prefix RuntimeError.Error() and go/parser
+      // both produce (see interp.RuntimeError, interp/evaluator.go's
+      // evalExpr/evalStmt location tagging). Used to make error log lines
+      // clickable — jumping straight to the failing source line instead of
+      // leaving the user to search for it by eye.
+      const ERROR_LOCATION_RE = /(\d+):(\d+):\s/;
+
+      function logMessage(message, type, loc) {
+        if (!loc && type === 'error') {
+          const m = ERROR_LOCATION_RE.exec(String(message));
+          if (m) loc = { line: parseInt(m[1], 10), col: parseInt(m[2], 10) };
+        }
+        pendingLogLines.push({ message: String(message), type: type || 'output', loc: loc || null });
         scheduleLogFlush();
+        if (loc) highlightErrorLine(loc.line);
       }
 
       // requestAnimationFrame is throttled or fully paused while the document
@@ -892,10 +980,19 @@ Select an example from the sidebar to get started! 🚀</div>
         const fragment = document.createDocumentFragment();
         const now = Date.now();
         for (let i = start; i < batch.length; i++) {
-          const { message, type } = batch[i];
+          const { message, type, loc } = batch[i];
           const lineElement = document.createElement('div');
           lineElement.className = 'log-line log-' + type;
           lineElement.textContent = `[${timestamp}] ${message}`;
+          if (loc) {
+            // A data attribute, not a class: the fading logic below
+            // periodically reassigns this element's whole className (to
+            // add/remove 'fading'/'old'), which would silently discard any
+            // extra class added via classList.add. Attributes survive that.
+            lineElement.dataset.line = loc.line;
+            lineElement.dataset.col = loc.col;
+            lineElement.title = 'Jump to line ' + loc.line;
+          }
           fragment.appendChild(lineElement);
           logLines.push({ text: lineElement.textContent, element: lineElement, timestamp: now, type });
         }
@@ -1007,10 +1104,9 @@ Select an example from the sidebar to get started! 🚀</div>
         tab.addEventListener('click', () => showOutputPanel(tab.dataset.output));
       });
 
-      // Cache canvas + 2d context (with alpha:false for faster compositing)
-      // and batch cell draws via requestAnimationFrame so a flood of
-      // `canvas-set` worker messages (e.g. Game of Life) coalesces into
-      // one paint per frame instead of one paint per cell.
+      // Cache the logical cell state, then paint only the newest complete
+      // state on requestAnimationFrame. This preserves the order of animated
+      // worker frames even when several arrive before the browser can paint.
       let _lifeCanvas = null;
       let _lifeCtx = null;
       function _getLifeCtx() {
@@ -1026,49 +1122,86 @@ Select an example from the sidebar to get started! 🚀</div>
         }
         return _lifeCtx;
       }
-      const _cellQueue = [];
-      let _cellRafScheduled = false;
+      let _canvasGridW = 0;
+      let _canvasGridH = 0;
+      let _canvasCells = new Uint8Array(0);
+      let _canvasRenderScheduled = false;
+      // Keep level 1 as the established green for binary demos. Palette-aware
+      // programs may use levels 2..7 without changing their rendering path.
+      const CANVAS_PALETTE = ['#080d13', '#10b981', '#0ea5e9', '#2563eb', '#7c3aed', '#ec4899', '#f97316', '#facc15'];
       // Fallback frame interval (≈ 60 fps) used only when
       // requestAnimationFrame (rAF) is unavailable in this context (very old
       // browsers / certain worker scopes). Real browsers will hit the rAF
       // branch below.
       const FRAME_DELAY_MS = 16;
       function _flushCells() {
-        _cellRafScheduled = false;
+        _canvasRenderScheduled = false;
         const ctx = _getLifeCtx();
-        if (!ctx) { _cellQueue.length = 0; return; }
+        if (!ctx || _canvasGridW <= 0 || _canvasGridH <= 0) return;
         const cs = parseInt(scaleEl.value, 10) || 8;
-        // Group by colour to minimise fillStyle changes.
-        const alive = [], dead = [];
-        for (let i = 0; i < _cellQueue.length; i++) {
-          const c = _cellQueue[i];
-          (c.alive ? alive : dead).push(c);
-        }
-        _cellQueue.length = 0;
-        if (alive.length) {
-          ctx.fillStyle = '#10b981';
-          for (let i = 0; i < alive.length; i++) {
-            const c = alive[i];
-            ctx.fillRect(c.x * cs, c.y * cs, cs, cs);
-          }
-        }
-        if (dead.length) {
-          ctx.fillStyle = '#0d1117';
-          for (let i = 0; i < dead.length; i++) {
-            const c = dead[i];
-            ctx.fillRect(c.x * cs, c.y * cs, cs, cs);
+        ctx.fillStyle = CANVAS_PALETTE[0];
+        ctx.fillRect(0, 0, _canvasGridW * cs, _canvasGridH * cs);
+        for (let level = 1; level < CANVAS_PALETTE.length; level++) {
+          ctx.fillStyle = CANVAS_PALETTE[level];
+          for (let i = 0; i < _canvasCells.length; i++) {
+            if (_canvasCells[i] === level) {
+              const x = i % _canvasGridW;
+              const y = (i / _canvasGridW) | 0;
+              ctx.fillRect(x * cs, y * cs, cs, cs);
+            }
           }
         }
       }
-      function drawCell(x, y, alive) {
-        _cellQueue.push({ x: x, y: y, alive: alive });
-        if (!_cellRafScheduled) {
-          _cellRafScheduled = true;
-          // rAF is throttled/paused while the document is hidden (backgrounded
-          // tab), which would otherwise stall canvas updates indefinitely.
-          const useRaf = typeof requestAnimationFrame === 'function' && !(typeof document !== 'undefined' && document.hidden);
-          (useRaf ? requestAnimationFrame : (cb) => setTimeout(cb, FRAME_DELAY_MS))(_flushCells);
+      function _scheduleCanvasRender() {
+        if (_canvasRenderScheduled) return;
+        _canvasRenderScheduled = true;
+        const useRaf = typeof requestAnimationFrame === 'function' && !(typeof document !== 'undefined' && document.hidden);
+        (useRaf ? requestAnimationFrame : (cb) => setTimeout(cb, FRAME_DELAY_MS))(_flushCells);
+      }
+      function resizeCanvasGrid(w, h) {
+        _canvasGridW = Math.max(0, w | 0);
+        _canvasGridH = Math.max(0, h | 0);
+        _canvasCells = new Uint8Array(_canvasGridW * _canvasGridH);
+      }
+      function setCanvasCell(x, y, level) {
+        x |= 0; y |= 0;
+        if (x < 0 || y < 0 || x >= _canvasGridW || y >= _canvasGridH) return;
+        level = Number(level) | 0;
+        _canvasCells[y * _canvasGridW + x] = level < 0 ? 0 : (level >= CANVAS_PALETTE.length ? CANVAS_PALETTE.length - 1 : level);
+      }
+      function applyCanvasFrame(data) {
+        // Decode compact `x,y,level;...` without allocating one array/object
+        // per cell. The worker already guarantees this is a whole frame.
+        let i = 0;
+        while (i < data.length) {
+          let x = 0, y = 0, sign = 1;
+          if (data.charCodeAt(i) === 45) { sign = -1; i++; }
+          while (i < data.length) {
+            const c = data.charCodeAt(i);
+            if (c < 48 || c > 57) break;
+            x = x * 10 + c - 48; i++;
+          }
+          x *= sign;
+          if (data.charCodeAt(i++) !== 44) break;
+          sign = 1;
+          if (data.charCodeAt(i) === 45) { sign = -1; i++; }
+          while (i < data.length) {
+            const c = data.charCodeAt(i);
+            if (c < 48 || c > 57) break;
+            y = y * 10 + c - 48; i++;
+          }
+          y *= sign;
+          if (data.charCodeAt(i++) !== 44) break;
+          const level = data.charCodeAt(i++) - 48;
+          while (i < data.length && data.charCodeAt(i) !== 59) i++;
+          if (i < data.length) i++;
+          setCanvasCell(x, y, level);
         }
+        _scheduleCanvasRender();
+      }
+      function drawCell(x, y, alive) {
+        setCanvasCell(x, y, alive ? 1 : 0);
+        _scheduleCanvasRender();
       }
 
       function startWasmWorker() {
@@ -1081,7 +1214,7 @@ Select an example from the sidebar to get started! 🚀</div>
           return;
         }
 
-        worker = new Worker('wasm_worker.js?2');
+        worker = new Worker('wasm_worker.js?7');
         worker.onmessage = (ev) => {
           const m = ev.data;
           if (!m || !m.type) return;
@@ -1109,6 +1242,7 @@ Select an example from the sidebar to get started! 🚀</div>
               if (astBtn && wasmCapabilities.hasAst === false) astBtn.disabled = true;
               if (callGraphBtn && wasmCapabilities.hasCallGraph === false) callGraphBtn.disabled = true;
               if (benchBtn && wasmCapabilities.hasBench === false) benchBtn.disabled = true;
+              if (heatmapToggle && wasmCapabilities.hasProfile === false) heatmapToggle.disabled = true;
               logMessage('🎉 WebAssembly loaded and ready!', 'system');
               fillExamples();
               loadCodeFromURL();
@@ -1128,6 +1262,7 @@ Select an example from the sidebar to get started! 🚀</div>
               const w = Number(m.w), h = Number(m.h);
               const scale = parseInt(scaleEl.value, 10);
               const canvas = document.getElementById('life');
+              resizeCanvasGrid(w, h);
               canvas.width = w * scale;
               canvas.height = h * scale;
               break;
@@ -1135,6 +1270,17 @@ Select an example from the sidebar to get started! 🚀</div>
             case 'canvas-set': {
               const cx = Number(m.x), cy = Number(m.y), alive = !!m.alive;
               drawCell(cx, cy, alive);
+              break;
+            }
+            case 'canvas-set-level':
+              setCanvasCell(Number(m.x), Number(m.y), Number(m.level));
+              _scheduleCanvasRender();
+              break;
+            case 'canvas-frame': {
+              // The WASM worker encodes a whole frame as `x,y,alive;...` so
+              // Go crosses into JavaScript once per frame instead of once per
+              // cell. Decode directly into the existing rAF drawing queue.
+              applyCanvasFrame(String(m.data || ''));
               break;
             }
             case 'canvas-flush':
@@ -1215,6 +1361,7 @@ Select an example from the sidebar to get started! 🚀</div>
               } else if (m.result) {
                 renderBench(m.result);
                 logMessage('📊 Benchmark: ' + m.result.iterations + ' run(s), avg ' + m.result.avgMs.toFixed(2) + 'ms, ' + formatSteps(m.result.stepsPerOp) + ' steps/op', 'system');
+                if (m.result.profile) applyHeatmap(m.result.profile);
               }
               break;
             case 'done': {
@@ -1229,6 +1376,7 @@ Select an example from the sidebar to get started! 🚀</div>
               }
               updateRunStats(elapsed, stats);
               if (stats && stats.trace) renderTrace(stats.trace, stats.traceCap);
+              if (stats && stats.profile) applyHeatmap(stats.profile);
               setStatus('Ready', 'ready');
               break;
             }
@@ -1240,7 +1388,8 @@ Select an example from the sidebar to get started! 🚀</div>
       function runCode() {
         try {
           if (!worker) throw new Error('worker not initialized');
-          
+          clearErrorHighlight();
+
           // Show appropriate output panel for current example
           if (currentExample && EXAMPLE_CONFIG[currentExample]) {
             showOutputPanel(EXAMPLE_CONFIG[currentExample].output);
@@ -1259,8 +1408,10 @@ Select an example from the sidebar to get started! 🚀</div>
           setStatus('Running code...', 'loading');
           const mode = modeSelect.value || 'stream';
           const wantTrace = !!(traceToggle && traceToggle.checked);
+          const wantProfile = !!(heatmapToggle && heatmapToggle.checked);
+          clearHeatmap();
           const t0 = performance.now();
-          worker.postMessage({ type: 'run', source: getSource(), mode: mode, trace: wantTrace, t0 });
+          worker.postMessage({ type: 'run', source: getSource(), mode: mode, trace: wantTrace, profile: wantProfile, t0 });
         } catch (err) {
           setStatus('Runtime error', 'error');
           logMessage('❌ RUNTIME ERROR: ' + err.message, 'error');
@@ -1297,6 +1448,102 @@ Select an example from the sidebar to get started! 🚀</div>
         if (!editor || !line) return;
         editor.setCursor({ line: line - 1, ch: Math.max(0, (col || 1) - 1) });
         editor.focus();
+      }
+
+      // Persistent (until the next run or edit) highlight on the line a
+      // run's error was reported at — an ambient "look here" that doesn't
+      // require the user to have noticed/clicked the console line at all.
+      // Uses a line handle rather than a bare index so it keeps tracking the
+      // right line even if the error is left in place while editing above it.
+      let errorLineHandle = null;
+      function clearErrorHighlight() {
+        if (editor && errorLineHandle) editor.removeLineClass(errorLineHandle, 'wrap', 'cm-error-line');
+        errorLineHandle = null;
+      }
+      function highlightErrorLine(line) {
+        clearErrorHighlight();
+        if (!editor || !line) return;
+        const idx = Math.min(Math.max(line - 1, 0), editor.lineCount() - 1);
+        errorLineHandle = editor.getLineHandle(idx);
+        // 'wrap' (not 'background'): with lineWrapping on, the background
+        // div this editor generates measures zero height, so a background
+        // color on it never paints anything. 'wrap' targets the line's
+        // actual content wrapper, which always has real height.
+        if (errorLineHandle) editor.addLineClass(errorLineHandle, 'wrap', 'cm-error-line');
+      }
+
+      // Line-execution heatmap: darker background = executed more often
+      // (see interp.LineProfile / stats.profile). Buckets are log-scaled
+      // rather than linear — a hot loop can run thousands of times more
+      // than a cold one-off line, and a linear scale would make everything
+      // but that one loop look equally "cold" by comparison.
+      const HEATMAP_BUCKETS = 10;
+      let heatmapLineHandles = [];
+
+      function heatmapBucket(count, logMax) {
+        if (logMax <= 0) return HEATMAP_BUCKETS;
+        return Math.max(1, Math.min(HEATMAP_BUCKETS, Math.ceil(Math.log(count + 1) / logMax * HEATMAP_BUCKETS)));
+      }
+
+      function clearHeatmap() {
+        if (editor) {
+          heatmapLineHandles.forEach(({ handle, cls }) => editor.removeLineClass(handle, 'wrap', cls));
+        }
+        heatmapLineHandles = [];
+        if (heatmapListEl) heatmapListEl.innerHTML = '';
+        if (heatmapMetaEl) heatmapMetaEl.textContent = '';
+      }
+
+      function applyHeatmap(hits) {
+        clearHeatmap();
+        if (!editor || !hits || hits.length === 0) {
+          if (heatmapListEl) heatmapListEl.innerHTML = '<p class="inspector-note">No hits recorded. Check "Record line heatmap" above, then Run or Benchmark again.</p>';
+          return;
+        }
+        const maxCount = hits.reduce((m, h) => Math.max(m, h.count), 1);
+        const logMax = Math.log(maxCount + 1);
+
+        hits.forEach(h => {
+          const idx = Math.min(Math.max(h.line - 1, 0), editor.lineCount() - 1);
+          const handle = editor.getLineHandle(idx);
+          if (!handle) return;
+          const cls = 'cm-heat-' + heatmapBucket(h.count, logMax);
+          editor.addLineClass(handle, 'wrap', cls);
+          heatmapLineHandles.push({ handle, cls });
+        });
+
+        if (heatmapMetaEl) {
+          const totalHits = hits.reduce((s, h) => s + h.count, 0);
+          heatmapMetaEl.textContent = hits.length + ' line(s) · ' + formatSteps(totalHits) + ' total hits · hottest ' + formatSteps(maxCount) + '×';
+        }
+        if (heatmapSectionEl) heatmapSectionEl.open = true;
+
+        const HEATMAP_LIST_LIMIT = 30;
+        const sorted = hits.slice().sort((a, b) => b.count - a.count).slice(0, HEATMAP_LIST_LIMIT);
+        const rows = sorted.map(h => {
+          const bucket = heatmapBucket(h.count, logMax);
+          return '<tr><td><button class="trace-loc heatmap-loc" data-line="' + h.line + '">L' + h.line + '</button></td>' +
+            '<td>' + formatSteps(h.count) + '</td>' +
+            '<td><span class="heat-bar heat-bar-' + bucket + '"></span></td></tr>';
+        }).join('');
+        heatmapListEl.innerHTML =
+          '<table class="inspector-table"><thead><tr><th>Line</th><th>Hits</th><th>Heat</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+          (hits.length > HEATMAP_LIST_LIMIT ? '<p class="inspector-note">Showing the ' + HEATMAP_LIST_LIMIT + ' hottest of ' + hits.length + ' executed lines.</p>' : '');
+      }
+
+      if (heatmapListEl) {
+        heatmapListEl.addEventListener('click', (ev) => {
+          const btn = ev.target.closest('.heatmap-loc');
+          if (btn) jumpToSource(parseInt(btn.dataset.line, 10), 1);
+        });
+      }
+      if (heatmapClearBtn) heatmapClearBtn.addEventListener('click', clearHeatmap);
+
+      if (logEl) {
+        logEl.addEventListener('click', (ev) => {
+          const line = ev.target.closest('.log-line[data-line]');
+          if (line) jumpToSource(parseInt(line.dataset.line, 10), parseInt(line.dataset.col, 10));
+        });
       }
 
       // AST tree: nodes below the eagerly-rendered top levels are built
@@ -1388,7 +1635,34 @@ Select an example from the sidebar to get started! 🚀</div>
       // (see interp.AnalyzeCallGraph) — an unresolved call (e.g. fmt.Println,
       // or a method call the analyzer couldn't uniquely attribute to a type)
       // is still listed under "Calls" but renders as plain text, not a link.
+      let lastCallGraphResult = null;
+      let callGraphView = 'list';
+
       function renderCallGraph(result) {
+        lastCallGraphResult = result;
+        renderCallGraphList(result);
+        renderCallGraphDiagram(result);
+      }
+
+      function setCallGraphView(view) {
+        callGraphView = view;
+        if (callGraphListEl) callGraphListEl.hidden = view !== 'list';
+        if (callGraphDiagramEl) callGraphDiagramEl.hidden = view !== 'diagram';
+        if (callGraphViewSwitchEl) {
+          callGraphViewSwitchEl.querySelectorAll('.view-switch-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.view === view);
+          });
+        }
+      }
+      if (callGraphViewSwitchEl) {
+        callGraphViewSwitchEl.addEventListener('click', (ev) => {
+          const btn = ev.target.closest('.view-switch-btn');
+          if (!btn) return;
+          setCallGraphView(btn.dataset.view);
+        });
+      }
+
+      function renderCallGraphList(result) {
         if (!callGraphListEl) return;
         const funcs = result.funcs || [];
         if (callGraphMetaEl) {
@@ -1483,6 +1757,234 @@ Select an example from the sidebar to get started! 🚀</div>
         return col;
       }
 
+      // Call graph diagram: the same AnalyzeCallGraph result as the list
+      // view, laid out as boxes and arrows instead of text columns. Layout
+      // is a simple longest-path layering (roots = functions with no local
+      // caller, at column 0; each callee sits one column to the right of
+      // its deepest-so-far caller) — good enough for the small, mostly-DAG
+      // call graphs a playground snippet produces, without pulling in a
+      // graph-layout library. Cycles (mutual or direct recursion) are
+      // handled defensively (see the step cap below) rather than laid out
+      // "correctly", since there is no single correct layering for a cycle.
+      const SVG_NS = 'http://www.w3.org/2000/svg';
+      const CG_NODE_H = 34;
+      const CG_NODE_GAP_Y = 14;
+      const CG_COL_GAP_X = 96;
+      const CG_PAD = 32; // headroom for skip-edge curves bowing above/below the outermost node rows
+
+      function svgEl(tag, attrs) {
+        const el = document.createElementNS(SVG_NS, tag);
+        if (attrs) for (const k in attrs) el.setAttribute(k, attrs[k]);
+        return el;
+      }
+
+      function cgNodeWidth(label) {
+        return Math.max(64, Math.min(220, label.length * 7.2 + 28));
+      }
+
+      function computeCallGraphLevels(funcs) {
+        const byName = new Map(funcs.map(f => [f.name, f]));
+        const level = new Map();
+        const selfLoops = new Set();
+        const queue = [];
+        funcs.forEach(f => {
+          if (!f.calledBy || f.calledBy.length === 0) { level.set(f.name, 0); queue.push(f.name); }
+        });
+        // Every function must end up with a level even if none qualified as
+        // a root (e.g. a pure cycle with no unambiguous entry point).
+        funcs.forEach(f => { if (!level.has(f.name)) { level.set(f.name, 0); queue.push(f.name); } });
+
+        const maxSteps = Math.max(200, funcs.length * 20);
+        let head = 0, steps = 0;
+        while (head < queue.length && steps < maxSteps) {
+          steps++;
+          const name = queue[head++];
+          const f = byName.get(name);
+          if (!f || !f.calls) continue;
+          const lvl = level.get(name);
+          for (const c of f.calls) {
+            if (!c.resolved || !byName.has(c.resolved)) continue;
+            if (c.resolved === name) { selfLoops.add(name); continue; }
+            const candidate = lvl + 1;
+            const existing = level.get(c.resolved);
+            if (existing === undefined || candidate > existing) {
+              level.set(c.resolved, candidate);
+              queue.push(c.resolved);
+            }
+          }
+        }
+        return { level, selfLoops, byName };
+      }
+
+      function renderCallGraphDiagram(result) {
+        if (!callGraphDiagramEl) return;
+        callGraphDiagramEl.innerHTML = '';
+        const funcs = result.funcs || [];
+        if (funcs.length === 0) {
+          callGraphDiagramEl.innerHTML = '<p class="inspector-note">No top-level functions found.</p>';
+          return;
+        }
+
+        const { level, selfLoops, byName } = computeCallGraphLevels(funcs);
+        const maxInternalLevel = Math.max(0, ...Array.from(level.values()));
+
+        // External calls (unresolved: fmt.Println, an interface method, ...)
+        // are collapsed into one shared node per unique name, so ten
+        // functions all calling fmt.Println draw one box with ten incoming
+        // arrows rather than ten duplicate boxes. They form the rightmost
+        // column since they have no further internal structure to show.
+        const externalLevel = maxInternalLevel + 1;
+        const externalNodes = new Map(); // name -> { name, callers: Set }
+        funcs.forEach(f => {
+          (f.calls || []).forEach(c => {
+            if (c.resolved) return;
+            let ext = externalNodes.get(c.name);
+            if (!ext) { ext = { name: c.name, callers: new Set() }; externalNodes.set(c.name, ext); }
+            ext.callers.add(f.name);
+          });
+        });
+
+        // Group into columns.
+        const columns = [];
+        for (let i = 0; i <= externalLevel; i++) columns.push([]);
+        funcs.forEach(f => columns[level.get(f.name)].push({ kind: 'func', name: f.name, data: f }));
+        externalNodes.forEach(ext => columns[externalLevel].push({ kind: 'external', name: ext.name, data: ext }));
+        if (columns[externalLevel].length === 0) columns.pop();
+
+        // Position every node: x by column, y stacked within its column.
+        const pos = new Map(); // name -> {x, y, w, h, kind}
+        let colX = CG_PAD;
+        const colWidths = columns.map(col => col.reduce((w, n) => Math.max(w, cgNodeWidth(n.name)), 64));
+        columns.forEach((col, ci) => {
+          let y = CG_PAD;
+          col.forEach(n => {
+            const w = colWidths[ci];
+            pos.set(n.name, { x: colX, y, w, h: CG_NODE_H, kind: n.kind, data: n.data, col: ci });
+            y += CG_NODE_H + CG_NODE_GAP_Y;
+          });
+          colX += colWidths[ci] + CG_COL_GAP_X;
+        });
+        const totalWidth = colX - CG_COL_GAP_X + CG_PAD;
+        const totalHeight = Math.max(...columns.map(col => col.length), 1) * (CG_NODE_H + CG_NODE_GAP_Y) + CG_PAD * 2;
+
+        const svg = svgEl('svg', {
+          width: totalWidth, height: totalHeight,
+          viewBox: '0 0 ' + totalWidth + ' ' + totalHeight,
+          class: 'callgraph-svg'
+        });
+        const defs = svgEl('defs');
+        defs.innerHTML =
+          '<marker id="cg-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
+          '<path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"></path></marker>' +
+          '<marker id="cg-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
+          '<path d="M0,0 L10,5 L0,10 z" fill="var(--text-dim)"></path></marker>';
+        svg.appendChild(defs);
+
+        const edgeLayer = svgEl('g', { class: 'callgraph-edges' });
+        const nodeLayer = svgEl('g', { class: 'callgraph-nodes' });
+
+        // Edges first, so node boxes paint over the line ends cleanly.
+        // An edge whose caller and callee sit two or more columns apart
+        // (e.g. main -> a helper's own external call) would otherwise pass
+        // in a dead-straight line right through whatever node happens to
+        // sit in an intervening column at the same row — indistinguishable
+        // from actually touching it. skipBow arcs the curve's midpoint away
+        // from that straight line, growing with how many columns it clears
+        // and alternating up/down (via a running counter) so several such
+        // edges fan out instead of stacking on the same arc.
+        let skipEdgeCount = 0;
+        funcs.forEach(f => {
+          const from = pos.get(f.name);
+          if (!from) return;
+          (f.calls || []).forEach(c => {
+            const targetName = c.resolved || null;
+            const to = targetName ? pos.get(targetName) : pos.get(c.name);
+            if (!to || (targetName === f.name)) return; // self-loop drawn separately
+            const muted = !c.resolved;
+            const x1 = from.x + from.w, y1 = from.y + from.h / 2;
+            const x2 = to.x, y2 = to.y + to.h / 2;
+            const midX = (x1 + x2) / 2;
+            const colSpan = to.col - from.col;
+            let midY1 = y1, midY2 = y2;
+            if (colSpan > 1) {
+              skipEdgeCount++;
+              const dir = skipEdgeCount % 2 === 0 ? -1 : 1;
+              const bow = dir * Math.min(18 + 9 * (colSpan - 1), CG_PAD - 4);
+              midY1 += bow;
+              midY2 += bow;
+            }
+            const path = svgEl('path', {
+              d: 'M ' + x1 + ' ' + y1 + ' C ' + midX + ' ' + midY1 + ', ' + midX + ' ' + midY2 + ', ' + x2 + ' ' + y2,
+              class: 'callgraph-edge-path' + (muted ? ' muted' : ''),
+              'marker-end': muted ? 'url(#cg-arrow-muted)' : 'url(#cg-arrow)'
+            });
+            const title = svgEl('title');
+            title.textContent = f.name + ' → ' + c.name + ' (line ' + c.line + ')';
+            path.appendChild(title);
+            edgeLayer.appendChild(path);
+          });
+        });
+
+        // Self-recursion: a small loop bulging out to the right of the node.
+        selfLoops.forEach(name => {
+          const n = pos.get(name);
+          if (!n) return;
+          const x = n.x + n.w, yTop = n.y + n.h * 0.28, yBot = n.y + n.h * 0.72;
+          const bulge = x + 26;
+          const path = svgEl('path', {
+            d: 'M ' + x + ' ' + yTop + ' C ' + bulge + ' ' + yTop + ', ' + bulge + ' ' + yBot + ', ' + x + ' ' + yBot,
+            class: 'callgraph-edge-path callgraph-selfloop',
+            'marker-end': 'url(#cg-arrow)'
+          });
+          const title = svgEl('title');
+          title.textContent = name + ' calls itself (recursion)';
+          path.appendChild(title);
+          edgeLayer.appendChild(path);
+        });
+
+        // Nodes.
+        pos.forEach((n, name) => {
+          const g = svgEl('g', {
+            class: 'callgraph-node' + (n.kind === 'external' ? ' callgraph-node-external' : '') +
+              (n.kind === 'func' && (!n.data.calledBy || n.data.calledBy.length === 0) ? ' callgraph-node-entry' : '')
+          });
+          g.appendChild(svgEl('rect', { x: n.x, y: n.y, width: n.w, height: n.h, rx: 7 }));
+          const text = svgEl('text', { x: n.x + n.w / 2, y: n.y + n.h / 2 + 1 });
+          text.textContent = name;
+          g.appendChild(text);
+          if (n.kind === 'func') {
+            const title = svgEl('title');
+            const callCount = (n.data.calls || []).length, callerCount = (n.data.calledBy || []).length;
+            title.textContent = name + ' — line ' + n.data.line + ' · ' + callCount + ' call(s) · ' + callerCount + ' caller(s)\nClick to jump to definition';
+            g.appendChild(title);
+            g.style.cursor = 'pointer';
+            g.addEventListener('click', () => jumpToSource(n.data.line, 1));
+          } else {
+            const title = svgEl('title');
+            title.textContent = name + ' — external/unresolved call, from: ' + Array.from(n.data.callers).join(', ');
+            g.appendChild(title);
+          }
+          nodeLayer.appendChild(g);
+        });
+
+        svg.appendChild(edgeLayer);
+        svg.appendChild(nodeLayer);
+
+        const wrap = document.createElement('div');
+        wrap.className = 'callgraph-svg-wrap';
+        wrap.appendChild(svg);
+        callGraphDiagramEl.appendChild(wrap);
+
+        const legend = document.createElement('div');
+        legend.className = 'callgraph-legend';
+        legend.innerHTML =
+          '<span><i class="cg-swatch cg-swatch-entry"></i>Entry point</span>' +
+          '<span><i class="cg-swatch cg-swatch-func"></i>Function / method</span>' +
+          '<span><i class="cg-swatch cg-swatch-external"></i>External / unresolved call</span>' +
+          '<span class="inspector-note">Click a function box to jump to its definition.</span>';
+        callGraphDiagramEl.appendChild(legend);
+      }
+
       function requestCallGraph() {
         if (!worker) { logMessage('Worker not ready', 'warn'); return; }
         if (callGraphBtn) { callGraphBtn.disabled = true; callGraphBtn.textContent = 'Analyzing…'; }
@@ -1510,12 +2012,14 @@ Select an example from the sidebar to get started! 🚀</div>
       function requestBench() {
         if (!worker) { logMessage('Worker not ready', 'warn'); return; }
         const iterations = Math.max(1, Math.min(100, parseInt(benchIterationsEl && benchIterationsEl.value, 10) || 5));
+        const wantProfile = !!(heatmapToggle && heatmapToggle.checked);
+        clearHeatmap();
         if (benchBtn) { benchBtn.disabled = true; benchBtn.textContent = 'Benchmarking…'; }
         if (benchSectionEl) benchSectionEl.open = true;
         setStatus('Benchmarking…', 'loading');
         showOutputPanel('inspector');
         logMessage('📊 Benchmarking ' + iterations + ' iteration(s)…', 'system');
-        worker.postMessage({ type: 'bench', source: getSource(), iterations });
+        worker.postMessage({ type: 'bench', source: getSource(), iterations, profile: wantProfile });
       }
 
       const TRACE_RENDER_LIMIT = 500;
@@ -1637,12 +2141,18 @@ Select an example from the sidebar to get started! 🚀</div>
       }
 
       function fillExamples() {
-        // Re-render tag filters each time (collect fresh set of badges)
+        function tagsFor(config) {
+          if (Array.isArray(config.tags) && config.tags.length) return config.tags;
+          return [config.badge || 'Demo'];
+        }
+
+        // Re-render tag filters each time (collect fresh set of tags)
         function renderTagFilters() {
           if (!tagFilters) return;
-          // collect unique badges in insertion order
+          // Collect tags in insertion order. Legacy entries may still use
+          // one `badge`; newer demos can belong to several categories.
           const tags = new Set();
-          EXAMPLE_NAMES.forEach(k => { tags.add(EXAMPLE_CONFIG[k].badge || 'Demo'); });
+          EXAMPLE_NAMES.forEach(k => { tagsFor(EXAMPLE_CONFIG[k]).forEach(tag => tags.add(tag)); });
           // Clear and add 'All'
           tagFilters.innerHTML = '';
           const allBtn = document.createElement('button');
@@ -1666,14 +2176,15 @@ Select an example from the sidebar to get started! 🚀</div>
         EXAMPLE_NAMES.forEach(name => {
           if (name === 'Empty') return; // Skip empty example
           const config = EXAMPLE_CONFIG[name] || { output: 'console', description: 'Go programming example', badge: 'Demo' };
+          const exampleTags = tagsFor(config);
 
-          // Filter by name or description
+          // Filter by name, description, or any tag.
           if (filter) {
-            const hay = (name + ' ' + (config.description || '')).toLowerCase();
+            const hay = (name + ' ' + (config.description || '') + ' ' + exampleTags.join(' ')).toLowerCase();
             if (!hay.includes(filter)) return;
           }
           // Filter by selected tag
-          if (selectedTag && config.badge !== selectedTag) return;
+          if (selectedTag && !exampleTags.includes(selectedTag)) return;
 
           const item = document.createElement('div');
           item.className = 'example-item';
@@ -1685,9 +2196,14 @@ Select an example from the sidebar to get started! 🚀</div>
           info.className = 'example-info';
           info.innerHTML = `<div class="example-name">${name}</div><div class="example-desc">${config.description}</div>`;
 
-          const badge = document.createElement('div');
-          badge.className = 'example-badge';
-          badge.textContent = config.badge;
+          const badges = document.createElement('div');
+          badges.className = 'example-tags';
+          exampleTags.forEach(tag => {
+            const badge = document.createElement('div');
+            badge.className = 'example-badge';
+            badge.textContent = tag;
+            badges.appendChild(badge);
+          });
 
           const copyBtn = document.createElement('button');
           copyBtn.className = 'copy-btn';
@@ -1714,7 +2230,7 @@ Select an example from the sidebar to get started! 🚀</div>
           rightCol.style.display = 'flex';
           rightCol.style.gap = '8px';
           rightCol.style.alignItems = 'center';
-          rightCol.appendChild(badge);
+          rightCol.appendChild(badges);
           rightCol.appendChild(copyBtn);
 
           item.appendChild(info);

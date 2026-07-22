@@ -83,8 +83,10 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	vm.RegisterPackage("fmt", fmtPkg)
 
 	// --- debug ---
-	// debug.Q and debug.Mark are intercepted in evalExpr so they can retain the
-	// original expression text, just like q-style print debugging. Their output
+	// debug.Q, debug.Mark, debug.Stack, and debug.Vars are intercepted in
+	// evalExpr so they can retain the original expression text or read the
+	// caller's env/call frame — none of that is visible to a plain native,
+	// whose signature only ever sees already-evaluated args. Their output
 	// goes to the optional host-owned Tracer rather than guest stdout.
 	debugPkg := &Package{Name: "debug", Funcs: map[string]*Function{}}
 	debugPkg.Funcs["Q"] = &Function{Name: "Q", IsVariadic: true, Native: func([]any) (any, error) {
@@ -92,6 +94,39 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	}}
 	debugPkg.Funcs["Mark"] = &Function{Name: "Mark", Params: []string{"label"}, Native: func([]any) (any, error) {
 		return nil, NewRuntimeError("debug.Mark must be called directly")
+	}}
+	debugPkg.Funcs["Stack"] = &Function{Name: "Stack", Native: func([]any) (any, error) {
+		return nil, NewRuntimeError("debug.Stack must be called directly")
+	}}
+	debugPkg.Funcs["Vars"] = &Function{Name: "Vars", Native: func([]any) (any, error) {
+		return nil, NewRuntimeError("debug.Vars must be called directly")
+	}}
+	// debug.Assert needs no env/frame access — just its evaluated args — so
+	// unlike the four above it runs as a normal native. A false condition
+	// fails with msg (default "assertion failed") and is recorded on the
+	// Tracer so a host can see which assertion tripped even without guest
+	// stdout output.
+	debugPkg.Funcs["Assert"] = &Function{Name: "Assert", IsVariadic: true, Native: func(args []any) (any, error) {
+		if len(args) == 0 {
+			return nil, NewRuntimeError("debug.Assert: expected a condition")
+		}
+		cond, ok := args[0].(bool)
+		if !ok {
+			return nil, NewRuntimeError("debug.Assert: first argument must be bool")
+		}
+		if cond {
+			return nil, nil
+		}
+		msg := "assertion failed"
+		if len(args) > 1 {
+			parts := make([]string, 0, len(args)-1)
+			for _, a := range args[1:] {
+				parts = append(parts, ToString(a))
+			}
+			msg = strlib.Join(parts, " ")
+		}
+		vm.emitTrace("debug_assert_fail", "debug.Assert", msg, nil)
+		return nil, NewRuntimeError("debug.Assert: " + msg)
 	}}
 	vm.RegisterPackage("debug", debugPkg)
 
@@ -539,6 +574,12 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	}}
 	browserPkg.Funcs["CanvasSet"] = &Function{Name: "CanvasSet", Native: func(args []any) (any, error) {
 		if n, ok := vm.natives["CanvasSet"]; ok {
+			_, _ = n(args)
+		}
+		return nil, nil
+	}}
+	browserPkg.Funcs["CanvasSetLevel"] = &Function{Name: "CanvasSetLevel", Native: func(args []any) (any, error) {
+		if n, ok := vm.natives["CanvasSetLevel"]; ok {
 			_, _ = n(args)
 		}
 		return nil, nil

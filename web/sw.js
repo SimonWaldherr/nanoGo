@@ -1,5 +1,5 @@
 // Bump this when shell assets change: most local assets are served cache-first.
-const CACHE_NAME = 'nanogo-playground-ui-v7';
+const CACHE_NAME = 'nanogo-playground-ui-v20';
 const PRECACHE_URLS = [
   './',
   './index.html',

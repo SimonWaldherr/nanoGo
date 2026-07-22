@@ -8,16 +8,70 @@ import (
 	"sync/atomic"
 )
 
-// Env is a lexical scope chaining to a parent environment.
+// Env is a lexical scope chaining to a parent environment. Vars starts out
+// nil (see NewEnv) and is allocated lazily on first declare(): reading a nil
+// map is well-defined Go (returns the zero value, ok=false), so get() needs
+// no special-casing, and a huge fraction of scopes created per evaluation —
+// a for-loop body block that only assigns to outer variables, an if-body
+// that just returns — never declare anything locally and so never pay for a
+// map allocation at all. This was previously the single largest allocation
+// source in the interpreter (see interp/bench_test.go's benchmarks).
 type Env struct {
-	Vars   map[string]any
-	Parent *Env
+	Vars    map[string]any
+	intVars []intVar
+	Parent  *Env
+	// shared marks a package scope that hosts may hot-swap while guest code is
+	// running. It is fixed when the scope is created, so callers can lock this
+	// one boundary without making short-lived function/block scopes pay locks.
+	shared bool
 	mu     sync.RWMutex
 	frame  *callFrame
 }
 
+// intVar is one binding in Env.intVars. A tiny linear-scanned slice beats a
+// map[string]int here: function-call and block scopes almost always hold
+// only a handful of int locals (loop counters, a couple of params), and for
+// that size a map's header-plus-bucket allocation and hashing cost more than
+// scanning a few slice entries by direct string comparison — this used to be
+// the largest allocation source in the interpreter (see bench_test.go's
+// BenchmarkFibRecursive, which is nearly all short-lived call-scope
+// allocation). Falls back to no special-casing for large scopes; nanoGo's
+// guest programs don't have call frames with dozens of locals in practice.
+type intVar struct {
+	name string
+	val  int
+}
+
+func lookupIntVar(vars []intVar, name string) (int, bool) {
+	for i := range vars {
+		if vars[i].name == name {
+			return vars[i].val, true
+		}
+	}
+	return 0, false
+}
+
+func setOrAppendIntVar(env *Env, name string, value int) {
+	for i := range env.intVars {
+		if env.intVars[i].name == name {
+			env.intVars[i].val = value
+			return
+		}
+	}
+	env.intVars = append(env.intVars, intVar{name, value})
+}
+
+func removeIntVar(env *Env, name string) {
+	for i := range env.intVars {
+		if env.intVars[i].name == name {
+			env.intVars = append(env.intVars[:i], env.intVars[i+1:]...)
+			return
+		}
+	}
+}
+
 func NewEnv(parent *Env) *Env {
-	env := &Env{Vars: map[string]any{}, Parent: parent}
+	env := &Env{Parent: parent}
 	if parent != nil {
 		env.frame = parent.frame
 	}
@@ -83,11 +137,22 @@ type Interpreter struct {
 	Capabilities Capabilities
 
 	// runMu serializes complete executions; a VM has mutable globals and is not
-	// safe to execute concurrently. execution is atomic because every AST node
-	// checks it; this keeps cancellation checks off the mutex fast path.
+	// safe to execute concurrently. execution remains atomic for lifecycle
+	// operations that may originate outside the evaluator (Kill and Context).
 	runMu     sync.Mutex
 	execution atomic.Pointer[execution]
-	tracer    atomic.Pointer[Tracer]
+	// activeExecution is the evaluator-only counterpart to execution. runMu
+	// serializes its lifetime, and it is cleared only after every guest
+	// goroutine joins, so evaluator checkpoints can avoid an atomic-pointer
+	// lookup for each AST node. External lifecycle operations (Kill, Context,
+	// IsRunning) continue to use execution.
+	activeExecution *execution
+	tracer          atomic.Pointer[Tracer]
+	// runtimeTraceAnnotations mirrors the selected high-level nanoGo events
+	// into the host's runtime/trace stream. It stays opt-in because a normal
+	// interpreter run must not pay tracing's formatting cost.
+	runtimeTraceAnnotations atomic.Bool
+	lineProfile             atomic.Pointer[LineProfile]
 
 	// lastSteps preserves the final step counter of the most recently ended
 	// execution so hosts can report deterministic cost after Run returns
@@ -136,7 +201,13 @@ func NewInterpreterWithVFS(vfs *VFS) *Interpreter {
 		vfs = NewVFS()
 	}
 	return &Interpreter{
-		globals:          NewEnv(nil),
+		// globals is populated eagerly by RegisterBuiltinPackages (which
+		// writes vm.globals.Vars[alias] = ... directly, bypassing declare's
+		// lazy allocation — see that file), and every guest program's
+		// package-level decls land here too, so unlike a typical NewEnv
+		// scope it is never going to stay empty. Pre-allocate its map
+		// directly instead of going through NewEnv's lazy path.
+		globals:          &Env{Vars: make(map[string]any, 64)},
 		types:            map[string]*TypeDef{},
 		funcs:            map[string]*Function{},
 		natives:          map[string]func(args []any) (any, error){},
@@ -223,50 +294,221 @@ func (vm *Interpreter) RegisterPackage(alias string, pkg *Package) {
 	vm.declare(alias, pkg, vm.globals)
 }
 
+// lookupValueInEnv reads name directly from env (not its ancestors),
+// checking the unboxed intVars table before the general Vars map. Callers
+// hold whatever lock (or none, on the single-goroutine fast path) is
+// appropriate for env; this only touches the two maps.
+func lookupValueInEnv(env *Env, name string) (any, bool) {
+	if n, ok := lookupIntVar(env.intVars, name); ok {
+		return n, true
+	}
+	v, ok := env.Vars[name]
+	return v, ok
+}
+
+// get, set, and declare all check vm.activeExecution's concurrent flag
+// before deciding whether to lock: it starts false and is set exactly once,
+// permanently, the moment the guest program's first `go` statement actually
+// spawns a goroutine (see execution.reserveGoroutine) — a happens-before
+// edge guaranteed by Go's memory model for the `go` statement itself, so by
+// the time any second goroutine could possibly touch an Env, every
+// goroutine (including the original one) already observes concurrent as
+// true. Until that first spawn, exactly one goroutine ever touches any Env
+// in this execution, so every RWMutex lock/unlock on that path is pure
+// overhead — this mirrors getInt/setInt/declareInt's existing fast path,
+// generalized to the any-valued case.
 func (vm *Interpreter) get(name string, env *Env) (any, bool) {
+	exec := vm.activeExecution
 	for e := env; e != nil; e = e.Parent {
-		e.mu.RLock()
-		v, ok := e.Vars[name]
-		e.mu.RUnlock()
-		if ok {
+		if e.shared || (exec != nil && exec.concurrent.Load()) {
+			e.mu.RLock()
+			v, ok := lookupValueInEnv(e, name)
+			e.mu.RUnlock()
+			if ok {
+				return v, true
+			}
+			continue
+		}
+		if v, ok := lookupValueInEnv(e, name); ok {
 			return v, true
 		}
 	}
 	return nil, false
 }
 
-func (vm *Interpreter) set(name string, val any, env *Env) {
-	// Probe each ancestor with a shared RLock first — as get() does — and
-	// only escalate to an exclusive Lock at the one scope that actually
-	// holds the key. Env.Vars entries are never deleted anywhere in this
-	// package (only declare/set add or update them), so once the RLock
-	// probe sees the key present, it cannot have vanished by the time the
-	// exclusive lock is acquired; no re-check under the write lock is
-	// needed. This keeps every ancestor scope that doesn't own the key
-	// fully concurrent-reader-friendly instead of unconditionally blocking
-	// other goroutines' get() calls there.
+// getInt is the allocation-free counterpart to get for evaluator paths that
+// can prove they only need an int. The general get method must return an any,
+// which boxes large ints; tight arithmetic loops use this helper instead.
+func (vm *Interpreter) getInt(name string, env *Env) (int, bool) {
+	exec := vm.activeExecution
 	for e := env; e != nil; e = e.Parent {
-		e.mu.RLock()
-		_, ok := e.Vars[name]
-		e.mu.RUnlock()
-		if !ok {
+		if e.shared || (exec != nil && exec.concurrent.Load()) {
+			e.mu.RLock()
+			n, ok := lookupIntVar(e.intVars, name)
+			e.mu.RUnlock()
+			if ok {
+				return n, true
+			}
 			continue
 		}
-		e.mu.Lock()
-		e.Vars[name] = val
-		e.mu.Unlock()
+		if n, ok := lookupIntVar(e.intVars, name); ok {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+// getLocal looks up a binding only in env itself. PackageScope uses it when
+// exporting package-level declarations; unlike get, it must not fall through
+// to imported/global parent scopes.
+func (vm *Interpreter) getLocal(name string, env *Env) (any, bool) {
+	env.mu.RLock()
+	defer env.mu.RUnlock()
+	return lookupValueInEnv(env, name)
+}
+
+// lookupOwnershipInEnv reports whether name is stored directly in env, in
+// either table, without reading the (possibly large, for Vars) value —
+// set uses this to find which ancestor owns a name before deciding how to
+// update it.
+func lookupOwnershipInEnv(env *Env, name string) (intOK, valueOK bool) {
+	_, intOK = lookupIntVar(env.intVars, name)
+	if intOK {
+		return true, false
+	}
+	_, valueOK = env.Vars[name]
+	return
+}
+
+// updateInEnv overwrites name's value in env, which the caller has already
+// established (via lookupOwnershipInEnv) owns it. intOK selects which table
+// name currently lives in; storing a value of the "wrong" kind for that
+// table moves it to the other one (e.g. assigning a string over what was
+// previously an int local).
+func updateInEnv(env *Env, name string, val any, intOK bool) {
+	if intOK {
+		if n, ok := val.(int); ok {
+			setOrAppendIntVar(env, name, n)
+			return
+		}
+		removeIntVar(env, name)
+		if env.Vars == nil {
+			env.Vars = make(map[string]any, 4)
+		}
+		env.Vars[name] = val
 		return
 	}
-	// If not found, create in current scope.
-	env.mu.Lock()
+	env.Vars[name] = val // Vars is already non-nil: the caller only reaches here when valueOK was true
+}
+
+// declareInEnv stores a brand-new binding directly in env (not an ancestor):
+// used by both declare and set's "not found anywhere" fallback.
+func declareInEnv(env *Env, name string, val any) {
+	if n, ok := val.(int); ok {
+		delete(env.Vars, name)
+		setOrAppendIntVar(env, name, n)
+		return
+	}
+	if env.Vars == nil {
+		env.Vars = make(map[string]any, 4)
+	}
+	removeIntVar(env, name)
 	env.Vars[name] = val
-	env.mu.Unlock()
+}
+
+func (vm *Interpreter) set(name string, val any, env *Env) {
+	// A loaded PackageScope may be replaced by the host while its child
+	// function scopes execute. Lock per scope so those shared ancestors stay
+	// safe without making purely local assignments pay synchronization.
+	exec := vm.activeExecution
+	for e := env; e != nil; e = e.Parent {
+		if e.shared || (exec != nil && exec.concurrent.Load()) {
+			e.mu.RLock()
+			intOK, valueOK := lookupOwnershipInEnv(e, name)
+			e.mu.RUnlock()
+			if !intOK && !valueOK {
+				continue
+			}
+			e.mu.Lock()
+			updateInEnv(e, name, val, intOK)
+			e.mu.Unlock()
+			return
+		}
+
+		intOK, valueOK := lookupOwnershipInEnv(e, name)
+		if !intOK && !valueOK {
+			continue
+		}
+		updateInEnv(e, name, val, intOK)
+		return
+	}
+	if env.shared || (exec != nil && exec.concurrent.Load()) {
+		env.mu.Lock()
+		declareInEnv(env, name, val)
+		env.mu.Unlock()
+		return
+	}
+	declareInEnv(env, name, val)
 }
 
 func (vm *Interpreter) declare(name string, val any, env *Env) {
+	if env.shared {
+		env.mu.Lock()
+		declareInEnv(env, name, val)
+		env.mu.Unlock()
+		return
+	}
+	if exec := vm.activeExecution; exec == nil || !exec.concurrent.Load() {
+		declareInEnv(env, name, val)
+		return
+	}
 	env.mu.Lock()
-	env.Vars[name] = val
+	declareInEnv(env, name, val)
 	env.mu.Unlock()
+}
+
+func (vm *Interpreter) declareInt(name string, value int, env *Env) {
+	if env.shared {
+		env.mu.Lock()
+		delete(env.Vars, name)
+		setOrAppendIntVar(env, name, value)
+		env.mu.Unlock()
+		return
+	}
+	if exec := vm.activeExecution; exec == nil || !exec.concurrent.Load() {
+		delete(env.Vars, name)
+		setOrAppendIntVar(env, name, value)
+		return
+	}
+	env.mu.Lock()
+	delete(env.Vars, name)
+	setOrAppendIntVar(env, name, value)
+	env.mu.Unlock()
+}
+
+// setInt updates an existing integer binding without boxing it. false means
+// the name is either undefined or currently holds a dynamic (non-int) value.
+func (vm *Interpreter) setInt(name string, value int, env *Env) bool {
+	exec := vm.activeExecution
+	for e := env; e != nil; e = e.Parent {
+		if e.shared || (exec != nil && exec.concurrent.Load()) {
+			e.mu.RLock()
+			_, ok := lookupIntVar(e.intVars, name)
+			e.mu.RUnlock()
+			if !ok {
+				continue
+			}
+			e.mu.Lock()
+			setOrAppendIntVar(e, name, value)
+			e.mu.Unlock()
+			return true
+		}
+		if _, ok := lookupIntVar(e.intVars, name); ok {
+			setOrAppendIntVar(e, name, value)
+			return true
+		}
+	}
+	return false
 }
 
 // --------------- Lvalue references for assignments ---------------
@@ -318,6 +560,43 @@ func (r *fieldRef) Set(v any) error { r.s.Fields[r.name] = v; return nil }
 
 // ------------------- Call frames for defer/panic ------------------
 
+// callFrame tracks one active function invocation. Besides its own defers,
+// it links to the call site's frame (caller), forming a call stack that
+// debug.Stack() walks. That link is set once at construction (see
+// callFunction) and never mutated afterward, so it is safe to read from a
+// goroutine other than the one that created it — the only case where that
+// happens is a spawned goroutine's frame pointing back at its launching
+// call's frame, which by then is already fully built.
 type callFrame struct {
-	defers []func()
+	defers   []func()
+	funcName string
+	caller   *callFrame
+}
+
+// collectLocalVars gathers every binding visible from env, innermost scope
+// shadowing outer ones, stopping at (and excluding) globals — used by
+// debug.Vars() to give guest code a snapshot of its own local state.
+func (vm *Interpreter) collectLocalVars(env *Env) map[string]any {
+	out := make(map[string]any)
+	exec := vm.activeExecution
+	for e := env; e != nil && e != vm.globals; e = e.Parent {
+		locked := e.shared || (exec != nil && exec.concurrent.Load())
+		if locked {
+			e.mu.RLock()
+		}
+		for _, iv := range e.intVars {
+			if _, seen := out[iv.name]; !seen {
+				out[iv.name] = iv.val
+			}
+		}
+		for name, v := range e.Vars {
+			if _, seen := out[name]; !seen {
+				out[name] = v
+			}
+		}
+		if locked {
+			e.mu.RUnlock()
+		}
+	}
+	return out
 }

@@ -41,3 +41,5 @@ build/
 web/nanogo.wasm
 web/nanogo.wasm.gz
 web/nanogo.wasm.br
+mcp
+wasm

@@ -218,6 +218,7 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .example-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 680; }
 .example-desc { display: -webkit-box; overflow: hidden; margin-top: 2px; color: var(--text-muted); font-size: 11px; line-height: 1.35; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .example-badge { flex: 0 0 auto; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted); font-size: 10px; font-weight: 650; letter-spacing: .02em; }
+.example-tags { display: flex; max-width: 124px; flex: 0 1 auto; justify-content: flex-end; gap: 4px; flex-wrap: wrap; }
 .copy-btn { min-height: 27px; padding: 3px 7px; font-size: 11px; }
 
 .info-panel { padding: 14px; }
@@ -269,6 +270,44 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .CodeMirror-cursor { border-left-color: var(--accent-hover); }
 .CodeMirror-selected { background: color-mix(in srgb, var(--accent) 24%, transparent) !important; }
 .CodeMirror-activeline-background { background: color-mix(in srgb, var(--surface-raised) 55%, transparent); }
+/* Ambient marker for the line a run's error was reported at (see
+   highlightErrorLine) — a left-edge accent bar plus a faint tint, distinct
+   enough from CodeMirror-activeline-background to read clearly even when
+   the cursor happens to already be on the same line. Cleared on the next
+   run or the next edit (see clearErrorHighlight). */
+.cm-error-line { position: relative; background: color-mix(in srgb, var(--error) 12%, transparent) !important; }
+.cm-error-line::before { position: absolute; top: 0; bottom: 0; left: 0; width: 3px; background: var(--error); content: ""; }
+
+/* Line-execution heatmap (see applyHeatmap in index.html). Log-scaled
+   buckets 1 (barely executed) through 10 (hottest) — warm color, growing
+   from a faint tint to solid, drifting from --warning into --error at the
+   very top so the single hottest lines read as unmistakably "hot". Uses
+   the same 'wrap' line-class mechanism as .cm-error-line (see its comment):
+   the 'background' line class measures zero height with lineWrapping on. */
+.cm-heat-1  { background: color-mix(in srgb, var(--warning) 7%,  transparent) !important; }
+.cm-heat-2  { background: color-mix(in srgb, var(--warning) 14%, transparent) !important; }
+.cm-heat-3  { background: color-mix(in srgb, var(--warning) 22%, transparent) !important; }
+.cm-heat-4  { background: color-mix(in srgb, var(--warning) 31%, transparent) !important; }
+.cm-heat-5  { background: color-mix(in srgb, var(--warning) 41%, transparent) !important; }
+.cm-heat-6  { background: color-mix(in srgb, var(--warning) 52%, transparent) !important; }
+.cm-heat-7  { background: color-mix(in srgb, var(--warning) 64%, transparent) !important; }
+.cm-heat-8  { background: color-mix(in srgb, var(--error) 25%, color-mix(in srgb, var(--warning) 70%, transparent)) !important; }
+.cm-heat-9  { background: color-mix(in srgb, var(--error) 55%, transparent) !important; }
+.cm-heat-10 { background: color-mix(in srgb, var(--error) 80%, transparent) !important; }
+
+.heatmap-list { padding: 4px 12px 12px; max-height: 320px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.heatmap-loc { font-weight: 700; }
+.heat-bar { display: inline-block; width: 56px; height: 9px; border-radius: 3px; background: var(--border); }
+.heat-bar-1  { width: 12%; background: color-mix(in srgb, var(--warning) 35%, var(--border)); }
+.heat-bar-2  { width: 20%; background: color-mix(in srgb, var(--warning) 45%, var(--border)); }
+.heat-bar-3  { width: 30%; background: color-mix(in srgb, var(--warning) 55%, var(--border)); }
+.heat-bar-4  { width: 40%; background: color-mix(in srgb, var(--warning) 65%, var(--border)); }
+.heat-bar-5  { width: 52%; background: var(--warning); }
+.heat-bar-6  { width: 64%; background: var(--warning); }
+.heat-bar-7  { width: 76%; background: color-mix(in srgb, var(--error) 35%, var(--warning)); }
+.heat-bar-8  { width: 86%; background: color-mix(in srgb, var(--error) 60%, var(--warning)); }
+.heat-bar-9  { width: 94%; background: color-mix(in srgb, var(--error) 85%, var(--warning)); }
+.heat-bar-10 { width: 100%; background: var(--error); }
 .cm-keyword, .cm-qualifier { color: #c792ea; font-weight: 650; }
 .cm-atom, .cm-number { color: #f7c66a; }
 .cm-def, .cm-variable-2, .cm-type { color: #7dcfff; }
@@ -294,6 +333,10 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .log-line.log-warn { color: var(--warning); }
 .log-line.log-system { color: var(--text-dim); }
 .log-line.fading { opacity: .58; } .log-line.old { opacity: .3; }
+/* data-line, not a class: see the comment where it's set in flushLogQueue —
+   the fading logic reassigns className wholesale and would drop a class. */
+.log-line[data-line] { cursor: pointer; text-decoration: underline dotted color-mix(in srgb, var(--error) 55%, transparent); text-underline-offset: 2px; }
+.log-line[data-line]:hover { background: color-mix(in srgb, var(--error) 16%, transparent); }
 #output { min-height: 260px; overflow: auto; padding: 14px; border: 1px solid var(--border); border-radius: 9px; background: #fff; color: #172033; }
 #output :first-child { margin-top: 0; }
 
@@ -367,6 +410,36 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .callgraph-edge.callgraph-resolved { border-color: color-mix(in srgb, var(--success) 40%, var(--border)); color: var(--success); }
 .callgraph-none { color: var(--text-dim); font-size: 11px; font-style: italic; }
 
+/* List/Diagram view switch (Functions section) */
+.view-switch { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; background: var(--code-bg); }
+.view-switch-btn { min-height: 26px; padding: 3px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); font-size: 11px; font-weight: 650; }
+.view-switch-btn.active { background: color-mix(in srgb, var(--accent) 20%, var(--surface-raised)); color: var(--accent-hover); }
+
+/* [hidden] must win over .callgraph-list's own `display: grid` (a plain
+   class selector otherwise beats the UA stylesheet's [hidden] rule since
+   both apply to the same element with the same specificity tier). */
+.callgraph-list[hidden], .callgraph-diagram[hidden] { display: none; }
+
+/* Call graph diagram (node/arrow view) */
+.callgraph-diagram { padding: 4px 12px 14px; }
+.callgraph-svg-wrap { max-height: 420px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; border: 1px solid var(--border); border-radius: 9px; background: var(--code-bg); }
+.callgraph-svg { display: block; }
+.callgraph-node rect { stroke-width: 1.5; fill: color-mix(in srgb, var(--accent) 10%, var(--surface-raised)); stroke: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.callgraph-node text { fill: var(--text); font-family: var(--mono); font-size: 11px; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+.callgraph-node-entry rect { stroke: var(--success); stroke-width: 2; fill: color-mix(in srgb, var(--success) 14%, var(--surface-raised)); }
+.callgraph-node-external rect { stroke: var(--border-light); stroke-dasharray: 4 3; fill: var(--surface); }
+.callgraph-node-external text { fill: var(--text-dim); }
+.callgraph-node:hover rect { stroke-width: 2.5; }
+.callgraph-edge-path { fill: none; stroke: var(--accent); stroke-width: 1.5; opacity: .75; }
+.callgraph-edge-path.muted { stroke: var(--text-dim); stroke-dasharray: 3 3; opacity: .6; }
+.callgraph-edge-path.callgraph-selfloop { stroke: var(--warning); }
+.callgraph-legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 9px; color: var(--text-muted); font-size: 11px; }
+.callgraph-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.cg-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; border: 1.5px solid color-mix(in srgb, var(--accent) 45%, var(--border)); background: color-mix(in srgb, var(--accent) 10%, var(--surface-raised)); }
+.cg-swatch-entry { border-color: var(--success); border-width: 2px; background: color-mix(in srgb, var(--success) 14%, var(--surface-raised)); }
+.cg-swatch-func { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.cg-swatch-external { border-style: dashed; border-color: var(--border-light); background: var(--surface); }
+
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 9px; background: var(--border-light); background-clip: padding-box; }
@@ -384,7 +457,15 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .theme-pastel { color-scheme: light; --bg:#fff7f3; --surface:#fff; --surface-raised:#fff0f4; --surface-hover:#ffe4ec; --text:#342b34; --text-muted:#74636e; --border:#f0d6e0; --border-light:#dfb8c8; --accent:#d35f91; --accent-hover:#a53c6b; --accent-strong:#be4e7e; --success:#3b9d78; --warning:#b47b20; --error:#c74d5d; --code-bg:#fffafd; --code-gutter:#fff0f5; }
 .theme-high-contrast { --bg:#000; --surface:#000; --surface-raised:#111; --surface-hover:#222; --text:#fff; --text-muted:#eee; --text-dim:#c4c4c4; --border:#fff; --border-light:#ff0; --accent:#ff0; --accent-hover:#fff; --accent-strong:#d3d300; --success:#7fff00; --warning:#ff0; --error:#ff5c5c; --code-bg:#000; --code-gutter:#111; }
 
-@media (max-width: 1280px) { .main { grid-template-columns: minmax(220px, 270px) minmax(430px, 1fr); } .output-section { grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(0, 1fr)); } .output-panel.active { min-height: 270px; } #log { height: 280px; } }
+/* Below 1280px the output section drops to a full-width row under the
+   sidebar/editor row (see grid-column below). It has held only a tab bar
+   plus one active panel since the tabbed inspector redesign — the old
+   grid-template-columns: repeat(3, ...) here predates that and, for that
+   shape, squeezed the tab bar into a single narrow, vertically-stretched
+   column (grid items default to align-items:stretch) rather than a normal
+   horizontal row. Single-column is correct now; the panel itself still
+   lays out its own contents (canvas, log, inspector grid, ...) internally. */
+@media (max-width: 1280px) { .main { grid-template-columns: minmax(220px, 270px) minmax(430px, 1fr); } .output-section { grid-column: 1 / -1; } .output-panel.active { min-height: 270px; } #log { height: 280px; } }
 @media (max-width: 900px) { .header-content { align-items: flex-start; flex-direction: column; } .main { grid-template-columns: 1fr; } .sidebar { grid-template-columns: minmax(0, 1fr) minmax(240px, .8fr); } .output-section { grid-column: auto; grid-template-columns: 1fr; } .editor-container, .CodeMirror, .CodeMirror-scroll, #src { min-height: 480px; height: 480px; } }
 
 /* Phone breakpoint (iPhone in portrait or landscape, plus small Android).

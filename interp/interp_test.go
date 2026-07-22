@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -17,11 +18,14 @@ func newTestVM() (*Interpreter, *strings.Builder) {
 	// capability policy itself; policy-specific tests use a fresh zero-policy VM.
 	vm.Capabilities = FullCapabilities()
 	var buf strings.Builder
+	var bufMu sync.Mutex
 
 	vm.RegisterNative("ConsoleLog", func(args []any) (any, error) {
 		if len(args) > 0 {
+			bufMu.Lock()
 			buf.WriteString(ToString(args[0]))
 			buf.WriteByte('\n')
+			bufMu.Unlock()
 		}
 		return nil, nil
 	})
@@ -89,6 +93,21 @@ func main() {
 		if i >= len(lines) || strings.TrimSpace(lines[i]) != want {
 			t.Errorf("line %d: want %q, got %q", i, want, safeIndex(lines, i))
 		}
+	}
+}
+
+func TestIntegerBindingCanChangeToDynamicValue(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	x := 42
+	x = "updated"
+	fmt.Println(x)
+}
+`)
+	if !strings.Contains(out, "updated") {
+		t.Errorf("expected dynamic reassignment to survive int fast path, got %q", out)
 	}
 }
 
@@ -543,12 +562,15 @@ func TestToString(t *testing.T) {
 }
 
 func TestEnvScoping(t *testing.T) {
-	parent := NewEnv(nil)
-	parent.Vars["x"] = 10
-	child := NewEnv(parent)
-	child.Vars["y"] = 20
-
 	vm := NewInterpreter()
+
+	// Vars is allocated lazily on first declare() (see NewEnv's doc comment)
+	// rather than eagerly by NewEnv itself, so scoping must be exercised
+	// through declare rather than by writing the map directly.
+	parent := NewEnv(nil)
+	vm.declare("x", 10, parent)
+	child := NewEnv(parent)
+	vm.declare("y", 20, child)
 
 	v, ok := vm.get("x", child)
 	if !ok || v != 10 {
@@ -1812,5 +1834,334 @@ func main() {
 	}
 	if !seenStart || !seenEnd || !seenQ {
 		t.Fatalf("incomplete guest-goroutine trace: %#v", events)
+	}
+}
+
+func TestDebugStackReturnsInnermostFirstCallChain(t *testing.T) {
+	vm, buf := newTestVM()
+	if err := vm.Run(`package main
+import (
+	"fmt"
+	"debug"
+)
+func inner() string { return debug.Stack() }
+func outer() string { return inner() }
+func main() {
+	fmt.Println(outer())
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	out := buf.String()
+	innerIdx := strings.Index(out, "inner")
+	outerIdx := strings.Index(out, "outer")
+	mainIdx := strings.Index(out, "main")
+	if innerIdx == -1 || outerIdx == -1 || mainIdx == -1 {
+		t.Fatalf("expected inner/outer/main in stack, got %q", out)
+	}
+	if !(innerIdx < outerIdx && outerIdx < mainIdx) {
+		t.Fatalf("expected inner before outer before main (innermost first), got %q", out)
+	}
+}
+
+func TestDebugStackAtTopLevelHasNoCaller(t *testing.T) {
+	vm, buf := newTestVM()
+	if err := vm.Run(`package main
+import (
+	"fmt"
+	"debug"
+)
+func main() {
+	fmt.Println(debug.Stack())
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "#0 main") {
+		t.Fatalf("expected '#0 main' as the only frame, got %q", out)
+	}
+	if strings.Count(out, "#") != 1 {
+		t.Fatalf("expected exactly one frame at top level, got %q", out)
+	}
+}
+
+func TestDebugStackAcrossGoroutineLinksBackToLaunchSite(t *testing.T) {
+	vm, buf := newTestVM()
+	if err := vm.Run(`package main
+import (
+	"fmt"
+	"debug"
+)
+func worker() string { return debug.Stack() }
+func launch(done chan string) { done <- worker() }
+func main() {
+	done := make(chan string)
+	go launch(done)
+	fmt.Println(<-done)
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	out := buf.String()
+	workerIdx := strings.Index(out, "worker")
+	launchIdx := strings.Index(out, "launch")
+	if workerIdx == -1 || launchIdx == -1 || !(workerIdx < launchIdx) {
+		t.Fatalf("expected worker's stack to chain back through its launching call, got %q", out)
+	}
+}
+
+func TestDebugVarsReflectsLocalScopeAndShadowing(t *testing.T) {
+	vm, buf := newTestVM()
+	if err := vm.Run(`package main
+import (
+	"fmt"
+	"debug"
+)
+func main() {
+	x := 1
+	y := "hello"
+	{
+		x := 99
+		fmt.Println(debug.Vars())
+		_ = x
+	}
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "x = 99") {
+		t.Fatalf("expected shadowed inner x = 99, got %q", out)
+	}
+	if strings.Contains(out, "x = 1") {
+		t.Fatalf("expected outer x to be shadowed, not both visible, got %q", out)
+	}
+	if !strings.Contains(out, `y = "hello"`) {
+		t.Fatalf("expected outer y to still be visible, got %q", out)
+	}
+}
+
+func TestDebugVarsAtGlobalScopeIsEmpty(t *testing.T) {
+	vm, buf := newTestVM()
+	if err := vm.Run(`package main
+import (
+	"fmt"
+	"debug"
+)
+func main() {
+	fmt.Println(debug.Vars())
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(buf.String(), "<no local variables>") {
+		t.Fatalf("expected no local variables at top of main, got %q", buf.String())
+	}
+}
+
+func TestDebugAssertPassesSilently(t *testing.T) {
+	vm, _ := newTestVM()
+	if err := vm.Run(`package main
+import "debug"
+func main() {
+	debug.Assert(1+1 == 2)
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+func TestDebugAssertFailureCarriesMessageAndTrace(t *testing.T) {
+	vm, _ := newTestVM()
+	tracer := NewTracer(16)
+	vm.SetTracer(tracer)
+	err := vm.Run(`package main
+import "debug"
+func main() {
+	debug.Assert(1 == 2, "math is broken", 42)
+}`)
+	if err == nil {
+		t.Fatal("expected an error from a failing assertion")
+	}
+	if !strings.Contains(err.Error(), "math is broken") || !strings.Contains(err.Error(), "42") {
+		t.Fatalf("expected assertion message in error, got %v", err)
+	}
+	var sawFail bool
+	for _, event := range tracer.Events() {
+		if event.Kind == "debug_assert_fail" && strings.Contains(event.Message, "math is broken") {
+			sawFail = true
+		}
+	}
+	if !sawFail {
+		t.Fatalf("expected debug_assert_fail trace event, got %#v", tracer.Events())
+	}
+}
+
+func TestRuntimeErrorCarriesSourceLocation(t *testing.T) {
+	vm, _ := newTestVM()
+	err := vm.Run(`package main
+
+func main() {
+	x := 1
+	undefinedFunc(x)
+}
+`)
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	re, ok := err.(*RuntimeError)
+	if !ok {
+		t.Fatalf("error type = %T, want *RuntimeError", err)
+	}
+	if re.Loc.Line != 5 || re.Loc.Column != 2 {
+		t.Errorf("Loc = %+v, want line 5, column 2", re.Loc)
+	}
+	if got := err.Error(); got != "5:2: undefined: undefinedFunc" {
+		t.Errorf("Error() = %q, want %q", got, "5:2: undefined: undefinedFunc")
+	}
+}
+
+func TestRuntimeErrorLocationPinsInnermostFailure(t *testing.T) {
+	// The failing identifier is nested three expressions deep (call args,
+	// inside a binary expression, inside a call) — the reported position
+	// must stay pinned to the identifier itself, not drift out to any of
+	// the enclosing expressions as the error bubbles up through their own
+	// evalExpr calls (see evalExpr's first-write-wins doc comment).
+	vm, _ := newTestVM()
+	err := vm.Run(`package main
+
+import "fmt"
+
+func main() {
+	fmt.Println(1 + missingVar)
+}
+`)
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	re, ok := err.(*RuntimeError)
+	if !ok {
+		t.Fatalf("error type = %T, want *RuntimeError", err)
+	}
+	if re.Loc.Line != 6 {
+		t.Errorf("Loc.Line = %d, want 6", re.Loc.Line)
+	}
+	// "missingVar" starts after "\tfmt.Println(1 + " — column 18 (the
+	// leading tab counts as one column, like the rest of go/token).
+	if re.Loc.Column != 18 {
+		t.Errorf("Loc.Column = %d, want 18 (pinned to missingVar, not the enclosing call/binary expr)", re.Loc.Column)
+	}
+}
+
+func TestRuntimeErrorWithoutLocationHasNoPrefix(t *testing.T) {
+	// NewRuntimeError, used directly by hosts/builtins outside any active
+	// evalExpr/evalStmt call, must keep working exactly as before: no
+	// location was ever attached, so Error() falls back to the bare message.
+	err := NewRuntimeError("some host-side failure")
+	if got, want := err.Error(), "some host-side failure"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+func TestLineProfileCountsStatementHitsPerLine(t *testing.T) {
+	vm, _ := newTestVM()
+	profile := NewLineProfile()
+	vm.SetLineProfile(profile)
+
+	err := vm.Run(`package main
+
+import "fmt"
+
+func main() {
+	total := 0
+	for i := 0; i < 5; i++ {
+		total += i
+	}
+	fmt.Println(total)
+}
+`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	counts := profile.Counts()
+	// The loop body (line 8) runs once per iteration; the for statement
+	// itself (line 7) evaluates its init/cond/post each iteration too, so
+	// it should show at least as many hits as the body.
+	if counts[8] != 5 {
+		t.Errorf("counts[8] (loop body) = %d, want 5", counts[8])
+	}
+	if counts[6] != 1 {
+		t.Errorf("counts[6] (total := 0) = %d, want 1", counts[6])
+	}
+	if counts[10] != 1 {
+		t.Errorf("counts[10] (fmt.Println) = %d, want 1", counts[10])
+	}
+	if counts[7] < 5 {
+		t.Errorf("counts[7] (for statement) = %d, want >= 5", counts[7])
+	}
+}
+
+func TestLineProfileNilIsSafeNoOp(t *testing.T) {
+	vm, _ := newTestVM()
+	// No SetLineProfile call at all: must behave exactly as before.
+	if err := vm.Run(`package main
+func main() { x := 1; _ = x }`); err != nil {
+		t.Fatalf("Run without a profiler: %v", err)
+	}
+
+	var nilProfile *LineProfile
+	nilProfile.hit(5) // must not panic
+	if got := nilProfile.Counts(); got != nil {
+		t.Errorf("nil profile Counts() = %v, want nil", got)
+	}
+	nilProfile.Reset() // must not panic
+}
+
+func TestLineProfileAccumulatesAcrossMultipleRuns(t *testing.T) {
+	vm, _ := newTestVM()
+	profile := NewLineProfile()
+	vm.SetLineProfile(profile)
+	src := `package main
+func main() {
+	x := 1
+	_ = x
+}`
+	for i := 0; i < 3; i++ {
+		if err := vm.Run(src); err != nil {
+			t.Fatalf("Run #%d: %v", i, err)
+		}
+	}
+	counts := profile.Counts()
+	if counts[3] != 3 {
+		t.Errorf("counts[3] after 3 runs = %d, want 3 (profile should accumulate, like a shared benchmark profile)", counts[3])
+	}
+
+	profile.Reset()
+	if len(profile.Counts()) != 0 {
+		t.Error("Counts() not empty after Reset()")
+	}
+}
+
+// TestLoopBodyClosuresCapturePerIterationVariable guards the
+// blockNeedsOwnScope optimization (evaluator.go's BlockStmt case): a block
+// that only assigns to outer variables reuses its parent's environment
+// instead of allocating its own, but a block that DOES declare a local
+// (here, x := i * 10) must still fork a fresh scope every iteration so each
+// closure captures its own independent binding rather than one shared
+// variable that ends up holding only the loop's final value.
+func TestLoopBodyClosuresCapturePerIterationVariable(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	var funcs []func() int
+	for i := 0; i < 3; i++ {
+		x := i * 10
+		funcs = append(funcs, func() int { return x })
+	}
+	for _, f := range funcs {
+		fmt.Println(f())
+	}
+}
+`)
+	want := "0\n10\n20\n"
+	if out != want {
+		t.Fatalf("closures over per-iteration block locals = %q, want %q", out, want)
 	}
 }

@@ -194,7 +194,7 @@ func TestToolArgumentsAreValidated(t *testing.T) {
 		t.Fatalf("vfs_remove root result = %+v, want protected VFS root", rootRemoval)
 	}
 
-	_, rpcErr := handleToolCall(json.RawMessage(`{"name":"run_code","arguments":[]}`))
+	_, rpcErr := handleToolCall(json.RawMessage(`{"name":"run_code","arguments":[]}`), defaultSession)
 	if rpcErr == nil || rpcErr.Code != -32602 {
 		t.Fatalf("non-object arguments rpc error = %+v, want -32602", rpcErr)
 	}
@@ -202,9 +202,9 @@ func TestToolArgumentsAreValidated(t *testing.T) {
 
 func resetSessionVFS(t *testing.T) {
 	t.Helper()
-	previous := sessionVFS
-	sessionVFS = interp.NewVFS()
-	t.Cleanup(func() { sessionVFS = previous })
+	previous := defaultSession.vfs
+	defaultSession.vfs = interp.NewVFS()
+	t.Cleanup(func() { defaultSession.vfs = previous })
 }
 
 func writeVFSFile(t *testing.T, path, content string) {
@@ -225,7 +225,7 @@ func callTool(t *testing.T, name string, arguments map[string]any) mcpToolResult
 	if err != nil {
 		t.Fatalf("marshal tool params: %v", err)
 	}
-	result, rpcErr := handleToolCall(params)
+	result, rpcErr := handleToolCall(params, defaultSession)
 	if rpcErr != nil {
 		t.Fatalf("tools/call %s rpc error: %+v", name, rpcErr)
 	}

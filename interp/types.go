@@ -9,10 +9,23 @@ import (
 	"sync"
 )
 
-// RuntimeError is a lightweight error type for runtime faults.
-type RuntimeError struct{ msg string }
+// RuntimeError is a lightweight error type for runtime faults. Loc is filled
+// in lazily as the error bubbles up through evalExpr/evalStmt (see
+// attachRuntimeErrorLocation in evaluator.go) with the source position of
+// the innermost expression/statement that produced it — never touched here,
+// so hosts constructing one directly (NewRuntimeError) don't need to know
+// about source positions at all.
+type RuntimeError struct {
+	msg string
+	Loc SourceLocation
+}
 
-func (e *RuntimeError) Error() string  { return e.msg }
+func (e *RuntimeError) Error() string {
+	if e.Loc.Line > 0 {
+		return fmt.Sprintf("%d:%d: %s", e.Loc.Line, e.Loc.Column, e.msg)
+	}
+	return e.msg
+}
 func NewRuntimeError(msg string) error { return &RuntimeError{msg: msg} }
 
 // panicError is used internally to model Go's panic unwinding.

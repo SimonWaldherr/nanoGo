@@ -185,6 +185,7 @@ func main() {
 import (
   "browser"
   "fmt"
+  "math/rand"
   "time"
 )
 
@@ -210,32 +211,49 @@ func lifeStep(g [][]int) [][]int {
   return nxt
 }
 
-func main() {
-  fmt.Println("Game of Life")
-  // Keep this intentionally small: the playground also runs a deterministic
-  // evaluator step limit, so a compact grid leaves room for animation.
-  w, h := 24, 16
-  browser.CanvasSize(w, h)
+func newLifeGrid(w int, h int) [][]int {
   grid := make([][]int, h)
   for y := 0; y < h; y++ {
     row := make([]int, w)
-    for x := 0; x < w; x++ { if (x*y + y) % 7 == 0 { row[x] = 1 } }
+    for x := 0; x < w; x++ {
+      // A moderate density makes the first generations interesting without
+      // immediately filling the whole board.
+      if rand.Intn(100) < 29 { row[x] = 1 }
+    }
     grid[y] = row
   }
-  for i := 0; i < 20; i++ {
-    for y := 0; y < h; y++ {
-      for x := 0; x < w; x++ {
-        browser.CanvasSet(x, y, grid[y][x] == 1)
+  return grid
+}
+
+func main() {
+  fmt.Println("Game of Life — 100 generations per random seed")
+  // This compact field keeps two 100-generation rounds inside the
+  // playground's deterministic evaluator step limit while still animating.
+  w, h := 12, 8
+  browser.CanvasSize(w, h)
+  for round := 1; round <= 2; round++ {
+    // The millisecond clock ensures that the second 100-generation round
+    // starts from a genuinely new random seed.
+    seed := time.Now() + round
+    rand.Seed(seed)
+    fmt.Println("round", round, "seed", seed)
+    grid := newLifeGrid(w, h)
+    for generation := 0; generation < 100; generation++ {
+      for y := 0; y < h; y++ {
+        for x := 0; x < w; x++ {
+          browser.CanvasSet(x, y, grid[y][x] == 1)
+        }
       }
+      browser.CanvasFlush()
+      grid = lifeStep(grid)
+      time.Sleep(20)
     }
-    browser.CanvasFlush()
-    grid = lifeStep(grid)
-    time.Sleep(20)
+    fmt.Println("round", round, "complete")
   }
   fmt.Println("done")
 }
 `,
-  "HTTP + Storage": `package main
+  "HTTP Client + Storage": `package main
 
 import (
   "browser"
@@ -246,9 +264,13 @@ import (
 )
 
 func main() {
-  // Fetch a small text (same-origin or CORS allowed)
-  txt := http.GetText("https://jsonplaceholder.typicode.com/todos/1")
-  fmt.Println("fetched len:", len(txt))
+  // Fetch a small JSON document. Public APIs must explicitly allow CORS.
+  txt, err := http.GetText("https://jsonplaceholder.typicode.com/todos/1")
+  if err != nil {
+    fmt.Println("GET failed:", err)
+    return
+  }
+  fmt.Println("GET status: success, bytes:", len(txt))
 
   // Store in nanoGo's worker-session storage facade.
   storage.SetItem("lastFetchLen", fmt.Sprintf("%d", len(txt)))
@@ -370,7 +392,203 @@ func main() {
   }
   fmt.Println("done")
 }
-`,"HTTP Fetch JSON": `package main
+`,
+  "Plasma Waves": `package main
+
+import (
+  "browser"
+  "fmt"
+  "time"
+)
+
+func main() {
+  fmt.Println("Plasma waves — 48 animated frames")
+  w, h := 48, 24
+  browser.CanvasSize(w, h)
+  for t := 0; t < 48; t++ {
+    for y := 0; y < h; y++ {
+      for x := 0; x < w; x++ {
+        wave := (x*x + y*y + x*y + t*3) % 17
+        browser.CanvasSet(x, y, wave < 8)
+      }
+    }
+    browser.CanvasFlush()
+    time.Sleep(28)
+  }
+  fmt.Println("done")
+}
+`,
+  "Starfield": `package main
+
+import (
+  "browser"
+  "fmt"
+  "time"
+)
+
+func main() {
+  fmt.Println("Starfield — deterministic particle motion")
+  w, h := 48, 24
+  browser.CanvasSize(w, h)
+  for t := 0; t < 56; t++ {
+    for y := 0; y < h; y++ {
+      for x := 0; x < w; x++ { browser.CanvasSet(x, y, 0 == 1) }
+    }
+    for star := 0; star < 90; star++ {
+      x := (star*11 + t*(star%4+1)) % w
+      y := (star*star + t*(star%3+1)) % h
+      browser.CanvasSet(x, y, 1 == 1)
+    }
+    browser.CanvasFlush()
+    time.Sleep(24)
+  }
+  fmt.Println("done")
+}
+`,
+  "Scanner": `package main
+
+import (
+  "browser"
+  "fmt"
+  "time"
+)
+
+func main() {
+  fmt.Println("Scanner — a sweeping line with targets")
+  w, h := 48, 24
+  browser.CanvasSize(w, h)
+  for t := 0; t < 72; t++ {
+    for y := 0; y < h; y++ {
+      for x := 0; x < w; x++ { browser.CanvasSet(x, y, 0 == 1) }
+    }
+    scan := t % w
+    for y := 0; y < h; y++ { browser.CanvasSet(scan, y, 1 == 1) }
+    for target := 0; target < 12; target++ {
+      x := (target*7 + 3) % w
+      y := (target*11 + 5) % h
+      if (t+target*3)%w < 5 { browser.CanvasSet(x, y, 1 == 1) }
+    }
+    browser.CanvasFlush()
+    time.Sleep(22)
+  }
+  fmt.Println("done")
+}
+`,
+  "Mandelbrot Set": `package main
+
+import (
+  "browser"
+  "fmt"
+)
+
+func escapeSteps(cx float64, cy float64) int {
+  zx, zy := 0.0, 0.0
+  for step := 0; step < 48; step++ {
+    xx := zx*zx - zy*zy + cx
+    zy = 2*zx*zy + cy
+    zx = xx
+    if zx*zx+zy*zy > 4 { return step }
+  }
+  return 48
+}
+
+func main() {
+  fmt.Println("Mandelbrot set — 80 × 48 palette samples")
+  w, h := 80, 48
+  browser.CanvasSize(w, h)
+  for y := 0; y < h; y++ {
+    cy := float64(y)*2.4/float64(h) - 1.2
+    for x := 0; x < w; x++ {
+      cx := float64(x)*3.2/float64(w) - 2.2
+      depth := escapeSteps(cx, cy)
+      level := 0
+      if depth < 48 { level = 2 + depth%6 }
+      browser.CanvasSetLevel(x, y, level)
+    }
+  }
+  browser.CanvasFlush()
+  fmt.Println("done")
+}
+`,
+  "Langton's Ant": `package main
+
+import (
+  "browser"
+  "fmt"
+  "time"
+)
+
+func paint(grid [][]int) {
+  for y := 0; y < len(grid); y++ {
+    for x := 0; x < len(grid[y]); x++ {
+      browser.CanvasSet(x, y, grid[y][x] == 1)
+    }
+  }
+  browser.CanvasFlush()
+}
+
+func main() {
+  w, h := 30, 18
+  grid := make([][]int, h)
+  for y := 0; y < h; y++ { grid[y] = make([]int, w) }
+  x, y, dir := w/2, h/2, 0
+  fmt.Println("Langton's ant — 200 rule-driven steps")
+  browser.CanvasSize(w, h)
+  for step := 0; step < 200; step++ {
+    if grid[y][x] == 0 { dir = (dir + 1) % 4; grid[y][x] = 1 } else { dir = (dir + 3) % 4; grid[y][x] = 0 }
+    if dir == 0 { x = (x + 1) % w }
+    if dir == 1 { y = (y + 1) % h }
+    if dir == 2 { x = (x - 1 + w) % w }
+    if dir == 3 { y = (y - 1 + h) % h }
+    if step%3 == 0 {
+      paint(grid)
+      browser.CanvasSet(x, y, true)
+      browser.CanvasFlush()
+      time.Sleep(24)
+    }
+  }
+  fmt.Println("done")
+}
+`,
+  "Sorting Visualizer": `package main
+
+import (
+  "browser"
+  "fmt"
+  "time"
+)
+
+func drawBars(values []int, h int) {
+  for y := 0; y < h; y++ {
+    for x := 0; x < len(values); x++ {
+      browser.CanvasSet(x, h-1-y, values[x] > y)
+    }
+  }
+  browser.CanvasFlush()
+}
+
+func main() {
+  values := []int{5, 14, 2, 11, 8, 17, 4, 13, 1, 16, 7, 12, 3, 15, 6, 10, 9, 18}
+  h := 18
+  browser.CanvasSize(len(values), h)
+  fmt.Println("Bubble sort — one visual frame per pass")
+  for end := len(values)-1; end > 0; end-- {
+    swapped := false
+    for i := 0; i < end; i++ {
+      if values[i] > values[i+1] {
+        values[i], values[i+1] = values[i+1], values[i]
+        swapped = true
+      }
+    }
+    drawBars(values, h)
+    time.Sleep(55)
+    if !swapped { break }
+  }
+  drawBars(values, h)
+  fmt.Println("sorted:", values)
+}
+`,
+  "HTTP Client GET": `package main
 
 import (
   "fmt"
@@ -379,15 +597,79 @@ import (
 )
 
 func main() {
-  fmt.Println("Fetching a JSON document (first 120 chars):")
-  txt := http.GetText("https://jsonplaceholder.typicode.com/todos/1")
-  if len(txt) == 0 {
-    fmt.Println("fetch failed or CORS blocked")
+  fmt.Println("GET /todos/1 — first 120 characters:")
+  txt, err := http.GetText("https://jsonplaceholder.typicode.com/todos/1")
+  if err != nil {
+    fmt.Println("GET failed (network/CORS):", err)
     return
   }
   sn := strings.TrimSpace(txt)
   if len(sn) > 120 { sn = sn[:120] + "..." }
   fmt.Println(sn)
+}
+`,
+  "HTTP Client POST": `package main
+
+import (
+  json "encoding/json"
+  "fmt"
+  "http"
+  "strings"
+)
+
+func main() {
+  // PostText sends text with application/json by default.
+  payload := map[string]any{"title":"nanoGo from WASM", "completed":false}
+  bodyBytes, _ := json.Marshal(payload)
+  body := string(bodyBytes)
+  reply, err := http.PostText("https://jsonplaceholder.typicode.com/todos", body)
+  if err != nil {
+    fmt.Println("POST failed (network/CORS):", err)
+    return
+  }
+  reply = strings.TrimSpace(reply)
+  if len(reply) > 120 { reply = reply[:120] + "..." }
+  fmt.Println("POST accepted; response:")
+  fmt.Println(reply)
+}
+`,
+  "HTTP Client Errors": `package main
+
+import (
+  "fmt"
+  "http"
+)
+
+func main() {
+  // Two-value assignment lets code handle non-2xx responses explicitly.
+  body, err := http.GetText("https://jsonplaceholder.typicode.com/nanogo-missing-route")
+  if err != nil {
+    fmt.Println("expected HTTP error:", err)
+    return
+  }
+  fmt.Println("unexpected success:", body)
+}
+`,
+  "HTTP Server Router (simulated)": `package main
+
+import "fmt"
+
+// A GitHub Pages app cannot listen on a network port. This pure handler shows
+// the same routing and response decisions a tiny HTTP server would make.
+func handleRequest(method string, path string, body string) string {
+  if method == "GET" && path == "/health" {
+    return "200 OK {status:healthy}"
+  }
+  if method == "POST" && path == "/echo" {
+    return "201 Created echo=" + body
+  }
+  return "404 Not Found"
+}
+
+func main() {
+  fmt.Println("GET /health  ->", handleRequest("GET", "/health", ""))
+  fmt.Println("POST /echo   ->", handleRequest("POST", "/echo", "hello wasm"))
+  fmt.Println("DELETE /todo ->", handleRequest("DELETE", "/todo", ""))
 }
 `,"Pipeline": `package main
 
@@ -575,7 +857,7 @@ func main() {
   if errMsg != "" {
     fmt.Println("Error:", errMsg)
   } else {
-    fmt.Printf("10 / 3 = %.4f\n", result)
+    fmt.Printf("10 / 3 = %.4f\\n", result)
   }
 
   _, errMsg = safeDivide(5, 0)
@@ -605,22 +887,22 @@ import (
 
 func main() {
   fmt.Println("Constants:")
-  fmt.Printf("  Pi = %.6f\n", math.Pi)
-  fmt.Printf("  E  = %.6f\n", math.E)
+  fmt.Printf("  Pi = %.6f\\n", math.Pi)
+  fmt.Printf("  E  = %.6f\\n", math.E)
 
   fmt.Println("Functions:")
-  fmt.Printf("  Sqrt(2)       = %.6f\n", math.Sqrt(2))
-  fmt.Printf("  Pow(2, 10)    = %.0f\n",  math.Pow(2, 10))
-  fmt.Printf("  Abs(-5.5)     = %.1f\n",  math.Abs(-5.5))
-  fmt.Printf("  Floor(3.7)    = %.1f\n",  math.Floor(3.7))
-  fmt.Printf("  Ceil(3.2)     = %.1f\n",  math.Ceil(3.2))
-  fmt.Printf("  Round(3.5)    = %.1f\n",  math.Round(3.5))
-  fmt.Printf("  Log(E)        = %.6f\n",  math.Log(math.E))
-  fmt.Printf("  Log2(1024)    = %.1f\n",  math.Log2(1024))
-  fmt.Printf("  Sin(Pi/2)     = %.6f\n",  math.Sin(math.Pi/2))
-  fmt.Printf("  Cos(Pi)       = %.6f\n",  math.Cos(math.Pi))
-  fmt.Printf("  Max(3.0, 7.0) = %.1f\n",  math.Max(3, 7))
-  fmt.Printf("  Min(3.0, 7.0) = %.1f\n",  math.Min(3, 7))
+  fmt.Printf("  Sqrt(2)       = %.6f\\n", math.Sqrt(2))
+  fmt.Printf("  Pow(2, 10)    = %.0f\\n",  math.Pow(2, 10))
+  fmt.Printf("  Abs(-5.5)     = %.1f\\n",  math.Abs(-5.5))
+  fmt.Printf("  Floor(3.7)    = %.1f\\n",  math.Floor(3.7))
+  fmt.Printf("  Ceil(3.2)     = %.1f\\n",  math.Ceil(3.2))
+  fmt.Printf("  Round(3.5)    = %.1f\\n",  math.Round(3.5))
+  fmt.Printf("  Log(E)        = %.6f\\n",  math.Log(math.E))
+  fmt.Printf("  Log2(1024)    = %.1f\\n",  math.Log2(1024))
+  fmt.Printf("  Sin(Pi/2)     = %.6f\\n",  math.Sin(math.Pi/2))
+  fmt.Printf("  Cos(Pi)       = %.6f\\n",  math.Cos(math.Pi))
+  fmt.Printf("  Max(3.0, 7.0) = %.1f\\n",  math.Max(3, 7))
+  fmt.Printf("  Min(3.0, 7.0) = %.1f\\n",  math.Min(3, 7))
 }
 `,"Strconv": `package main
 

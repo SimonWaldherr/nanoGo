@@ -58,10 +58,15 @@ type PackageScope struct {
 // BindHostContext are visible to every package without a separate import
 // step; user-package imports are added explicitly via Import.
 func (vm *Interpreter) NewPackageScope(name string) *PackageScope {
+	env := NewEnv(vm.globals)
+	// PackageScope.Replace is expressly supported while a loaded package is
+	// running. Mark only this host-mutable boundary as shared; function and
+	// block scopes underneath keep Environment's lock-free evaluator path.
+	env.shared = true
 	return &PackageScope{
 		Name:          name,
 		vm:            vm,
-		env:           NewEnv(vm.globals),
+		env:           env,
 		declared:      map[string]bool{},
 		declaredTypes: map[string]bool{},
 	}
@@ -240,7 +245,7 @@ func (ps *PackageScope) Exports() *Package {
 		if !isExportedName(name) {
 			continue
 		}
-		v, ok := ps.env.Vars[name]
+		v, ok := ps.vm.getLocal(name, ps.env)
 		if !ok {
 			continue
 		}
@@ -272,8 +277,7 @@ func (ps *PackageScope) Import(alias string, pkg *Package) {
 // (a function or a package-level var/const) — for finding an entry point or
 // a hot-swap target.
 func (ps *PackageScope) Lookup(name string) (any, bool) {
-	v, ok := ps.env.Vars[name]
-	return v, ok
+	return ps.vm.getLocal(name, ps.env)
 }
 
 // Replace overwrites a top-level function in ps with fn, taking effect for

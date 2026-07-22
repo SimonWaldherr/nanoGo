@@ -6,6 +6,9 @@ import (
 	"go/ast"
 	"go/format"
 	"go/token"
+	runtimeTrace "runtime/trace"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -120,12 +123,40 @@ func (vm *Interpreter) Tracer() *Tracer {
 	return vm.tracer.Load()
 }
 
+// SetRuntimeTraceAnnotations controls whether nanoGo's high-level events are
+// also written as user annotations into the host Go runtime trace. It is off
+// by default, so ordinary interpreter runs retain their fast tracing-free
+// path. When enabled, a host must independently activate runtime/trace (or
+// its FlightRecorder); the browser inspector continues to use Tracer.
+//
+// This mirrors semantic guest events such as calls, guest goroutines, debug
+// marks, and denied capabilities. Go runtime scheduler, GC, and host
+// goroutine events are already collected by runtime/trace itself.
+func (vm *Interpreter) SetRuntimeTraceAnnotations(enabled bool) {
+	vm.runtimeTraceAnnotations.Store(enabled)
+}
+
+func (vm *Interpreter) emitRuntimeTraceAnnotation(kind, function, message string) {
+	if !vm.runtimeTraceAnnotations.Load() || !runtimeTrace.IsEnabled() {
+		return
+	}
+	if function != "" {
+		if message != "" {
+			message = function + ": " + message
+		} else {
+			message = function
+		}
+	}
+	runtimeTrace.Log(vm.Context(), "nanogo."+kind, message)
+}
+
 // emitAssertionTrace records a testing.T.Errorf/Fatalf call. Unlike
 // emitTrace, it has no AST node to resolve a Location from — Errorf/Fatalf
 // are plain natives, not specially intercepted in evalExpr the way
 // debug.Q/debug.Mark are — so Location stays zero-value, matching every
 // other native call's call_start/call_end trace events today.
 func (vm *Interpreter) emitAssertionTrace(function string, assertion AssertionEvent) {
+	vm.emitRuntimeTraceAnnotation("test_assertion", function, assertion.Format)
 	tracer := vm.tracer.Load()
 	if tracer == nil {
 		return
@@ -138,6 +169,7 @@ func (vm *Interpreter) emitAssertionTrace(function string, assertion AssertionEv
 }
 
 func (vm *Interpreter) emitTrace(kind, function, message string, node ast.Node) {
+	vm.emitRuntimeTraceAnnotation(kind, function, message)
 	tracer := vm.tracer.Load()
 	if tracer == nil {
 		return
@@ -156,6 +188,21 @@ func (vm *Interpreter) traceLocation(pos token.Pos) SourceLocation {
 	}
 	p := exec.fset.Position(pos)
 	return SourceLocation{File: p.Filename, Line: p.Line, Column: p.Column}
+}
+
+// attachRuntimeErrorLocation tags err with loc the first time it passes
+// through a location-aware boundary (evalExpr/evalStmt): a no-op if err
+// isn't a *RuntimeError, if loc itself couldn't be resolved (Line == 0 —
+// e.g. no active execution, as in package-level var-initializer evaluation
+// during a loader build), or if err was already tagged deeper in the call
+// stack. See evalExpr's doc comment for why first-write-wins matters here.
+func attachRuntimeErrorLocation(err error, loc SourceLocation) {
+	if loc.Line == 0 {
+		return
+	}
+	if re, ok := err.(*RuntimeError); ok && re.Loc.Line == 0 {
+		re.Loc = loc
+	}
 }
 
 func debugExpression(expr ast.Expr) string {
@@ -201,6 +248,61 @@ func (vm *Interpreter) traceDebugMark(call *ast.CallExpr, env *Env) (any, error)
 	}
 	vm.emitTrace("debug_mark", "debug.Mark", ToString(value), call)
 	return nil, nil
+}
+
+// traceDebugStack backs debug.Stack(), returning the current guest call
+// stack (innermost call first) as a newline-joined string. Like Q and Mark
+// it is intercepted directly in evalExpr rather than registered as a plain
+// native, because it needs env.frame — a native's args-only signature has
+// no way to see the caller's frame.
+func (vm *Interpreter) traceDebugStack(call *ast.CallExpr, env *Env) (any, error) {
+	if len(call.Args) != 0 {
+		return nil, NewRuntimeError("debug.Stack: expected no arguments")
+	}
+	s := callStackString(env.frame)
+	vm.emitTrace("debug_stack", "debug.Stack", s, call)
+	return s, nil
+}
+
+func callStackString(frame *callFrame) string {
+	if frame == nil {
+		return "<no active call>"
+	}
+	var buf strings.Builder
+	for depth, f := 0, frame; f != nil; depth, f = depth+1, f.caller {
+		fmt.Fprintf(&buf, "#%d %s\n", depth, f.funcName)
+	}
+	return strings.TrimRight(buf.String(), "\n")
+}
+
+// traceDebugVars backs debug.Vars(), returning a snapshot of every local
+// binding visible at the call site (innermost scope wins on shadowing),
+// formatted as sorted "name = value" lines. Also intercepted directly in
+// evalExpr for the same reason as Stack: it needs env, not just args.
+func (vm *Interpreter) traceDebugVars(call *ast.CallExpr, env *Env) (any, error) {
+	if len(call.Args) != 0 {
+		return nil, NewRuntimeError("debug.Vars: expected no arguments")
+	}
+	s := vm.envVarsString(env)
+	vm.emitTrace("debug_vars", "debug.Vars", s, call)
+	return s, nil
+}
+
+func (vm *Interpreter) envVarsString(env *Env) string {
+	vars := vm.collectLocalVars(env)
+	if len(vars) == 0 {
+		return "<no local variables>"
+	}
+	names := make([]string, 0, len(vars))
+	for name := range vars {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var buf strings.Builder
+	for _, name := range names {
+		fmt.Fprintf(&buf, "%s = %s\n", name, debugValue(vars[name]))
+	}
+	return strings.TrimRight(buf.String(), "\n")
 }
 
 func joinDebugParts(parts []string) string {

@@ -2,10 +2,31 @@ package interp
 
 import (
 	"context"
+	"go/ast"
 	"go/token"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
+
+// buildLitCache parses every integer literal in file once up front. Called
+// single-threaded, before any guest goroutine can run, so the resulting map
+// is safe to read from multiple goroutines without synchronization for the
+// rest of the execution.
+func buildLitCache(file *ast.File) map[*ast.BasicLit]int {
+	cache := make(map[*ast.BasicLit]int)
+	ast.Inspect(file, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.INT {
+			return true
+		}
+		if v, err := strconv.ParseInt(lit.Value, 0, strconv.IntSize); err == nil {
+			cache[lit] = int(v)
+		}
+		return true
+	})
+	return cache
+}
 
 // execution contains state that belongs to exactly one RunContext call.
 // It is shared by guest goroutines, but never by two host executions.
@@ -15,10 +36,20 @@ type execution struct {
 	limits ExecutionLimits
 	fset   *token.FileSet
 
+	// litCache holds pre-parsed values for every *ast.BasicLit in the run's
+	// source, built once (single-threaded, before main() runs) so tryEvalIntExpr
+	// never re-runs strconv.ParseInt for the same literal on every visit — a
+	// hot path for anything with a loop or recursion. Read-only for the rest
+	// of the execution's life, including from guest goroutines, so it needs
+	// no lock.
+	litCache map[*ast.BasicLit]int
+
 	killed     atomic.Bool
+	cancelled  atomic.Bool // mirrors ctx.Done() without a channel op on the hot path — see beginExecution
 	limitCause atomic.Uint32
 	steps      atomic.Uint64
 	goroutines atomic.Int64
+	concurrent atomic.Bool
 	wg         sync.WaitGroup
 }
 
@@ -28,6 +59,15 @@ const (
 	limitGoroutines
 )
 
+// err reports why execution should stop, or nil to continue. It runs on
+// every single evaluator checkpoint (evalExpr and evalStmt both call it via
+// executionError/checkpoint), so cancellation is read from the plain atomic
+// bool a background goroutine already maintains (see beginExecution) rather
+// than via `select { case <-e.ctx.Done(): ... default: }` here: a select
+// still has to synchronize on the channel's internal lock even when it
+// hits the default case, and profiling showed that cost was significant
+// when paid on every node of a running program instead of exactly once per
+// cancellation.
 func (e *execution) err() error {
 	switch e.limitCause.Load() {
 	case limitSteps:
@@ -35,15 +75,17 @@ func (e *execution) err() error {
 	case limitGoroutines:
 		return ErrGoroutineLimit
 	}
-	select {
-	case <-e.ctx.Done():
-		if e.killed.Load() {
-			return ErrKilled
-		}
-		return e.ctx.Err()
-	default:
-		return nil
+	// Kill sets this flag before cancelling the context. Check it directly
+	// rather than waiting for the cancellation-watcher goroutine to run, so
+	// an evaluator or channel operation that observes the cancelled context
+	// immediately still reports ErrKilled (not context.Canceled).
+	if e.killed.Load() {
+		return ErrKilled
 	}
+	if e.cancelled.Load() {
+		return e.ctx.Err()
+	}
+	return nil
 }
 
 func (e *execution) checkpoint() error {
@@ -65,9 +107,11 @@ func (e *execution) reserveGoroutine() error {
 		return err
 	}
 	if e.limits.MaxGoroutines <= 0 {
+		e.concurrent.Store(true)
 		return nil
 	}
 	if e.goroutines.Add(1) <= int64(e.limits.MaxGoroutines) {
+		e.concurrent.Store(true)
 		return nil
 	}
 	e.goroutines.Add(-1)
@@ -102,13 +146,26 @@ func (vm *Interpreter) beginExecution(parent context.Context) (*execution, error
 	}
 	ctx, cancel := context.WithCancel(parent)
 	e := &execution{ctx: ctx, cancel: cancel, limits: vm.Limits}
+	// The one place this execution's ctx.Done() channel is actually waited
+	// on: cheaply (a parked goroutine, not a busy poll) and exactly once,
+	// flipping e.cancelled for err()'s hot-path atomic read. This goroutine
+	// always exits promptly — RunContext/WithExecution's defer calls
+	// e.cancel() unconditionally, including on ordinary successful
+	// completion, which closes Done() and unblocks it — so it never leaks
+	// or outlives the execution it belongs to.
+	go func() {
+		<-ctx.Done()
+		e.cancelled.Store(true)
+	}()
 	vm.execution.Store(e)
+	vm.activeExecution = e
 	return e, nil
 }
 
 func (vm *Interpreter) endExecution(e *execution) {
 	vm.lastSteps.Store(e.steps.Load())
 	vm.execution.CompareAndSwap(e, nil)
+	vm.activeExecution = nil
 	vm.runMu.Unlock()
 }
 
@@ -123,7 +180,7 @@ func (vm *Interpreter) Context() context.Context {
 }
 
 func (vm *Interpreter) executionError() error {
-	e := vm.execution.Load()
+	e := vm.activeExecution
 	if e == nil {
 		return nil
 	}

@@ -1,4 +1,4 @@
-.PHONY: all build-wasm build-wasm-compressed build-cli build-mcp build-repl run-demo clean test tidy size-report benchmark
+.PHONY: all build-wasm build-wasm-compressed build-cli build-mcp build-repl run-demo clean test test-race vet fuzz benchmark benchmark-go profile-cpu profile-mem trace tidy size-report
 
 MODULE := simonwaldherr.de/go/nanogo
 
@@ -55,10 +55,48 @@ run-demo: build-cli
 test:
 	go test ./interp ./interp/loader ./interp/index ./cmd/mcp ./cmd/repl
 
+# Race detection only finds concurrent paths that execute. Keep it as a
+# first-class target for the interpreter, loader and public hosts.
+test-race:
+	go test -race ./interp ./interp/loader ./interp/index ./cmd/mcp ./cmd/repl
+
+vet:
+	# cmd/wasm and runtime are js/wasm-only; vet the native packages here and
+	# validate the browser side separately through build-wasm.
+	go vet ./interp ./interp/loader ./interp/index ./cmd/cli ./cmd/mcp ./cmd/repl
+
+# A short, reproducible coverage-guided fuzz pass. Run longer fuzz campaigns
+# in CI or locally with: go test ./interp -run '^$$' -fuzz=FuzzInterpreterNeverPanics -fuzztime=10m
+fuzz:
+	go test ./interp -run '^$$' -fuzz=FuzzInterpreterNeverPanics -fuzztime=15s -parallel=1
+
 # ---------- Benchmarks (informational; no -cpuprofile by default) ----------
 benchmark: build-cli
 	@echo "--- running samples/features_demo.go (timing) ---"
 	@time $(CLI_OUT) samples/features_demo.go >/dev/null
+
+# Host implementation benchmarks: time, allocation volume, and allocation
+# count. Guest-level deterministic work is reported separately as steps/op.
+benchmark-go:
+	go test ./interp -run '^$$' -bench=. -benchmem
+
+# Capture profiles only on demand; binary artifacts stay in build/ and are
+# ignored. Open with: go tool pprof build/nanogo-cpu.pprof
+profile-cpu:
+	@mkdir -p $(BUILD_DIR)
+	go test ./interp -run '^$$' -bench='Benchmark(FibRecursive|EvalExprArithmetic)' -cpuprofile $(BUILD_DIR)/nanogo-cpu.pprof
+
+# Allocation profile for the same evaluator-heavy workload. Open with:
+# go tool pprof -alloc_space build/nanogo-mem.pprof
+profile-mem:
+	@mkdir -p $(BUILD_DIR)
+	go test ./interp -run '^$$' -bench='Benchmark(FibRecursive|EvalExprArithmetic)' -memprofile $(BUILD_DIR)/nanogo-mem.pprof
+
+# Produces a native Go execution trace carrying opt-in nanoGo annotations.
+# View with `go tool trace build/nanogo.trace` or `gotraceui build/nanogo.trace`.
+trace:
+	@mkdir -p $(BUILD_DIR)
+	go test ./interp -run '^TestRuntimeTraceAnnotationsAreOptIn$$' -trace $(BUILD_DIR)/nanogo.trace
 
 # ---------- Size report for the WASM artifact ----------
 # Prints uncompressed/gzip/brotli sizes so PRs can quote the delta.
@@ -89,4 +127,4 @@ clean:
 
 tidy:
 	go mod tidy
-	go vet ./...
+	$(MAKE) --no-print-directory vet
