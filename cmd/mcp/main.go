@@ -4,16 +4,9 @@
 // responses to stdout, following the MCP stdio transport specification.
 // Log/debug output goes to stderr so it never pollutes the protocol stream.
 //
-// Exposed MCP tools:
-//
-//	run_code   – execute Go source in the nanoGo interpreter; returns stdout
-//	fmt_code   – gofmt-format Go source
-//	vet_code   – static-analysis checks on Go source
-//	vfs_read   – read a file from the session virtual filesystem
-//	vfs_write  – write a file to the session virtual filesystem
-//	vfs_list   – list directory contents in the virtual filesystem
-//	vfs_mkdir  – create a directory in the virtual filesystem
-//	vfs_remove – remove a file or directory from the virtual filesystem
+// Exposed MCP tools include safe single-file and multi-file execution,
+// package tests, static source/module analysis, and a session virtual
+// filesystem. See the nanogo://guide resource for a suggested workflow.
 //
 // The server maintains a single VFS per process lifetime; code executed with
 // run_code can read/write files that were created with the vfs_* tools.
@@ -26,13 +19,31 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
 
 	"simonwaldherr.de/go/nanogo/interp"
+	"simonwaldherr.de/go/nanogo/interp/index"
+	"simonwaldherr.de/go/nanogo/interp/loader"
 )
+
+const (
+	serverName    = "nanoGo"
+	serverVersion = "0.2.0"
+
+	latestProtocolVersion = "2025-11-25"
+)
+
+var supportedProtocolVersions = map[string]bool{
+	"2024-11-05": true,
+	"2025-03-26": true,
+	"2025-06-18": true,
+	"2025-11-25": true,
+}
 
 // ── JSON-RPC 2.0 types ──────────────────────────────────────────────────────
 
@@ -45,7 +56,7 @@ type jsonRPCRequest struct {
 
 type jsonRPCResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
+	ID      json.RawMessage `json:"id"`
 	Result  any             `json:"result,omitempty"`
 	Error   *jsonRPCError   `json:"error,omitempty"`
 }
@@ -53,6 +64,7 @@ type jsonRPCResponse struct {
 type jsonRPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
 }
 
 // ── MCP protocol types ───────────────────────────────────────────────────────
@@ -86,6 +98,19 @@ type mcpTool struct {
 	InputSchema any    `json:"inputSchema"`
 }
 
+type mcpResource struct {
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+}
+
+type mcpResourceContent struct {
+	URI      string `json:"uri"`
+	MimeType string `json:"mimeType,omitempty"`
+	Text     string `json:"text"`
+}
+
 // ── server state ─────────────────────────────────────────────────────────────
 
 var sessionVFS = interp.NewVFS()
@@ -115,7 +140,6 @@ func main() {
 		var req jsonRPCRequest
 		if err := json.Unmarshal(line, &req); err != nil {
 			logf("parse error: %v", err)
-			// Send a parse-error response; we have no id so use null.
 			_ = encoder.Encode(jsonRPCResponse{
 				JSONRPC: "2.0",
 				Error:   &jsonRPCError{Code: -32700, Message: "Parse error"},
@@ -123,8 +147,17 @@ func main() {
 			continue
 		}
 
-		// Notifications (no id) are fire-and-forget; we only acknowledge them in logs.
-		isNotification := req.ID == nil || string(req.ID) == "null"
+		if req.JSONRPC != "2.0" || strings.TrimSpace(req.Method) == "" || !validRequestID(req.ID) {
+			logf("invalid request")
+			_ = encoder.Encode(jsonRPCResponse{
+				JSONRPC: "2.0",
+				Error:   &jsonRPCError{Code: -32600, Message: "Invalid Request"},
+			})
+			continue
+		}
+
+		// Notifications (requests without an ID) are fire-and-forget.
+		isNotification := req.ID == nil
 
 		result, rpcErr := handleMethod(req.Method, req.Params)
 
@@ -161,6 +194,10 @@ func handleMethod(method string, rawParams json.RawMessage) (any, *jsonRPCError)
 		return handleToolsList()
 	case "tools/call":
 		return handleToolCall(rawParams)
+	case "resources/list":
+		return handleResourcesList()
+	case "resources/read":
+		return handleResourcesRead(rawParams)
 	case "ping":
 		return map[string]any{}, nil
 	default:
@@ -168,19 +205,106 @@ func handleMethod(method string, rawParams json.RawMessage) (any, *jsonRPCError)
 	}
 }
 
+// validRequestID accepts the MCP/JSON-RPC request-ID types. A nil ID denotes a
+// notification; a literal JSON null is not a valid MCP request ID.
+func validRequestID(raw json.RawMessage) bool {
+	if raw == nil {
+		return true
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+	switch value.(type) {
+	case string, float64:
+		return true
+	default:
+		return false
+	}
+}
+
 // ── initialize ────────────────────────────────────────────────────────────────
 
-func handleInitialize(_ json.RawMessage) (any, *jsonRPCError) {
+func handleInitialize(rawParams json.RawMessage) (any, *jsonRPCError) {
+	var params mcpInitializeParams
+	if err := json.Unmarshal(rawParams, &params); err != nil {
+		return nil, &jsonRPCError{Code: -32602, Message: "Invalid initialize params: " + err.Error()}
+	}
+	if params.ProtocolVersion == "" {
+		return nil, &jsonRPCError{Code: -32602, Message: "Invalid initialize params: protocolVersion is required"}
+	}
+	protocolVersion := params.ProtocolVersion
+	if !supportedProtocolVersions[protocolVersion] {
+		protocolVersion = latestProtocolVersion
+	}
 	return map[string]any{
-		"protocolVersion": "2024-11-05",
+		"protocolVersion": protocolVersion,
 		"capabilities": map[string]any{
-			"tools": map[string]any{},
+			"tools":     map[string]any{},
+			"resources": map[string]any{},
 		},
 		"serverInfo": map[string]any{
-			"name":    "nanoGo",
-			"version": "0.1.0",
+			"name":    serverName,
+			"version": serverVersion,
 		},
+		"instructions": "nanoGo provides a sandboxed Go workspace. Read nanogo://guide before working with a multi-file project; use static analysis and tests before execution.",
 	}, nil
+}
+
+// ── resources ───────────────────────────────────────────────────────────────
+
+const guideURI = "nanogo://guide"
+
+const guideText = `# nanoGo MCP workspace
+
+nanoGo lets an MCP client create, analyse, test, and run small Go programs in
+an in-memory virtual filesystem (VFS). It is intended for quick experiments,
+teaching, code review, regression reproduction, and agent-assisted iteration
+without giving guest Go code access to the host filesystem or network.
+
+## Recommended workflow
+
+1. Use vfs_write with create_parents=true to create go.mod and source files.
+2. Use vfs_tree or index_module to understand the workspace.
+3. Use inspect_code, call_graph, fmt_code, and vet_code for non-executing
+   feedback.
+4. Use test_module for supported TestXxx(t *testing.T) tests.
+5. Use run_module for a multi-file module, or run_code for a single snippet.
+
+The VFS belongs to this server process only; it is not the host disk and is
+discarded when the process exits. Guest code may read and write that VFS, but
+network access remains denied. Execution has a caller-configurable timeout of
+1–60 seconds (10 seconds by default), plus nanoGo's resource limits.
+
+Static analysis is intentionally syntactic and best-effort: it does not
+replace the Go compiler or type checker. test_module implements nanoGo's
+supported subset of Go's testing package.
+`
+
+func handleResourcesList() (any, *jsonRPCError) {
+	return map[string]any{"resources": []mcpResource{{
+		URI:         guideURI,
+		Name:        "nanoGo MCP guide",
+		Description: "Purpose, safety model, supported workflows, and tool ordering for the nanoGo MCP server.",
+		MimeType:    "text/markdown",
+	}}}, nil
+}
+
+func handleResourcesRead(rawParams json.RawMessage) (any, *jsonRPCError) {
+	var params struct {
+		URI string `json:"uri"`
+	}
+	if err := json.Unmarshal(rawParams, &params); err != nil {
+		return nil, &jsonRPCError{Code: -32602, Message: "Invalid resource parameters: " + err.Error()}
+	}
+	if params.URI != guideURI {
+		return nil, &jsonRPCError{Code: -32602, Message: "Unknown resource: " + params.URI}
+	}
+	return map[string]any{"contents": []mcpResourceContent{{
+		URI:      guideURI,
+		MimeType: "text/markdown",
+		Text:     guideText,
+	}}}, nil
 }
 
 // ── tools/list ────────────────────────────────────────────────────────────────
@@ -189,10 +313,10 @@ func handleToolsList() (any, *jsonRPCError) {
 	tools := []mcpTool{
 		{
 			Name:        "run_code",
-			Description: "Execute Go source code in the nanoGo interpreter. The code must be a complete package main with a main() function. Output written via fmt.Println or the browser/os packages is captured and returned.",
+			Description: "Execute one self-contained Go source file in nanoGo's sandbox. The source must declare package main and main(). Captures program output; use run_module for a VFS-backed multi-file project.",
 			InputSchema: schema(map[string]any{
 				"code":    prop("string", "Complete Go source code to execute (must include package main)"),
-				"timeout": prop("integer", "Execution timeout in seconds (default 10, max 60)"),
+				"timeout": prop("integer", "Execution timeout in seconds (default 10, range 1-60)"),
 			}, "code"),
 		},
 		{
@@ -204,10 +328,52 @@ func handleToolsList() (any, *jsonRPCError) {
 		},
 		{
 			Name:        "vet_code",
-			Description: "Run basic static analysis (go vet subset) on Go source code. Returns a list of issues or 'ok' if none found.",
+			Description: "Run nanoGo's fast static checks for unreachable code, printf argument mismatches, and self-assignments. It does not execute the source and is not a replacement for go vet.",
 			InputSchema: schema(map[string]any{
 				"code": prop("string", "Go source code to analyse"),
 			}, "code"),
+		},
+		{
+			Name:        "inspect_code",
+			Description: "Parse Go source without executing it and return imports, declared functions, AST size/depth, and parse time. Request the tree only when source-level structure is needed, because it can be large.",
+			InputSchema: schema(map[string]any{
+				"code":         prop("string", "Go source code to inspect"),
+				"include_tree": prop("boolean", "Include the complete syntax tree (default false)"),
+			}, "code"),
+		},
+		{
+			Name:        "call_graph",
+			Description: "Build a best-effort static call graph for one Go source file without executing it. Local calls are resolved where unambiguous; package and interface calls remain visible but unresolved.",
+			InputSchema: schema(map[string]any{
+				"code":          prop("string", "Go source code to analyse"),
+				"max_functions": prop("integer", "Maximum function records to return (default 100, range 1-1000)"),
+			}, "code"),
+		},
+		{
+			Name:        "run_module",
+			Description: "Build and run a multi-file nanoGo module already stored in the session VFS. The root directory must contain go.mod; local module imports are resolved inside the VFS. Captures program output.",
+			InputSchema: schema(map[string]any{
+				"root":    prop("string", "Module-root directory in the VFS; must contain go.mod"),
+				"entry":   prop("string", "Entry function in the root package (default main)"),
+				"timeout": prop("integer", "Execution timeout in seconds (default 10, range 1-60)"),
+			}, "root"),
+		},
+		{
+			Name:        "test_module",
+			Description: "Run supported TestXxx(t *testing.T) tests for a package in a VFS-backed module. Results are named and categorized; failed assertions are returned as a tool error so an agent can fix them.",
+			InputSchema: schema(map[string]any{
+				"root":    prop("string", "Module-root directory in the VFS; must contain go.mod"),
+				"package": prop("string", "Go package name to test (default: root package)"),
+				"timeout": prop("integer", "Total timeout in seconds (default 10, range 1-60)"),
+			}, "root"),
+		},
+		{
+			Name:        "index_module",
+			Description: "Statically index every Go package below a VFS directory. Returns compact function metadata, callers/callees, tests, and complexity metrics without returning source bodies or executing code.",
+			InputSchema: schema(map[string]any{
+				"root":          prop("string", "Directory in the VFS to index"),
+				"max_functions": prop("integer", "Maximum function records to return (default 200, range 1-1000)"),
+			}, "root"),
 		},
 		{
 			Name:        "vfs_read",
@@ -218,10 +384,11 @@ func handleToolsList() (any, *jsonRPCError) {
 		},
 		{
 			Name:        "vfs_write",
-			Description: "Write (create or overwrite) a file in the session virtual filesystem.",
+			Description: "Write (create or overwrite) a text file in the session virtual filesystem. Set create_parents=true to create missing parent directories in the same call.",
 			InputSchema: schema(map[string]any{
-				"path":    prop("string", "Absolute or relative path of the file to write"),
-				"content": prop("string", "Content to write"),
+				"path":           prop("string", "Absolute or relative path of the file to write"),
+				"content":        prop("string", "Content to write"),
+				"create_parents": prop("boolean", "Create any missing parent directories (default false)"),
 			}, "path", "content"),
 		},
 		{
@@ -236,6 +403,29 @@ func handleToolsList() (any, *jsonRPCError) {
 			Description: "Create a directory (and all parents) in the session virtual filesystem.",
 			InputSchema: schema(map[string]any{
 				"path": prop("string", "Directory path to create"),
+			}, "path"),
+		},
+		{
+			Name:        "vfs_tree",
+			Description: "Return a bounded recursive, metadata-rich directory tree for the session VFS. Prefer it over repeated vfs_list calls when orienting in a project.",
+			InputSchema: schema(map[string]any{
+				"path":        prop("string", "Directory path to inspect (default current directory)"),
+				"max_depth":   prop("integer", "Maximum traversal depth (default 4, range 0-20)"),
+				"max_entries": prop("integer", "Maximum entries to return (default 200, range 1-1000)"),
+			}),
+		},
+		{
+			Name:        "vfs_stat",
+			Description: "Return metadata for one VFS file or directory, including its resolved path, type, size, mode, and modification time.",
+			InputSchema: schema(map[string]any{
+				"path": prop("string", "Path to inspect"),
+			}, "path"),
+		},
+		{
+			Name:        "vfs_chdir",
+			Description: "Change the VFS working directory used to resolve later relative paths, then return the new absolute directory.",
+			InputSchema: schema(map[string]any{
+				"path": prop("string", "Existing directory to make current"),
 			}, "path"),
 		},
 		{
@@ -271,234 +461,449 @@ func handleToolCall(rawParams json.RawMessage) (any, *jsonRPCError) {
 	if err := json.Unmarshal(rawParams, &params); err != nil {
 		return nil, &jsonRPCError{Code: -32602, Message: "Invalid params: " + err.Error()}
 	}
-
-	// Decode the tool arguments as a generic map.
-	var args map[string]any
-	if len(params.Arguments) > 0 {
-		_ = json.Unmarshal(params.Arguments, &args)
+	if params.Name == "" {
+		return nil, &jsonRPCError{Code: -32602, Message: "Invalid params: tool name is required"}
 	}
-	if args == nil {
-		args = map[string]any{}
+	args, rpcErr := decodeToolArgs(params.Arguments)
+	if rpcErr != nil {
+		return nil, rpcErr
 	}
 
-	strArg := func(key, def string) string {
-		if v, ok := args[key]; ok {
-			if s, ok := v.(string); ok {
-				return s
-			}
-		}
-		return def
+	result := func(text string, isError bool) (any, *jsonRPCError) {
+		return mcpToolResult{Content: []mcpContent{{Type: "text", Text: text}}, IsError: isError}, nil
 	}
-	boolArg := func(key string) bool {
-		if v, ok := args[key]; ok {
-			if b, ok := v.(bool); ok {
-				return b
-			}
-		}
-		return false
+	failure := func(err error) (any, *jsonRPCError) {
+		return result("error: "+err.Error(), true)
 	}
-	intArg := func(key string, def int) int {
-		if v, ok := args[key]; ok {
-			switch n := v.(type) {
-			case float64:
-				return int(n)
-			case int:
-				return n
-			}
+	requiredString := func(key string) (string, error) {
+		value, err := args.string(key, "")
+		if err != nil {
+			return "", err
 		}
-		return def
+		if value == "" {
+			return "", fmt.Errorf("'%s' argument is required", key)
+		}
+		return value, nil
 	}
-
-	var text string
-	var isError bool
+	timeout := func() (time.Duration, error) {
+		seconds, err := args.boundedInt("timeout", 10, 1, 60)
+		return time.Duration(seconds) * time.Second, err
+	}
 
 	switch params.Name {
 	case "run_code":
-		code := strArg("code", "")
-		if code == "" {
-			text = "error: 'code' argument is required"
-			isError = true
-			break
-		}
-		timeoutSec := intArg("timeout", 10)
-		if timeoutSec <= 0 || timeoutSec > 60 {
-			timeoutSec = 10
-		}
-		out, err := runCode(code, sessionVFS, time.Duration(timeoutSec)*time.Second)
+		code, err := requiredString("code")
 		if err != nil {
-			text = out
-			if text != "" {
-				text += "\n"
-			}
-			text += "error: " + err.Error()
-			isError = true
-		} else {
-			text = out
+			return failure(err)
 		}
+		duration, err := timeout()
+		if err != nil {
+			return failure(err)
+		}
+		output, err := runCode(code, sessionVFS, duration)
+		return executionResult(result, output, err)
 
 	case "fmt_code":
-		code := strArg("code", "")
-		if code == "" {
-			text = "error: 'code' argument is required"
-			isError = true
-			break
+		code, err := requiredString("code")
+		if err != nil {
+			return failure(err)
 		}
 		formatted, err := interp.FormatSource(code)
 		if err != nil {
-			text = "error: " + err.Error()
-			isError = true
-		} else {
-			text = formatted
+			return failure(err)
 		}
+		return result(formatted, false)
 
 	case "vet_code":
-		code := strArg("code", "")
-		if code == "" {
-			text = "error: 'code' argument is required"
-			isError = true
-			break
+		code, err := requiredString("code")
+		if err != nil {
+			return failure(err)
 		}
 		issues, err := interp.VetSource(code)
 		if err != nil {
-			text = "error: " + err.Error()
-			isError = true
-		} else if len(issues) == 0 {
-			text = "ok"
-		} else {
-			var sb strings.Builder
-			for _, iss := range issues {
-				sb.WriteString(iss.String())
-				sb.WriteByte('\n')
-			}
-			text = sb.String()
+			return failure(err)
 		}
+		if len(issues) == 0 {
+			return result("ok", false)
+		}
+		var output strings.Builder
+		for _, issue := range issues {
+			output.WriteString(issue.String())
+			output.WriteByte('\n')
+		}
+		return result(output.String(), false)
+
+	case "inspect_code":
+		code, err := requiredString("code")
+		if err != nil {
+			return failure(err)
+		}
+		includeTree, err := args.bool("include_tree", false)
+		if err != nil {
+			return failure(err)
+		}
+		inspection, err := interp.InspectSource(code)
+		if err != nil {
+			return failure(err)
+		}
+		response := map[string]any{
+			"nodeCount": inspection.NodeCount,
+			"maxDepth":  inspection.MaxDepth,
+			"funcs":     inspection.Funcs,
+			"imports":   inspection.Imports,
+			"parseUs":   inspection.ParseUs,
+		}
+		if includeTree {
+			response["tree"] = inspection.Tree
+		}
+		return jsonResult(result, response, false)
+
+	case "call_graph":
+		code, err := requiredString("code")
+		if err != nil {
+			return failure(err)
+		}
+		maxFunctions, err := args.boundedInt("max_functions", 100, 1, 1000)
+		if err != nil {
+			return failure(err)
+		}
+		graph, err := interp.AnalyzeCallGraph(code)
+		if err != nil {
+			return failure(err)
+		}
+		funcs := graph.Funcs
+		truncated := len(funcs) > maxFunctions
+		if truncated {
+			funcs = funcs[:maxFunctions]
+		}
+		return jsonResult(result, map[string]any{
+			"totalFunctions": len(graph.Funcs),
+			"truncated":      truncated,
+			"funcs":          funcs,
+		}, false)
+
+	case "run_module":
+		root, err := requiredString("root")
+		if err != nil {
+			return failure(err)
+		}
+		entry, err := args.string("entry", "main")
+		if err != nil {
+			return failure(err)
+		}
+		duration, err := timeout()
+		if err != nil {
+			return failure(err)
+		}
+		output, err := runModule(root, entry, sessionVFS, duration)
+		return executionResult(result, output, err)
+
+	case "test_module":
+		root, err := requiredString("root")
+		if err != nil {
+			return failure(err)
+		}
+		packageName, err := args.string("package", "")
+		if err != nil {
+			return failure(err)
+		}
+		duration, err := timeout()
+		if err != nil {
+			return failure(err)
+		}
+		summary, err := testModule(root, packageName, sessionVFS, duration)
+		if err != nil {
+			return failure(err)
+		}
+		return jsonResult(result, summary, !summary.Passed)
+
+	case "index_module":
+		root, err := requiredString("root")
+		if err != nil {
+			return failure(err)
+		}
+		maxFunctions, err := args.boundedInt("max_functions", 200, 1, 1000)
+		if err != nil {
+			return failure(err)
+		}
+		indexResult, err := indexModule(root, sessionVFS, maxFunctions)
+		if err != nil {
+			return failure(err)
+		}
+		return jsonResult(result, indexResult, false)
 
 	case "vfs_read":
-		p := strArg("path", "")
-		if p == "" {
-			text = "error: 'path' argument is required"
-			isError = true
-			break
-		}
-		data, err := sessionVFS.ReadFile(p)
+		filePath, err := requiredString("path")
 		if err != nil {
-			text = "error: " + err.Error()
-			isError = true
-		} else {
-			text = string(data)
+			return failure(err)
 		}
+		data, err := sessionVFS.ReadFile(filePath)
+		if err != nil {
+			return failure(err)
+		}
+		return result(string(data), false)
 
 	case "vfs_write":
-		p := strArg("path", "")
-		content := strArg("content", "")
-		if p == "" {
-			text = "error: 'path' argument is required"
-			isError = true
-			break
+		filePath, err := requiredString("path")
+		if err != nil {
+			return failure(err)
 		}
-		if err := sessionVFS.WriteFile(p, []byte(content), 0644); err != nil {
-			text = "error: " + err.Error()
-			isError = true
-		} else {
-			text = fmt.Sprintf("wrote %d bytes to %s", len(content), p)
+		content, err := args.string("content", "")
+		if err != nil {
+			return failure(err)
 		}
+		createParents, err := args.bool("create_parents", false)
+		if err != nil {
+			return failure(err)
+		}
+		if createParents {
+			if err := sessionVFS.MkdirAll(path.Dir(sessionVFS.ResolvePath(filePath)), 0755); err != nil {
+				return failure(err)
+			}
+		}
+		if err := sessionVFS.WriteFile(filePath, []byte(content), 0644); err != nil {
+			return failure(err)
+		}
+		return result(fmt.Sprintf("wrote %d bytes to %s", len(content), sessionVFS.ResolvePath(filePath)), false)
 
 	case "vfs_list":
-		p := strArg("path", "/")
-		entries, err := sessionVFS.ReadDir(p)
+		dirPath, err := args.string("path", sessionVFS.Getwd())
 		if err != nil {
-			text = "error: " + err.Error()
-			isError = true
-		} else {
-			var sb strings.Builder
-			for _, e := range entries {
-				kind := "-"
-				if e.IsDir {
-					kind = "d"
-				}
-				sb.WriteString(fmt.Sprintf("%s  %s\n", kind, e.Name))
-			}
-			if sb.Len() == 0 {
-				text = "(empty directory)"
-			} else {
-				text = sb.String()
-			}
+			return failure(err)
 		}
+		entries, err := sessionVFS.ReadDir(dirPath)
+		if err != nil {
+			return failure(err)
+		}
+		if len(entries) == 0 {
+			return result("(empty directory)", false)
+		}
+		var output strings.Builder
+		for _, entry := range entries {
+			kind := "-"
+			if entry.IsDir {
+				kind = "d"
+			}
+			output.WriteString(fmt.Sprintf("%s  %s\n", kind, entry.Name))
+		}
+		return result(output.String(), false)
 
 	case "vfs_mkdir":
-		p := strArg("path", "")
-		if p == "" {
-			text = "error: 'path' argument is required"
-			isError = true
-			break
+		dirPath, err := requiredString("path")
+		if err != nil {
+			return failure(err)
 		}
-		if err := sessionVFS.MkdirAll(p, 0755); err != nil {
-			text = "error: " + err.Error()
-			isError = true
-		} else {
-			text = "created " + p
+		if err := sessionVFS.MkdirAll(dirPath, 0755); err != nil {
+			return failure(err)
 		}
+		return result("created "+sessionVFS.ResolvePath(dirPath), false)
+
+	case "vfs_tree":
+		dirPath, err := args.string("path", sessionVFS.Getwd())
+		if err != nil {
+			return failure(err)
+		}
+		maxDepth, err := args.boundedInt("max_depth", 4, 0, 20)
+		if err != nil {
+			return failure(err)
+		}
+		maxEntries, err := args.boundedInt("max_entries", 200, 1, 1000)
+		if err != nil {
+			return failure(err)
+		}
+		tree, err := vfsTree(sessionVFS, dirPath, maxDepth, maxEntries)
+		if err != nil {
+			return failure(err)
+		}
+		return jsonResult(result, tree, false)
+
+	case "vfs_stat":
+		filePath, err := requiredString("path")
+		if err != nil {
+			return failure(err)
+		}
+		info, err := sessionVFS.Stat(filePath)
+		if err != nil {
+			return failure(err)
+		}
+		return jsonResult(result, vfsMetadata(sessionVFS.ResolvePath(filePath), info), false)
+
+	case "vfs_chdir":
+		dirPath, err := requiredString("path")
+		if err != nil {
+			return failure(err)
+		}
+		if err := sessionVFS.Chdir(dirPath); err != nil {
+			return failure(err)
+		}
+		return result(sessionVFS.Getwd(), false)
 
 	case "vfs_remove":
-		p := strArg("path", "")
-		if p == "" {
-			text = "error: 'path' argument is required"
-			isError = true
-			break
+		filePath, err := requiredString("path")
+		if err != nil {
+			return failure(err)
 		}
-		var err error
-		if boolArg("recursive") {
-			err = sessionVFS.RemoveAll(p)
+		if sessionVFS.ResolvePath(filePath) == "/" {
+			return failure(errors.New("refusing to remove the VFS root"))
+		}
+		recursive, err := args.bool("recursive", false)
+		if err != nil {
+			return failure(err)
+		}
+		if recursive {
+			err = sessionVFS.RemoveAll(filePath)
 		} else {
-			err = sessionVFS.Remove(p)
+			err = sessionVFS.Remove(filePath)
 		}
 		if err != nil {
-			text = "error: " + err.Error()
-			isError = true
-		} else {
-			text = "removed " + p
+			return failure(err)
 		}
+		return result("removed "+sessionVFS.ResolvePath(filePath), false)
 
 	default:
 		return nil, &jsonRPCError{Code: -32602, Message: "Unknown tool: " + params.Name}
 	}
-
-	return mcpToolResult{
-		Content: []mcpContent{{Type: "text", Text: text}},
-		IsError: isError,
-	}, nil
 }
 
-// runCode executes Go source code in a fresh Interpreter that shares the session VFS.
-// It captures all fmt.Print*/browser.ConsoleLog output and returns it as a string.
-func runCode(source string, vfs *interp.VFS, timeout time.Duration) (output string, retErr error) {
-	var buf strings.Builder
-	var bufMu sync.Mutex
+type toolArgs map[string]any
 
+func decodeToolArgs(raw json.RawMessage) (toolArgs, *jsonRPCError) {
+	if len(raw) == 0 {
+		return toolArgs{}, nil
+	}
+	var args toolArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, &jsonRPCError{Code: -32602, Message: "Invalid tool arguments: " + err.Error()}
+	}
+	if args == nil {
+		return toolArgs{}, nil
+	}
+	return args, nil
+}
+
+func (args toolArgs) string(key, fallback string) (string, error) {
+	value, ok := args[key]
+	if !ok {
+		return fallback, nil
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("'%s' must be a string", key)
+	}
+	return text, nil
+}
+
+func (args toolArgs) bool(key string, fallback bool) (bool, error) {
+	value, ok := args[key]
+	if !ok {
+		return fallback, nil
+	}
+	flag, ok := value.(bool)
+	if !ok {
+		return false, fmt.Errorf("'%s' must be a boolean", key)
+	}
+	return flag, nil
+}
+
+func (args toolArgs) boundedInt(key string, fallback, min, max int) (int, error) {
+	value, ok := args[key]
+	if !ok {
+		return fallback, nil
+	}
+	number, ok := value.(float64)
+	if !ok || number != float64(int(number)) {
+		return 0, fmt.Errorf("'%s' must be an integer", key)
+	}
+	converted := int(number)
+	if converted < min || converted > max {
+		return 0, fmt.Errorf("'%s' must be between %d and %d", key, min, max)
+	}
+	return converted, nil
+}
+
+func executionResult(result func(string, bool) (any, *jsonRPCError), output string, err error) (any, *jsonRPCError) {
+	if err == nil {
+		return result(output, false)
+	}
+	if output != "" {
+		output += "\n"
+	}
+	return result(output+"error: "+err.Error(), true)
+}
+
+func jsonResult(result func(string, bool) (any, *jsonRPCError), value any, isError bool) (any, *jsonRPCError) {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return result("error: could not encode tool result: "+err.Error(), true)
+	}
+	return result(string(data), isError)
+}
+
+// runCode executes Go source code in a fresh Interpreter that shares the
+// session VFS. Output from guest code is captured, while the guest receives no
+// host filesystem or network capability.
+func runCode(source string, vfs *interp.VFS, timeout time.Duration) (output string, retErr error) {
+	var buffer strings.Builder
+	var bufferMu sync.Mutex
 	defer func() {
-		if r := recover(); r != nil {
-			retErr = fmt.Errorf("panic recovered: %v", r)
+		output = capturedOutput(&buffer, &bufferMu)
+		if recovered := recover(); recovered != nil {
+			retErr = fmt.Errorf("panic recovered: %v", recovered)
 		}
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	vm := newMCPInterpreter(vfs, &buffer, &bufferMu)
+	retErr = vm.RunContext(ctx, source)
+	if errors.Is(retErr, context.DeadlineExceeded) {
+		retErr = fmt.Errorf("execution timed out after %s: %w", timeout, retErr)
+	}
+	return output, retErr
+}
 
+// runModule is the multi-file companion to runCode. It loads only VFS files
+// under root, resolving module-local imports without consulting the host disk.
+func runModule(root, entry string, vfs *interp.VFS, timeout time.Duration) (output string, retErr error) {
+	var buffer strings.Builder
+	var bufferMu sync.Mutex
+	defer func() {
+		output = capturedOutput(&buffer, &bufferMu)
+		if recovered := recover(); recovered != nil {
+			retErr = fmt.Errorf("panic recovered: %v", recovered)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	program, err := loader.LoadModule(vfs, vfs.ResolvePath(root), loader.Options{})
+	if err != nil {
+		return "", err
+	}
+	vm := newMCPInterpreter(vfs, &buffer, &bufferMu)
+	retErr = loader.RunProgram(ctx, vm, program, entry)
+	if errors.Is(retErr, context.DeadlineExceeded) {
+		retErr = fmt.Errorf("execution timed out after %s: %w", timeout, retErr)
+	}
+	return output, retErr
+}
+
+// newMCPInterpreter configures the exact sandbox used for both single-file
+// and module execution. In particular, it grants guest code only the VFS
+// capability; network capability remains at its deny-by-default zero value.
+func newMCPInterpreter(vfs *interp.VFS, output *strings.Builder, outputMu *sync.Mutex) *interp.Interpreter {
 	vm := interp.NewInterpreterWithVFS(vfs)
-	// The MCP server deliberately shares its session VFS with guest code, but
-	// does not grant the guest network access merely because the host has it.
 	vm.Capabilities.FileSystem = interp.FileSystemCapabilities{Read: true, Write: true}
 	write := func(prefix string, args []any) {
 		if len(args) == 0 {
 			return
 		}
-		bufMu.Lock()
-		buf.WriteString(prefix)
-		buf.WriteString(interp.ToString(args[0]))
-		buf.WriteByte('\n')
-		bufMu.Unlock()
+		outputMu.Lock()
+		output.WriteString(prefix)
+		output.WriteString(interp.ToString(args[0]))
+		output.WriteByte('\n')
+		outputMu.Unlock()
 	}
-	// Guest goroutines can log concurrently, so capture output behind a mutex.
 	vm.RegisterNative("ConsoleLog", func(args []any) (any, error) { write("", args); return nil, nil })
 	vm.RegisterNative("ConsoleWarn", func(args []any) (any, error) { write("[warn] ", args); return nil, nil })
 	vm.RegisterNative("ConsoleError", func(args []any) (any, error) { write("[error] ", args); return nil, nil })
@@ -507,20 +912,282 @@ func runCode(source string, vfs *interp.VFS, timeout time.Duration) (output stri
 			return "", nil
 		}
 		format := interp.ToString(args[0])
-		fmtArgs := make([]any, 0, len(args)-1)
-		for _, a := range args[1:] {
-			fmtArgs = append(fmtArgs, a)
+		formatArgs := make([]any, 0, len(args)-1)
+		for _, arg := range args[1:] {
+			formatArgs = append(formatArgs, arg)
 		}
-		return fmt.Sprintf(format, fmtArgs...), nil
+		return fmt.Sprintf(format, formatArgs...), nil
 	})
-
 	interp.RegisterBuiltinPackages(vm)
-	retErr = vm.RunContext(ctx, source)
-	bufMu.Lock()
-	output = buf.String()
-	bufMu.Unlock()
-	if errors.Is(retErr, context.DeadlineExceeded) {
-		return output, fmt.Errorf("execution timed out after %s: %w", timeout, retErr)
+	return vm
+}
+
+func capturedOutput(buffer *strings.Builder, bufferMu *sync.Mutex) string {
+	bufferMu.Lock()
+	defer bufferMu.Unlock()
+	return buffer.String()
+}
+
+type vfsEntry struct {
+	Path    string `json:"path"`
+	Type    string `json:"type"`
+	Size    int    `json:"size"`
+	Mode    string `json:"mode"`
+	ModTime string `json:"modTime"`
+}
+
+type vfsTreeResult struct {
+	Root       string     `json:"root"`
+	MaxDepth   int        `json:"maxDepth"`
+	MaxEntries int        `json:"maxEntries"`
+	Truncated  bool       `json:"truncated"`
+	Entries    []vfsEntry `json:"entries"`
+}
+
+func vfsMetadata(resolvedPath string, info *interp.VFSFileInfo) vfsEntry {
+	kind := "file"
+	if info.IsDir {
+		kind = "directory"
 	}
-	return output, retErr
+	return vfsEntry{
+		Path:    resolvedPath,
+		Type:    kind,
+		Size:    info.Size,
+		Mode:    fmt.Sprintf("%#o", info.Mode),
+		ModTime: info.ModTime.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func vfsTree(vfs *interp.VFS, dirPath string, maxDepth, maxEntries int) (vfsTreeResult, error) {
+	root := vfs.ResolvePath(dirPath)
+	info, err := vfs.Stat(root)
+	if err != nil {
+		return vfsTreeResult{}, err
+	}
+	if !info.IsDir {
+		return vfsTreeResult{}, fmt.Errorf("tree %s: not a directory", dirPath)
+	}
+	result := vfsTreeResult{
+		Root:       root,
+		MaxDepth:   maxDepth,
+		MaxEntries: maxEntries,
+		Entries:    make([]vfsEntry, 0),
+	}
+	var walk func(current string, depth int) error
+	walk = func(current string, depth int) error {
+		entries, err := vfs.ReadDir(current)
+		if err != nil {
+			return err
+		}
+		if depth >= maxDepth {
+			result.Truncated = result.Truncated || len(entries) > 0
+			return nil
+		}
+		for _, entry := range entries {
+			if result.Truncated {
+				return nil
+			}
+			if len(result.Entries) >= maxEntries {
+				result.Truncated = true
+				return nil
+			}
+			entryPath := path.Join(current, entry.Name)
+			result.Entries = append(result.Entries, vfsMetadata(entryPath, entry))
+			if entry.IsDir {
+				if err := walk(entryPath, depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := walk(root, 0); err != nil {
+		return vfsTreeResult{}, err
+	}
+	return result, nil
+}
+
+type moduleIndexResult struct {
+	Root           string                 `json:"root"`
+	TotalFunctions int                    `json:"totalFunctions"`
+	Truncated      bool                   `json:"truncated"`
+	Functions      []moduleFunctionRecord `json:"functions"`
+}
+
+type moduleFunctionRecord struct {
+	ID        string               `json:"id"`
+	Name      string               `json:"name"`
+	Package   string               `json:"package"`
+	File      string               `json:"file"`
+	LineStart int                  `json:"lineStart"`
+	LineEnd   int                  `json:"lineEnd"`
+	Signature string               `json:"signature"`
+	Doc       string               `json:"doc,omitempty"`
+	Receiver  string               `json:"receiver,omitempty"`
+	Calls     []string             `json:"calls,omitempty"`
+	CalledBy  []string             `json:"calledBy,omitempty"`
+	Tests     []string             `json:"tests,omitempty"`
+	Metrics   moduleFunctionMetric `json:"metrics"`
+}
+
+type moduleFunctionMetric struct {
+	CyclomaticComplexity int `json:"cyclomaticComplexity"`
+	MaxNestingDepth      int `json:"maxNestingDepth"`
+	LOC                  int `json:"loc"`
+}
+
+func indexModule(root string, vfs *interp.VFS, maxFunctions int) (moduleIndexResult, error) {
+	resolvedRoot := vfs.ResolvePath(root)
+	entries, err := index.Scan(vfs, resolvedRoot, index.Options{})
+	if err != nil {
+		return moduleIndexResult{}, err
+	}
+	result := moduleIndexResult{
+		Root:           resolvedRoot,
+		TotalFunctions: len(entries),
+		Truncated:      len(entries) > maxFunctions,
+		Functions:      make([]moduleFunctionRecord, 0, min(len(entries), maxFunctions)),
+	}
+	for _, entry := range entries[:min(len(entries), maxFunctions)] {
+		result.Functions = append(result.Functions, moduleFunctionRecord{
+			ID:        entry.ID,
+			Name:      entry.Name,
+			Package:   entry.Package,
+			File:      entry.File,
+			LineStart: entry.LineStart,
+			LineEnd:   entry.LineEnd,
+			Signature: entry.Signature,
+			Doc:       truncateText(entry.Doc, 500),
+			Receiver:  entry.Receiver,
+			Calls:     entry.Calls,
+			CalledBy:  entry.CalledBy,
+			Tests:     entry.Tests,
+			Metrics: moduleFunctionMetric{
+				CyclomaticComplexity: entry.Metrics.CyclomaticComplexity,
+				MaxNestingDepth:      entry.Metrics.MaxNestingDepth,
+				LOC:                  entry.Metrics.LOC,
+			},
+		})
+	}
+	return result, nil
+}
+
+func truncateText(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	return text[:limit] + "…"
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+type moduleTestSummary struct {
+	Root    string              `json:"root"`
+	Package string              `json:"package"`
+	Passed  bool                `json:"passed"`
+	Total   int                 `json:"total"`
+	Failed  int                 `json:"failed"`
+	Results []moduleTestOutcome `json:"results"`
+	Output  string              `json:"output,omitempty"`
+}
+
+type moduleTestOutcome struct {
+	Name     string `json:"name"`
+	Passed   bool   `json:"passed"`
+	Category string `json:"category"`
+	Line     int    `json:"line"`
+	Column   int    `json:"column"`
+	Panicked bool   `json:"panicked"`
+}
+
+func testModule(root, packageName string, vfs *interp.VFS, timeout time.Duration) (summary moduleTestSummary, retErr error) {
+	resolvedRoot := vfs.ResolvePath(root)
+	program, err := loader.LoadModule(vfs, resolvedRoot, loader.Options{})
+	if err != nil {
+		return moduleTestSummary{}, err
+	}
+	if packageName == "" {
+		packageName = program.Packages[program.Entry].Name
+	}
+	names, err := packageTestNames(program, packageName)
+	if err != nil {
+		return moduleTestSummary{}, err
+	}
+
+	var buffer strings.Builder
+	var bufferMu sync.Mutex
+	defer func() {
+		summary.Output = capturedOutput(&buffer, &bufferMu)
+		if recovered := recover(); recovered != nil {
+			retErr = fmt.Errorf("panic recovered: %v", recovered)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	vm := newMCPInterpreter(vfs, &buffer, &bufferMu)
+	results, err := loader.RunPackageTests(ctx, vm, program, packageName)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return moduleTestSummary{}, fmt.Errorf("test execution timed out after %s: %w", timeout, err)
+		}
+		return moduleTestSummary{}, err
+	}
+	summary = moduleTestSummary{
+		Root:    resolvedRoot,
+		Package: packageName,
+		Passed:  true,
+		Total:   len(results),
+		Results: make([]moduleTestOutcome, 0, len(results)),
+	}
+	for i, testResult := range results {
+		name := fmt.Sprintf("Test #%d", i+1)
+		if i < len(names) {
+			name = names[i]
+		}
+		outcome := moduleTestOutcome{
+			Name:     name,
+			Passed:   testResult.Pass,
+			Category: testResult.Category,
+			Line:     testResult.Line,
+			Column:   testResult.Column,
+			Panicked: testResult.Panic,
+		}
+		if !outcome.Passed {
+			summary.Passed = false
+			summary.Failed++
+		}
+		summary.Results = append(summary.Results, outcome)
+	}
+	return summary, nil
+}
+
+func packageTestNames(program *loader.Program, packageName string) ([]string, error) {
+	var parsedPackage *loader.ParsedPackage
+	for _, candidate := range program.Packages {
+		if candidate.Name != packageName {
+			continue
+		}
+		if parsedPackage != nil {
+			return nil, fmt.Errorf("package name %q is ambiguous in module", packageName)
+		}
+		parsedPackage = candidate
+	}
+	if parsedPackage == nil {
+		return nil, fmt.Errorf("package %q was not found in module", packageName)
+	}
+	var names []string
+	for _, file := range parsedPackage.TestFiles {
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if ok && function.Recv == nil && strings.HasPrefix(function.Name.Name, "Test") {
+				names = append(names, function.Name.Name)
+			}
+		}
+	}
+	return names, nil
 }

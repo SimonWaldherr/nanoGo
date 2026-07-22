@@ -10,7 +10,10 @@ func main() {
 `,
   "Canvas": `package main
 
-import "fmt"
+import (
+  "browser"
+  "fmt"
+)
 
 func main() {
   fmt.Println("Canvas demo")
@@ -112,9 +115,28 @@ func main() {
   fmt.Println("sorted:", xs)
 }
 `,
+  "Path + UTF-8": `package main
+
+import (
+  "fmt"
+  "path"
+  "unicode/utf8"
+)
+
+func main() {
+  endpoint := path.Join("/api", "v1", "../users.json")
+  fmt.Println("clean endpoint:", endpoint)
+  fmt.Println("file:", path.Base(endpoint), "extension:", path.Ext(endpoint))
+
+  label := "Go ✓"
+  fmt.Println("runes:", utf8.RuneCountInString(label))
+  fmt.Println("valid UTF-8:", utf8.ValidString(label))
+}
+`,
   "Template + DOM": `package main
 
 import (
+  "browser"
   "fmt"
   "text/template"
 )
@@ -161,6 +183,7 @@ func main() {
   "Life": `package main
 
 import (
+  "browser"
   "fmt"
   "time"
 )
@@ -227,7 +250,7 @@ func main() {
   txt := http.GetText("https://jsonplaceholder.typicode.com/todos/1")
   fmt.Println("fetched len:", len(txt))
 
-  // Store in nanoGo's browser storage API
+  // Store in nanoGo's worker-session storage facade.
   storage.SetItem("lastFetchLen", fmt.Sprintf("%d", len(txt)))
   v := storage.GetItem("lastFetchLen")
   fmt.Println("stored lastFetchLen:", v)
@@ -304,7 +327,10 @@ func main() {
 `,
   "Checkerboard": `package main
 
-import "fmt"
+import (
+  "browser"
+  "fmt"
+)
 
 func main() {
   fmt.Println("Checkerboard canvas")
@@ -321,6 +347,7 @@ func main() {
   "Bouncing Ball": `package main
 
 import (
+  "browser"
   "fmt"
   "time"
 )
@@ -439,9 +466,10 @@ func main() {
   obj := map[string]any{"name":"nanoGo","v":1}
   b, _ := json.Marshal(obj)
   fmt.Println("json:", string(b))
-  var m map[string]any
-  _ = json.Unmarshal(b, &m)
-  fmt.Println("unmarshalled:", m["name"], m["v"])
+  // nanoGo's JSON facade returns the decoded value instead of filling a
+  // pointer like encoding/json.Unmarshal in the Go standard library.
+  decoded := json.Unmarshal(b)
+  fmt.Println("unmarshalled:", decoded)
 }
 `,"Virtual FS (os)": `package main
 
@@ -610,7 +638,7 @@ func main() {
   if err != nil {
     fmt.Println("Atoi error:", err)
   } else {
-    fmt.Println("Atoi(\\"123\\"):", n)
+  fmt.Println("Atoi 123:", n)
   }
 
   // float formatting
@@ -623,7 +651,7 @@ func main() {
   if err != nil {
     fmt.Println("ParseBool error:", err)
   } else {
-    fmt.Println("ParseBool(\"false\"):", b)
+    fmt.Println("ParseBool false:", b)
   }
 
   // int with base
@@ -632,5 +660,115 @@ func main() {
 
   bin := strconv.FormatInt(10, 2)
   fmt.Println("FormatInt(10, 2):", bin) // 1010
+}
+`,"Test: Table-driven": `package main
+
+import (
+  "fmt"
+  "testing"
+)
+
+func clamp(n, low, high int) int {
+  if n < low { return low }
+  if n > high { return high }
+  return n
+}
+
+type clampCase struct {
+  name string
+  in int
+  want int
+}
+
+// This uses nanoGo's supported testing subset. In a package, the loader
+// discovers supported TestXxx functions; the playground calls it explicitly
+// so it can run from one editable file.
+func TestClamp(t *testing.T) {
+  cases := []clampCase{
+    clampCase{"below range", -2, 0},
+    clampCase{"inside range", 4, 4},
+    clampCase{"above range", 12, 10},
+  }
+
+  for _, tc := range cases {
+    tc := tc
+    t.Run(tc.name, func(t *testing.T) {
+      if got := clamp(tc.in, 0, 10); got != tc.want {
+        t.Errorf("clamp(%d) = %d, want %d", tc.in, got, tc.want)
+      }
+    })
+  }
+}
+
+func main() {
+  var t testing.T
+  TestClamp(&t)
+  fmt.Println("PASS: TestClamp (3 subtests)")
+  fmt.Println("Try changing an expected value to see a failing assertion.")
+}
+`,"Benchmark: Checksum": `package main
+
+import (
+  "fmt"
+  "testing"
+  "time"
+)
+
+func checksum(s string) int {
+  total := 0
+  for _, r := range s { total += int(r) }
+  return total
+}
+
+// Same function signature as a regular go test benchmark. The iteration
+// count is fixed in the playground so runs stay short and comparable.
+func BenchmarkChecksum(b *testing.B) {
+  input := "nanoGo makes Go experiments small and repeatable"
+  guard := 0
+  b.ResetTimer()
+  for i := 0; i < b.N; i++ { guard += checksum(input) }
+  b.StopTimer()
+  fmt.Println("checksum guard:", guard)
+}
+
+func main() {
+  b := testing.B{N: 400}
+  started := time.Now()
+  BenchmarkChecksum(&b)
+  fmt.Printf("BenchmarkChecksum: N=%d, wall=%dms\\n", b.N, time.Since(started))
+  fmt.Println("The loader also reports deterministic interpreter steps/op.")
+}
+`,"Worker Pool": `package main
+
+import (
+  "fmt"
+  "sync"
+)
+
+func worker(id int, jobs <-chan int, results chan<- int, wg *sync.WaitGroup) {
+  defer wg.Done()
+  for job := range jobs {
+    results <- job * job
+    fmt.Printf("worker %d finished job %d\\n", id, job)
+  }
+}
+
+func main() {
+  jobs := make(chan int, 4)
+  results := make(chan int, 4)
+  var wg sync.WaitGroup
+
+  for id := 1; id <= 2; id++ {
+    wg.Add(1)
+    go worker(id, jobs, results, &wg)
+  }
+  for job := 1; job <= 4; job++ { jobs <- job }
+  close(jobs)
+  wg.Wait()
+  close(results)
+
+  total := 0
+  for result := range results { total += result }
+  fmt.Println("result total:", total)
 }
 `};

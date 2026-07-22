@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"strings"
+	"time"
 )
 
 // FormatSource formats Go source code using the standard go/format package.
@@ -117,6 +118,259 @@ func VetSource(src string) ([]VetIssue, error) {
 	})
 
 	return issues, nil
+}
+
+// AstNode is one node of the serializable syntax tree produced by
+// InspectSource. Children preserve source order; Line/Col are 1-based.
+type AstNode struct {
+	Type     string     `json:"type"`
+	Label    string     `json:"label,omitempty"`
+	Line     int        `json:"line,omitempty"`
+	Col      int        `json:"col,omitempty"`
+	EndLine  int        `json:"endLine,omitempty"`
+	Children []*AstNode `json:"children,omitempty"`
+}
+
+// InspectResult bundles the AST with cheap structural statistics so a host
+// UI can show "what did the parser see" without re-walking the tree.
+type InspectResult struct {
+	Tree      *AstNode `json:"tree"`
+	NodeCount int      `json:"nodeCount"`
+	MaxDepth  int      `json:"maxDepth"`
+	Funcs     []string `json:"funcs"`
+	Imports   []string `json:"imports"`
+	ParseUs   int64    `json:"parseUs"`
+}
+
+// InspectSource parses src (including comments) and returns its syntax tree
+// in a compact, JSON-friendly form together with structural statistics. It
+// never executes any code.
+func InspectSource(src string) (*InspectResult, error) {
+	fset := token.NewFileSet()
+	start := time.Now()
+	file, err := parser.ParseFile(fset, "input.go", src, parser.ParseComments)
+	parseUs := time.Since(start).Microseconds()
+	if err != nil {
+		return nil, err
+	}
+
+	result := &InspectResult{ParseUs: parseUs}
+	var stack []*AstNode
+	ast.Inspect(file, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		node := &AstNode{Type: astTypeName(n), Label: astNodeLabel(n)}
+		if pos := n.Pos(); pos.IsValid() {
+			p := fset.Position(pos)
+			node.Line, node.Col = p.Line, p.Column
+		}
+		if end := n.End(); end.IsValid() {
+			node.EndLine = fset.Position(end).Line
+		}
+		result.NodeCount++
+		if depth := len(stack) + 1; depth > result.MaxDepth {
+			result.MaxDepth = depth
+		}
+		if len(stack) == 0 {
+			result.Tree = node
+		} else {
+			parent := stack[len(stack)-1]
+			parent.Children = append(parent.Children, node)
+		}
+		stack = append(stack, node)
+
+		switch d := n.(type) {
+		case *ast.FuncDecl:
+			result.Funcs = append(result.Funcs, d.Name.Name)
+		case *ast.ImportSpec:
+			result.Imports = append(result.Imports, strings.Trim(d.Path.Value, `"`))
+		}
+		return true
+	})
+	return result, nil
+}
+
+// astTypeName reports the node's concrete type without the "*ast." prefix.
+func astTypeName(n ast.Node) string {
+	name := fmt.Sprintf("%T", n)
+	name = strings.TrimPrefix(name, "*ast.")
+	return strings.TrimPrefix(name, "ast.")
+}
+
+// astNodeLabel extracts the human-meaningful token of a node (identifier
+// names, literal values, operators) for one-line tree rendering.
+func astNodeLabel(n ast.Node) string {
+	switch v := n.(type) {
+	case *ast.File:
+		return "package " + v.Name.Name
+	case *ast.Ident:
+		return v.Name
+	case *ast.BasicLit:
+		return v.Value
+	case *ast.FuncDecl:
+		return v.Name.Name
+	case *ast.ImportSpec:
+		return v.Path.Value
+	case *ast.BinaryExpr:
+		return v.Op.String()
+	case *ast.UnaryExpr:
+		return v.Op.String()
+	case *ast.AssignStmt:
+		return v.Tok.String()
+	case *ast.IncDecStmt:
+		return v.Tok.String()
+	case *ast.BranchStmt:
+		return v.Tok.String()
+	case *ast.GenDecl:
+		return v.Tok.String()
+	case *ast.CallExpr:
+		return callFuncName(v)
+	case *ast.SelectorExpr:
+		return v.Sel.Name
+	case *ast.RangeStmt:
+		return "range"
+	case *ast.TypeSpec:
+		return v.Name.Name
+	case *ast.Comment:
+		return v.Text
+	}
+	return ""
+}
+
+// CallGraphCall is one call site found inside a function's body.
+type CallGraphCall struct {
+	Name     string `json:"name"` // callee exactly as written: "fmt.Println", "t.Foo", "Bar"
+	Line     int    `json:"line"`
+	Resolved string `json:"resolved,omitempty"` // display name of the matching local func/method, if any
+}
+
+// CallGraphFunc is one top-level function or method declaration together
+// with the calls it makes and (for calls resolved to another local
+// declaration) the reverse edge of who calls it.
+type CallGraphFunc struct {
+	Name     string          `json:"name"` // "Foo", or "Type.Method" for a method
+	Recv     string          `json:"recv,omitempty"`
+	Line     int             `json:"line"`
+	Calls    []CallGraphCall `json:"calls,omitempty"`
+	CalledBy []string        `json:"calledBy,omitempty"`
+}
+
+// CallGraphResult is the full per-file call graph produced by
+// AnalyzeCallGraph, in source declaration order.
+type CallGraphResult struct {
+	Funcs []CallGraphFunc `json:"funcs"`
+}
+
+// recvTypeName returns a method's receiver type name (unwrapping a pointer
+// receiver), or "" for a plain function declaration.
+func recvTypeName(fd *ast.FuncDecl) string {
+	if fd.Recv == nil || len(fd.Recv.List) == 0 {
+		return ""
+	}
+	expr := fd.Recv.List[0].Type
+	if star, ok := expr.(*ast.StarExpr); ok {
+		expr = star.X
+	}
+	if ident, ok := expr.(*ast.Ident); ok {
+		return ident.Name
+	}
+	return ""
+}
+
+// AnalyzeCallGraph parses src and reports, for every top-level function and
+// method, which functions it calls and (for calls resolved to another local
+// declaration) which local functions call it back. It never executes any
+// code — this is a purely static, syntactic analysis.
+//
+// Resolution is intentionally best-effort rather than fully type-checked:
+// a plain call "Foo(...)" resolves exactly against a declared function
+// named "Foo"; a selector call "x.Foo(...)" resolves against a declared
+// method "Foo" only when exactly one declared receiver type has a method
+// by that name (an ambiguous or externally-defined callee — fmt.Println,
+// a call through an interface, etc. — is still listed under Calls, just
+// without a Resolved target and therefore without a CalledBy edge).
+func AnalyzeCallGraph(src string) (*CallGraphResult, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "input.go", src, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	type declInfo struct {
+		decl *ast.FuncDecl
+		key  string
+		recv string
+	}
+	var decls []declInfo
+	methodOwners := map[string][]string{}
+
+	for _, d := range file.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		recv := recvTypeName(fd)
+		key := fd.Name.Name
+		if recv != "" {
+			key = recv + "." + fd.Name.Name
+			methodOwners[fd.Name.Name] = append(methodOwners[fd.Name.Name], recv)
+		}
+		decls = append(decls, declInfo{decl: fd, key: key, recv: recv})
+	}
+
+	// Funcs is allocated up front at its final length so byKey's pointers
+	// into it stay valid: appending to the slice afterward could reallocate
+	// the backing array and silently orphan every pointer taken before that.
+	result := &CallGraphResult{Funcs: make([]CallGraphFunc, len(decls))}
+	byKey := make(map[string]*CallGraphFunc, len(decls))
+	for i, di := range decls {
+		pos := fset.Position(di.decl.Pos())
+		result.Funcs[i] = CallGraphFunc{Name: di.key, Recv: di.recv, Line: pos.Line}
+		byKey[di.key] = &result.Funcs[i]
+	}
+
+	for i, di := range decls {
+		if di.decl.Body == nil {
+			continue
+		}
+		ast.Inspect(di.decl.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name := callFuncName(call)
+			if name == "" {
+				return true
+			}
+			pos := fset.Position(call.Pos())
+			cc := CallGraphCall{Name: name, Line: pos.Line}
+
+			if _, ok := byKey[name]; ok {
+				cc.Resolved = name
+			} else if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if owners := methodOwners[sel.Sel.Name]; len(owners) == 1 {
+					cc.Resolved = owners[0] + "." + sel.Sel.Name
+				}
+			}
+			result.Funcs[i].Calls = append(result.Funcs[i].Calls, cc)
+			return true
+		})
+	}
+
+	for _, cf := range result.Funcs {
+		for _, call := range cf.Calls {
+			if call.Resolved == "" {
+				continue
+			}
+			if target, ok := byKey[call.Resolved]; ok {
+				target.CalledBy = append(target.CalledBy, cf.Name)
+			}
+		}
+	}
+
+	return result, nil
 }
 
 // isTerminatingStmt returns true if stmt unconditionally transfers control.

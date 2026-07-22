@@ -107,6 +107,7 @@ func (vm *Interpreter) beginExecution(parent context.Context) (*execution, error
 }
 
 func (vm *Interpreter) endExecution(e *execution) {
+	vm.lastSteps.Store(e.steps.Load())
 	vm.execution.CompareAndSwap(e, nil)
 	vm.runMu.Unlock()
 }

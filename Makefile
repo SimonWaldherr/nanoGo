@@ -53,7 +53,7 @@ run-demo: build-cli
 
 # ---------- Tests ----------
 test:
-	go test ./interp ./interp/loader ./interp/index ./cmd/cli
+	go test ./interp ./interp/loader ./interp/index ./cmd/mcp ./cmd/repl
 
 # ---------- Benchmarks (informational; no -cpuprofile by default) ----------
 benchmark: build-cli

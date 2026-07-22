@@ -2,15 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>nanoGo — Go in the browser</title>
   <link rel="icon" href="assets/logo.svg">
-  <link rel="stylesheet" href="styles.css">
-  <!-- CodeMirror powers syntax highlighting and the editor gutter. These
-       scripts intentionally load before the inline application script. -->
+  <!-- CodeMirror powers syntax highlighting and the editor gutter. Its CSS
+       loads before styles.css so the playground theme rules win the cascade;
+       the scripts intentionally load before the inline application script. -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css" crossorigin="anonymous">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js" crossorigin="anonymous"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js" crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js" crossorigin="anonymous" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js" crossorigin="anonymous" defer></script>
 </head>
 <body>
   <!-- Header -->
@@ -38,14 +39,14 @@
             <button class="theme-option" data-theme="high-contrast">High Contrast</button>
           </div>
         </div>
-        <button id="shareBtn" title="Share code">📤 Share</button>
-        <button id="downloadBtn" title="Download code">💾 Download</button>
+        <button id="shareBtn" title="Share code">📤 <span class="btn-label">Share</span></button>
+        <button id="downloadBtn" title="Download code">💾 <span class="btn-label">Download</span></button>
         <label class="upload-control" title="Upload a .go file">
-          📂 Upload
+          📂 <span class="btn-label">Upload</span>
           <input id="fileInput" type="file" accept=".go" style="display:none">
         </label>
         <a class="header-link" href="https://github.com/SimonWaldherr/nanogo" target="_blank" rel="noreferrer">
-          📚 GitHub
+          📚 <span class="btn-label">GitHub</span>
         </a>
       </div>
     </div>
@@ -56,13 +57,17 @@
     <!-- Sidebar -->
     <aside class="sidebar">
       <div class="examples-panel">
-        <div class="panel-header">
-          📚 Examples & Demos
-        </div>
-        <input id="exampleSearch" class="example-search" placeholder="Search examples..." aria-label="Search examples" />
-        <div id="tagFilters" class="tag-filters"></div>
-        <div class="examples-list" id="examplesList">
-          <!-- Examples will be populated by JavaScript -->
+        <input type="checkbox" id="examplesToggle" class="examples-toggle-input">
+        <label for="examplesToggle" class="panel-header examples-toggle-label">
+          <span>📚 Examples &amp; Demos</span>
+          <span class="examples-chevron" aria-hidden="true">▾</span>
+        </label>
+        <div class="examples-panel-body">
+          <input id="exampleSearch" class="example-search" placeholder="Search examples..." aria-label="Search examples" />
+          <div id="tagFilters" class="tag-filters"></div>
+          <div class="examples-list" id="examplesList">
+            <!-- Examples will be populated by JavaScript -->
+          </div>
         </div>
       </div>
 
@@ -72,14 +77,25 @@
           <p>Select an example to see detailed information about what it demonstrates.</p>
         </div>
       </div>
+
+      <section class="practice-panel" aria-labelledby="practice-title">
+        <p class="practice-kicker">Why nanoGo</p>
+        <h2 id="practice-title">Learn by changing working Go code.</h2>
+        <p>Move from a small example to a real pattern—then immediately see its output, concurrency, browser effect or test result.</p>
+        <ul class="practice-points">
+          <li><span>01</span> Explore Go without a local toolchain</li>
+          <li><span>02</span> Turn patterns into editable experiments</li>
+          <li><span>03</span> Practice tests and benchmarks in context</li>
+        </ul>
+      </section>
     </aside>
 
     <!-- Editor Section -->
     <section class="editor-section">
-      <div class="editor-header" style="display: none;">
+      <div class="editor-header">
         <div>
           <h2 class="section-title">Code editor</h2>
-          <!--<p class="editor-meta"><span></span> Go · syntax highlighting · line numbers</p>-->
+          <p class="editor-meta"><span></span> Go · syntax highlighting · line numbers</p>
         </div>
         <div id="status" class="status loading">
           <div class="status-indicator"></div>
@@ -89,12 +105,13 @@
 
       <div class="controls">
         <button id="runBtn" class="primary" disabled>
-          ▶️ Run (Ctrl/⌘+Enter)
+          ▶️ Run<span class="shortcut-hint"> (Ctrl/⌘+Enter)</span>
         </button>
-        <button id="stopBtn" title="Stop running program">⏹️ Stop</button>
-        <button id="formatBtn" title="Format code with gofmt">✨ Format</button>
-        <button id="vetBtn" title="Run static analysis">🔍 Vet</button>
-        <button id="clearBtn">🗑️ Clear</button>
+        <button id="stopBtn" title="Stop running program">⏹️ <span class="btn-label">Stop</span></button>
+        <button id="formatBtn" title="Format code with gofmt">✨ <span class="btn-label">Format</span></button>
+        <button id="vetBtn" title="Run static analysis">🔍 <span class="btn-label">Vet</span></button>
+        <button id="inspectBtn" title="Open the execution inspector (AST, benchmark, trace)">🔬 <span class="btn-label">Inspect</span></button>
+        <button id="clearBtn">🗑️ <span class="btn-label">Clear</span></button>
         <div class="input-group">
           <label for="modeSelect">Mode:</label>
           <select id="modeSelect">
@@ -119,7 +136,7 @@
       </div>
 
       <div class="editor-container">
-        <textarea id="src" aria-label="Go source editor" spellcheck="false" placeholder="// Select an example from the sidebar to get started
+        <textarea id="src" aria-label="Go source editor" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off" placeholder="// Select an example from the sidebar to get started
 // or write your own Go code here...
 
 package main
@@ -135,6 +152,14 @@ func main() {
 
     <!-- Output Section -->
     <section class="output-section">
+      <!-- Output panel switcher -->
+      <div class="output-tabs" role="tablist" aria-label="Output panels">
+        <button class="output-tab active" data-output="console" role="tab">📋 Console</button>
+        <button class="output-tab" data-output="canvas" role="tab">🎨 Canvas</button>
+        <button class="output-tab" data-output="dom" role="tab">🌐 HTML</button>
+        <button class="output-tab" data-output="inspector" role="tab">🔬 Inspector</button>
+      </div>
+
       <!-- Canvas Output -->
       <div class="output-panel" id="canvasPanel">
         <div class="output-header">
@@ -178,6 +203,63 @@ Select an example from the sidebar to get started! 🚀</div>
           </div>
         </div>
       </div>
+
+      <!-- Execution Inspector -->
+      <div class="output-panel" id="inspectorPanel">
+        <div class="output-header">
+          <span>🔬 Execution Inspector</span>
+          <span class="example-badge">Details</span>
+        </div>
+        <div class="output-content inspector-content">
+          <div class="stats-grid" id="runStats" aria-live="polite">
+            <div class="stat-chip"><span class="stat-value" id="statWall">–</span><span class="stat-label">total time</span></div>
+            <div class="stat-chip"><span class="stat-value" id="statInterp">–</span><span class="stat-label">interp time</span></div>
+            <div class="stat-chip"><span class="stat-value" id="statSteps">–</span><span class="stat-label">steps</span></div>
+            <div class="stat-chip"><span class="stat-value" id="statStepsRate">–</span><span class="stat-label">steps/ms</span></div>
+          </div>
+
+          <details class="inspector-section" id="astSection" open>
+            <summary>🌳 AST <span class="inspector-hint" id="astMeta"></span></summary>
+            <div class="inspector-actions">
+              <button id="astBtn" class="mini-btn">Parse current code</button>
+              <span class="inspector-note">Click a node to jump to its source line.</span>
+            </div>
+            <div id="astTree" class="ast-tree"></div>
+          </details>
+
+          <details class="inspector-section" id="callGraphSection">
+            <summary>📞 Functions <span class="inspector-hint" id="callGraphMeta"></span></summary>
+            <div class="inspector-actions">
+              <button id="callGraphBtn" class="mini-btn">Analyze functions</button>
+              <span class="inspector-note">Who calls whom — click a function, a call, or a caller to jump to it.</span>
+            </div>
+            <div id="callGraphList" class="callgraph-list"></div>
+          </details>
+
+          <details class="inspector-section" id="benchSection">
+            <summary>📊 Benchmark <span class="inspector-hint" id="benchMeta"></span></summary>
+            <div class="inspector-actions">
+              <label class="inspector-field">Iterations
+                <input id="benchIterations" type="number" value="5" min="1" max="100">
+              </label>
+              <button id="benchBtn" class="mini-btn">Run benchmark</button>
+              <span class="inspector-note">Runs the whole program N× on a fresh interpreter; output is suppressed.</span>
+            </div>
+            <div id="benchResults" class="bench-results"></div>
+          </details>
+
+          <details class="inspector-section" id="traceSection">
+            <summary>🧭 Trace <span class="inspector-hint" id="traceMeta"></span></summary>
+            <div class="inspector-actions">
+              <label class="inspector-field trace-toggle">
+                <input id="traceToggle" type="checkbox"> Record trace on next run
+              </label>
+              <span class="inspector-note">Calls, goroutines, capability checks — timeline of the last traced run.</span>
+            </div>
+            <div id="traceTable" class="trace-table"></div>
+          </details>
+        </div>
+      </div>
     </section>
   </main>
 
@@ -219,9 +301,14 @@ Select an example from the sidebar to get started! 🚀</div>
           description: 'String manipulation and sorting algorithms',
           badge: 'Utilities'
         },
+        'Path + UTF-8': {
+          output: 'console',
+          description: 'Lexical path handling and UTF-8 validation',
+          badge: 'Text'
+        },
         'Template + DOM': {
           output: 'dom',
-          description: 'HTML template rendering to DOM elements',
+          description: 'Template expansion and DOM output',
           badge: 'Web'
         },
         'Random': {
@@ -241,7 +328,7 @@ Select an example from the sidebar to get started! 🚀</div>
         },
         'HTTP + Storage': {
           output: 'dom',
-          description: 'HTTP requests and nanoGo browser storage',
+          description: 'CORS-bound HTTP and worker-session storage',
           badge: 'Web APIs'
         }
         ,
@@ -255,12 +342,15 @@ Select an example from the sidebar to get started! 🚀</div>
         , 'Structs & Methods': { output: 'console', description: 'Define structs and pointer vs value methods', badge: 'Types' }
         , 'Maps & Ranges': { output: 'console', description: 'Map creation and range iteration', badge: 'Utilities' }
         , 'Timer Ticker': { output: 'console', description: 'Timers and tickers for time-based events', badge: 'Time' }
-        , 'JSON Roundtrip': { output: 'console', description: 'Marshal and unmarshal JSON', badge: 'Data' }
+        , 'JSON Roundtrip': { output: 'console', description: 'Marshal and decode JSON with nanoGo’s facade', badge: 'Data' }
         , 'Virtual FS (os)': { output: 'console', description: 'Read, write and list files in the virtual filesystem', badge: 'OS' }
         , 'Closures': { output: 'console', description: 'Higher-order functions and closures', badge: 'Algorithms' }
         , 'Error Handling': { output: 'console', description: 'Multi-return error pattern with strconv', badge: 'Algorithms' }
-        , 'Math': { output: 'console', description: 'math package — Sqrt, Pow, Sin, Cos, Log etc.', badge: 'Math' }
+        , 'Math': { output: 'console', description: 'Supported math helpers: Sqrt, Pow, Sin, Cos, Log, and more', badge: 'Math' }
         , 'Strconv': { output: 'console', description: 'strconv — number/bool/string conversions', badge: 'Utilities' }
+        , 'Test: Table-driven': { output: 'console', description: 'testing.T, table cases and named subtests', badge: 'Testing' }
+        , 'Benchmark: Checksum': { output: 'console', description: 'testing.B with explicit, repeatable iteration count', badge: 'Benchmarks' }
+        , 'Worker Pool': { output: 'console', description: 'A small concurrent worker pool with channels and WaitGroup', badge: 'Concurrency' }
       };
 
       const EXAMPLE_NAMES = Object.keys(EXAMPLE_CONFIG).filter(name => name !== 'Empty');
@@ -343,16 +433,25 @@ Select an example from the sidebar to get started! 🚀</div>
         `,
         'Strings/Sort': `
           <p><strong>String and Sorting Utilities</strong></p>
-          <p>Demonstrates built-in string operations and sorting algorithms.</p>
+          <p>Demonstrates nanoGo's supported string operations and sorting helpers.</p>
           <ul>
             <li><code>strings.Split()</code> and <code>strings.Join()</code></li>
             <li><code>sort.Ints()</code> for integer sorting</li>
             <li>Slice manipulation</li>
           </ul>
         `,
+        'Path + UTF-8': `
+          <p><strong>Paths and UTF-8</strong></p>
+          <p>Uses the supported <code>path</code> and <code>unicode/utf8</code> subsets. These operations are lexical and do not access the filesystem.</p>
+          <ul>
+            <li><code>path.Join</code>, <code>Base</code>, and <code>Ext</code> normalize slash-separated paths</li>
+            <li><code>utf8.RuneCountInString</code> counts Unicode code points</li>
+            <li><code>utf8.ValidString</code> validates UTF-8 text</li>
+          </ul>
+        `,
         'Template + DOM': `
           <p><strong>HTML Template Rendering</strong></p>
-          <p>Shows template rendering and DOM manipulation in the browser.</p>
+          <p>Expands a <code>text/template</code> template and writes the resulting HTML to the playground output. The helper does not provide <code>html/template</code> escaping, so do not pass untrusted text to <code>browser.SetHTML</code>.</p>
           <ul>
             <li><code>template.RenderString()</code> - Render templates</li>
             <li><code>browser.SetHTML()</code> - Update DOM elements</li>
@@ -373,7 +472,7 @@ Select an example from the sidebar to get started! 🚀</div>
           <p>Shows how to add delays and work with time in Go programs.</p>
           <ul>
             <li><code>time.Sleep()</code> - Add delays</li>
-            <li>Non-blocking execution</li>
+            <li>Cancellation-aware waiting when the host runs with a context</li>
             <li>Time-based coordination</li>
           </ul>
         `,
@@ -389,7 +488,7 @@ Select an example from the sidebar to get started! 🚀</div>
         `,
         'HTTP + Storage': `
           <p><strong>Web APIs Integration</strong></p>
-          <p>Demonstrates HTTP requests and browser storage capabilities.</p>
+          <p>Demonstrates nanoGo's browser HTTP and worker-session storage facades. Requests remain subject to CORS; storage is reset when the worker is restarted.</p>
           <ul>
             <li><code>http.GetText()</code> - Fetch text content</li>
             <li><code>storage.SetItem()</code> - Save through nanoGo storage</li>
@@ -439,11 +538,11 @@ Select an example from the sidebar to get started! 🚀</div>
         `,
         'JSON Roundtrip': `
           <p><strong>JSON Roundtrip</strong></p>
-          <p>Marshal a Go value to JSON and unmarshal it back.</p>
+          <p>Marshal a Go value to JSON and decode it with nanoGo's JSON facade. Its <code>Unmarshal</code> returns a value instead of filling a pointer, unlike Go's <code>encoding/json</code>.</p>
         `,
         'Virtual FS (os)': `
           <p><strong>Virtual Filesystem (os package)</strong></p>
-          <p>Demonstrates the in-memory Unix-like virtual filesystem exposed through the <code>os</code> package.</p>
+          <p>Demonstrates nanoGo’s in-memory VFS through its supported <code>os</code> subset; it is not the browser or host filesystem.</p>
           <ul>
             <li><code>os.WriteFile(path, content, perm)</code> — create/overwrite file</li>
             <li><code>os.ReadFile(path)</code> — read file contents</li>
@@ -471,7 +570,7 @@ Select an example from the sidebar to get started! 🚀</div>
         `,
         'Math': `
           <p><strong>Math Package</strong></p>
-          <p>Covers constants and functions from the <code>math</code> package.</p>
+          <p>Covers selected constants and functions from nanoGo’s <code>math</code> subset.</p>
           <ul>
             <li>Constants: <code>math.Pi</code>, <code>math.E</code></li>
             <li>Rounding: <code>Floor</code>, <code>Ceil</code>, <code>Round</code></li>
@@ -481,12 +580,39 @@ Select an example from the sidebar to get started! 🚀</div>
         `,
         'Strconv': `
           <p><strong>Strconv Package</strong></p>
-          <p>String/number conversion functions from the <code>strconv</code> standard library.</p>
+          <p>Supported string/number conversion functions from <code>strconv</code>.</p>
           <ul>
             <li><code>Itoa</code> / <code>Atoi</code> — int ↔ string</li>
             <li><code>FormatFloat</code> — float → string with precision</li>
             <li><code>FormatBool</code> / <code>ParseBool</code> — bool ↔ string</li>
             <li><code>FormatInt(n, base)</code> — hex, binary representations</li>
+          </ul>
+        `,
+        'Test: Table-driven': `
+          <p><strong>Table-driven tests & subtests</strong></p>
+          <p>This uses nanoGo's supported <code>testing.T</code> subset: <code>Errorf</code>, <code>Fatalf</code>, <code>Run</code>, and <code>Helper</code>. In a package, nanoGo discovers supported <code>TestXxx(t *testing.T)</code> functions automatically; here <code>main</code> invokes it so you can edit and run it in one file.</p>
+          <ul>
+            <li>Named test cases make failures readable</li>
+            <li><code>t.Run</code> isolates each subtest</li>
+            <li>Change an expected value to inspect an assertion failure</li>
+          </ul>
+        `,
+        'Benchmark: Checksum': `
+          <p><strong>Repeatable benchmark shape</strong></p>
+          <p>Uses nanoGo's supported <code>testing.B</code> subset. The browser example fixes <code>b.N</code> so it remains quick; the package loader additionally reports deterministic interpreter steps per operation.</p>
+          <ul>
+            <li><code>b.ResetTimer()</code> excludes setup work</li>
+            <li><code>b.N</code> controls the measured loop</li>
+            <li>Wall time is illustrative; steps/op is stable across machines</li>
+          </ul>
+        `,
+        'Worker Pool': `
+          <p><strong>Practical concurrency</strong></p>
+          <p>A compact worker pool combines directional channels, a <code>WaitGroup</code> and <code>defer wg.Done()</code>—a pattern useful for fan-out work without sharing mutable state.</p>
+          <ul>
+            <li>Jobs fan out to independent workers</li>
+            <li>Results are collected after orderly shutdown</li>
+            <li>Edit the worker/job counts and observe the behavior</li>
           </ul>
         `
       };
@@ -511,15 +637,49 @@ Select an example from the sidebar to get started! 🚀</div>
       const stopBtn = document.getElementById("stopBtn");
       const formatBtn = document.getElementById("formatBtn");
       const vetBtn = document.getElementById("vetBtn");
+      const inspectBtn = document.getElementById("inspectBtn");
       const copyLogBtn = document.getElementById("copyLogBtn");
       const fileInput = document.getElementById("fileInput");
       const fontSizeSelect = document.getElementById("fontSize");
       const execTimeEl = document.getElementById("execTime");
 
-      // CodeMirror editor (initialized from the textarea)
+      // Inspector elements
+      const astBtn = document.getElementById("astBtn");
+      const astTreeEl = document.getElementById("astTree");
+      const astMetaEl = document.getElementById("astMeta");
+      const callGraphBtn = document.getElementById("callGraphBtn");
+      const callGraphListEl = document.getElementById("callGraphList");
+      const callGraphMetaEl = document.getElementById("callGraphMeta");
+      const benchBtn = document.getElementById("benchBtn");
+      const benchIterationsEl = document.getElementById("benchIterations");
+      const benchResultsEl = document.getElementById("benchResults");
+      const benchMetaEl = document.getElementById("benchMeta");
+      const traceToggle = document.getElementById("traceToggle");
+      const traceTableEl = document.getElementById("traceTable");
+      const traceMetaEl = document.getElementById("traceMeta");
+      const traceSectionEl = document.getElementById("traceSection");
+      const benchSectionEl = document.getElementById("benchSection");
+      const statWallEl = document.getElementById("statWall");
+      const statInterpEl = document.getElementById("statInterp");
+      const statStepsEl = document.getElementById("statSteps");
+      const statStepsRateEl = document.getElementById("statStepsRate");
+      let wasmCapabilities = {};
+
+      function applyFontSize(size) {
+        const px = size + 'px';
+        if (editor && editor.getWrapperElement) {
+          editor.getWrapperElement().style.fontSize = px;
+          editor.refresh();
+        }
+        if (srcEl) srcEl.style.fontSize = px;
+      }
+
+      // CodeMirror editor (initialized from the textarea). The CDN scripts
+      // load with `defer`, so they may not have executed yet when this inline
+      // script runs — retry once the DOM (and deferred scripts) are ready.
       let editor = null;
       function initEditor() {
-        if (typeof CodeMirror === 'undefined' || !srcEl) return;
+        if (editor || typeof CodeMirror === 'undefined' || !srcEl) return;
         try {
           editor = CodeMirror.fromTextArea(srcEl, {
             mode: 'text/x-go',
@@ -530,9 +690,22 @@ Select an example from the sidebar to get started! 🚀</div>
             viewportMargin: 12
           });
           editor.setSize('100%', '100%');
+          if (fontSizeSelect) applyFontSize(fontSizeSelect.value);
+          // CodeMirror creates its own hidden input for capturing keystrokes;
+          // it does not inherit these attributes from the original textarea,
+          // so mobile keyboards (iOS) would otherwise autocorrect/autocapitalize
+          // Go code and offer a QuickType bar full of irrelevant suggestions.
+          const input = editor.getInputField && editor.getInputField();
+          if (input) {
+            input.setAttribute('autocorrect', 'off');
+            input.setAttribute('autocapitalize', 'off');
+            input.setAttribute('autocomplete', 'off');
+            input.setAttribute('spellcheck', 'false');
+          }
         } catch (e) { editor = null; }
       }
       initEditor();
+      if (!editor) document.addEventListener('DOMContentLoaded', initEditor, { once: true });
 
       function getSource() { return (editor && typeof editor.getValue === 'function') ? editor.getValue() : (srcEl ? srcEl.value : ''); }
       function setSource(v) { if (editor && typeof editor.setValue === 'function') editor.setValue(v); if (srcEl) srcEl.value = v; }
@@ -541,6 +714,8 @@ Select an example from the sidebar to get started! 🚀</div>
       const canvasPanel = document.getElementById("canvasPanel");
       const consolePanel = document.getElementById("consolePanel");
       const domPanel = document.getElementById("domPanel");
+      const inspectorPanel = document.getElementById("inspectorPanel");
+      const outputTabs = document.querySelectorAll('.output-tab');
 
       let worker = null;
       let currentExample = null;
@@ -674,51 +849,69 @@ Select an example from the sidebar to get started! 🚀</div>
       let fadeTimeout = 8000; // 8 seconds before starting to fade
       let isFocused = false;
 
-      // Enhanced logging with fading and auto-scroll
+      // Enhanced logging with fading and auto-scroll. Lines are queued and
+      // appended in one DocumentFragment per animation frame: a program that
+      // prints thousands of lines costs one layout/scroll per frame instead
+      // of one per line. Fading is handled by the periodic interval below.
       // type: 'output' | 'error' | 'warn' | 'system' (default: 'output')
+      let pendingLogLines = [];
+      let logFlushScheduled = false;
+
       function logMessage(message, type) {
+        pendingLogLines.push({ message: String(message), type: type || 'output' });
+        scheduleLogFlush();
+      }
+
+      // requestAnimationFrame is throttled or fully paused while the document
+      // is hidden (e.g. the user switched tabs mid-run), which would make
+      // output appear frozen until they tab back — fall back to a plain
+      // timer in that case so console output keeps flowing regardless.
+      function scheduleLogFlush() {
+        if (logFlushScheduled) return;
+        logFlushScheduled = true;
+        if (typeof document !== 'undefined' && document.hidden) {
+          setTimeout(flushLogQueue, 50);
+        } else {
+          requestAnimationFrame(flushLogQueue);
+        }
+      }
+
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && pendingLogLines.length > 0) flushLogQueue();
+      });
+
+      function flushLogQueue() {
+        logFlushScheduled = false;
+        if (pendingLogLines.length === 0) return;
+        const batch = pendingLogLines;
+        pendingLogLines = [];
+
+        // Only the tail can stay visible anyway — skip DOM work for the rest.
+        const start = Math.max(0, batch.length - maxLogLines);
         const timestamp = new Date().toLocaleTimeString();
-        const logLine = {
-          text: `[${timestamp}] ${message}`,
-          element: null,
-          timestamp: Date.now(),
-          type: type || 'output'
-        };
-
-        // Create log line element
-        const lineElement = document.createElement('div');
-        lineElement.className = 'log-line log-' + (type || 'output');
-        lineElement.textContent = logLine.text;
-        logLine.element = lineElement;
-
-        // Add to DOM
-        logEl.appendChild(lineElement);
-        logLines.push(logLine);
+        const fragment = document.createDocumentFragment();
+        const now = Date.now();
+        for (let i = start; i < batch.length; i++) {
+          const { message, type } = batch[i];
+          const lineElement = document.createElement('div');
+          lineElement.className = 'log-line log-' + type;
+          lineElement.textContent = `[${timestamp}] ${message}`;
+          fragment.appendChild(lineElement);
+          logLines.push({ text: lineElement.textContent, element: lineElement, timestamp: now, type });
+        }
+        logEl.appendChild(fragment);
 
         // Remove old lines if too many
         if (logLines.length > maxLogLines) {
-          const oldLine = logLines.shift();
-          if (oldLine.element && oldLine.element.parentNode) {
-            oldLine.element.parentNode.removeChild(oldLine.element);
+          const removed = logLines.splice(0, logLines.length - maxLogLines);
+          for (const oldLine of removed) {
+            if (oldLine.element && oldLine.element.parentNode) {
+              oldLine.element.parentNode.removeChild(oldLine.element);
+            }
           }
         }
 
-        // Auto-scroll to bottom - force immediate scroll
-        requestAnimationFrame(() => {
-          logEl.scrollTop = logEl.scrollHeight;
-          // Double-check scroll in case content is still loading
-          setTimeout(() => {
-            logEl.scrollTop = logEl.scrollHeight;
-          }, 50);
-        });
-
-        // Start fade timer if not focused
-        if (!isFocused) {
-          setTimeout(() => startFading(logLine), fadeTimeout);
-        }
-
-        // Update existing lines fade status
-        updateLogLinesFading();
+        logEl.scrollTop = logEl.scrollHeight;
       }
 
       function updateLogLinesFading() {
@@ -738,23 +931,6 @@ Select an example from the sidebar to get started! 🚀</div>
             line.element.className = 'log-line ' + typeClass;
           }
         });
-      }
-
-      function startFading(logLine) {
-        if (isFocused || !logLine.element) return;
-        
-        const age = Date.now() - logLine.timestamp;
-        const typeClass = 'log-' + (logLine.type || 'output');
-        if (age >= fadeTimeout) {
-          logLine.element.className = 'log-line ' + typeClass + ' fading';
-          
-          // Further fade after another interval
-          setTimeout(() => {
-            if (!isFocused && logLine.element) {
-              logLine.element.className = 'log-line ' + typeClass + ' old';
-            }
-          }, fadeTimeout);
-        }
       }
 
       function clearLog() {
@@ -813,24 +989,23 @@ Select an example from the sidebar to get started! 🚀</div>
       }, 1000);
       clearBtn.onclick = clearLog;
 
-      function showOutputPanel(type) {
-        // Hide all panels
-        canvasPanel.classList.remove('active');
-        consolePanel.classList.remove('active');
-        domPanel.classList.remove('active');
+      const OUTPUT_PANELS = { canvas: canvasPanel, dom: domPanel, inspector: inspectorPanel, console: consolePanel };
 
-        // Show the appropriate panel
-        switch (type) {
-          case 'canvas':
-            canvasPanel.classList.add('active');
-            break;
-          case 'dom':
-            domPanel.classList.add('active');
-            break;
-          default:
-            consolePanel.classList.add('active');
-        }
+      function showOutputPanel(type) {
+        const key = OUTPUT_PANELS[type] ? type : 'console';
+        Object.keys(OUTPUT_PANELS).forEach(k => {
+          OUTPUT_PANELS[k].classList.toggle('active', k === key);
+        });
+        outputTabs.forEach(tab => {
+          const active = tab.dataset.output === key;
+          tab.classList.toggle('active', active);
+          tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
       }
+
+      outputTabs.forEach(tab => {
+        tab.addEventListener('click', () => showOutputPanel(tab.dataset.output));
+      });
 
       // Cache canvas + 2d context (with alpha:false for faster compositing)
       // and batch cell draws via requestAnimationFrame so a flood of
@@ -889,9 +1064,10 @@ Select an example from the sidebar to get started! 🚀</div>
         _cellQueue.push({ x: x, y: y, alive: alive });
         if (!_cellRafScheduled) {
           _cellRafScheduled = true;
-          (typeof requestAnimationFrame !== 'undefined' && typeof requestAnimationFrame === 'function'
-            ? requestAnimationFrame
-            : (cb) => setTimeout(cb, FRAME_DELAY_MS))(_flushCells);
+          // rAF is throttled/paused while the document is hidden (backgrounded
+          // tab), which would otherwise stall canvas updates indefinitely.
+          const useRaf = typeof requestAnimationFrame === 'function' && !(typeof document !== 'undefined' && document.hidden);
+          (useRaf ? requestAnimationFrame : (cb) => setTimeout(cb, FRAME_DELAY_MS))(_flushCells);
         }
       }
 
@@ -905,14 +1081,34 @@ Select an example from the sidebar to get started! 🚀</div>
           return;
         }
 
-        worker = new Worker('wasm_worker.js?1');
+        worker = new Worker('wasm_worker.js?2');
         worker.onmessage = (ev) => {
           const m = ev.data;
           if (!m || !m.type) return;
+          if (m.type === 'batch') {
+            // High-frequency messages (log/canvas) arrive coalesced from the
+            // worker; unpack in order through the same dispatcher.
+            for (const item of m.items) handleWorkerMessage(item);
+            return;
+          }
+          handleWorkerMessage(m);
+        };
+        worker.onerror = (e) => {
+          setStatus('Worker error', 'error');
+          logMessage('❌ Worker error: ' + e.message, 'error');
+        };
+        worker.postMessage({ type: 'init' });
+      }
+
+      function handleWorkerMessage(m) {
           switch (m.type) {
             case 'ready':
               setStatus('Ready', 'ready');
               runBtn.disabled = false;
+              wasmCapabilities = m.capabilities || {};
+              if (astBtn && wasmCapabilities.hasAst === false) astBtn.disabled = true;
+              if (callGraphBtn && wasmCapabilities.hasCallGraph === false) callGraphBtn.disabled = true;
+              if (benchBtn && wasmCapabilities.hasBench === false) benchBtn.disabled = true;
               logMessage('🎉 WebAssembly loaded and ready!', 'system');
               fillExamples();
               loadCodeFromURL();
@@ -990,23 +1186,55 @@ Select an example from the sidebar to get started! 🚀</div>
                 m.issues.forEach(iss => logMessage('  ' + iss.line + ':' + iss.column + ': ' + iss.message, 'warn'));
               }
               break;
+            case 'ast-result':
+              if (astBtn) { astBtn.disabled = false; astBtn.textContent = 'Parse current code'; }
+              if (m.error) {
+                if (astMetaEl) astMetaEl.textContent = '';
+                if (astTreeEl) astTreeEl.innerHTML = '<div class="inspector-error">' + escapeHtml(m.error) + '</div>';
+                logMessage('🌳 AST error: ' + m.error, 'error');
+              } else if (m.result) {
+                renderAst(m.result);
+              }
+              break;
+            case 'callgraph-result':
+              if (callGraphBtn) { callGraphBtn.disabled = false; callGraphBtn.textContent = 'Analyze functions'; }
+              if (m.error) {
+                if (callGraphMetaEl) callGraphMetaEl.textContent = '';
+                if (callGraphListEl) callGraphListEl.innerHTML = '<div class="inspector-error">' + escapeHtml(m.error) + '</div>';
+                logMessage('📞 Function analysis error: ' + m.error, 'error');
+              } else if (m.result) {
+                renderCallGraph(m.result);
+              }
+              break;
+            case 'bench-result':
+              if (benchBtn) { benchBtn.disabled = false; benchBtn.textContent = 'Run benchmark'; }
+              setStatus('Ready', 'ready');
+              if (m.error) {
+                if (benchResultsEl) benchResultsEl.innerHTML = '<div class="inspector-error">' + escapeHtml(m.error) + '</div>';
+                logMessage('📊 Benchmark error: ' + m.error, 'error');
+              } else if (m.result) {
+                renderBench(m.result);
+                logMessage('📊 Benchmark: ' + m.result.iterations + ' run(s), avg ' + m.result.avgMs.toFixed(2) + 'ms, ' + formatSteps(m.result.stepsPerOp) + ' steps/op', 'system');
+              }
+              break;
             case 'done': {
               const elapsed = m.elapsed != null ? m.elapsed : null;
+              const stats = m.stats || null;
               const timeStr = elapsed != null ? ` (${elapsed}ms)` : '';
               logMessage('✅ Execution finished' + timeStr, 'system');
-              if (execTimeEl) execTimeEl.textContent = elapsed != null ? elapsed + 'ms' : '';
+              if (execTimeEl) {
+                let label = elapsed != null ? elapsed + 'ms' : '';
+                if (stats && stats.steps) label += (label ? ' · ' : '') + formatSteps(stats.steps) + ' steps';
+                execTimeEl.textContent = label;
+              }
+              updateRunStats(elapsed, stats);
+              if (stats && stats.trace) renderTrace(stats.trace, stats.traceCap);
               setStatus('Ready', 'ready');
               break;
             }
             default:
               console.log('worker:', m);
           }
-        };
-        worker.onerror = (e) => {
-          setStatus('Worker error', 'error');
-          logMessage('❌ Worker error: ' + e.message, 'error');
-        };
-        worker.postMessage({ type: 'init' });
       }
 
       function runCode() {
@@ -1030,8 +1258,9 @@ Select an example from the sidebar to get started! 🚀</div>
           logMessage('🚀 Running…', 'system');
           setStatus('Running code...', 'loading');
           const mode = modeSelect.value || 'stream';
+          const wantTrace = !!(traceToggle && traceToggle.checked);
           const t0 = performance.now();
-          worker.postMessage({ type: 'run', source: getSource(), mode: mode, t0 });
+          worker.postMessage({ type: 'run', source: getSource(), mode: mode, trace: wantTrace, t0 });
         } catch (err) {
           setStatus('Runtime error', 'error');
           logMessage('❌ RUNTIME ERROR: ' + err.message, 'error');
@@ -1039,6 +1268,305 @@ Select an example from the sidebar to get started! 🚀</div>
       }
 
       runBtn.onclick = runCode;
+
+      // ---------------- Execution inspector ----------------
+
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      }
+
+      function formatSteps(n) {
+        if (n == null) return '–';
+        if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+        if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+        return String(n);
+      }
+
+      function updateRunStats(wallMs, stats) {
+        if (statWallEl) statWallEl.textContent = wallMs != null ? wallMs + 'ms' : '–';
+        if (statInterpEl) statInterpEl.textContent = stats && stats.elapsedMs != null ? stats.elapsedMs.toFixed(2) + 'ms' : '–';
+        if (statStepsEl) statStepsEl.textContent = stats ? formatSteps(stats.steps) : '–';
+        if (statStepsRateEl) {
+          statStepsRateEl.textContent = (stats && stats.steps && stats.elapsedMs > 0)
+            ? formatSteps(Math.round(stats.steps / stats.elapsedMs))
+            : '–';
+        }
+      }
+
+      function jumpToSource(line, col) {
+        if (!editor || !line) return;
+        editor.setCursor({ line: line - 1, ch: Math.max(0, (col || 1) - 1) });
+        editor.focus();
+      }
+
+      // AST tree: nodes below the eagerly-rendered top levels are built
+      // lazily on first expansion, so a large file stays snappy.
+      const AST_EAGER_DEPTH = 3;
+
+      function astLabelEl(node) {
+        const label = document.createElement('span');
+        label.className = 'ast-label';
+        const typeEl = document.createElement('span');
+        typeEl.className = 'ast-type';
+        typeEl.textContent = node.type;
+        label.appendChild(typeEl);
+        if (node.label) {
+          const nameEl = document.createElement('span');
+          nameEl.className = 'ast-name';
+          nameEl.textContent = node.label;
+          label.appendChild(nameEl);
+        }
+        if (node.line) {
+          const posEl = document.createElement('span');
+          posEl.className = 'ast-pos';
+          posEl.textContent = ':' + node.line;
+          posEl.title = 'Jump to line ' + node.line;
+          posEl.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            jumpToSource(node.line, node.col);
+          });
+          label.appendChild(posEl);
+        }
+        return label;
+      }
+
+      function buildAstNode(node, depth) {
+        const hasChildren = node.children && node.children.length > 0;
+        if (!hasChildren) {
+          const leaf = document.createElement('div');
+          leaf.className = 'ast-leaf';
+          leaf.appendChild(astLabelEl(node));
+          return leaf;
+        }
+        const det = document.createElement('details');
+        det.className = 'ast-node';
+        const sum = document.createElement('summary');
+        sum.appendChild(astLabelEl(node));
+        const count = document.createElement('span');
+        count.className = 'ast-count';
+        count.textContent = node.children.length;
+        sum.appendChild(count);
+        det.appendChild(sum);
+        const box = document.createElement('div');
+        box.className = 'ast-children';
+        det.appendChild(box);
+
+        let built = false;
+        const build = () => {
+          if (built) return;
+          built = true;
+          for (const child of node.children) box.appendChild(buildAstNode(child, depth + 1));
+        };
+        if (depth < AST_EAGER_DEPTH) {
+          det.open = true;
+          build();
+        } else {
+          det.addEventListener('toggle', () => { if (det.open) build(); });
+        }
+        return det;
+      }
+
+      function renderAst(result) {
+        if (!astTreeEl) return;
+        if (astMetaEl) {
+          astMetaEl.textContent = result.nodeCount + ' nodes · depth ' + result.maxDepth +
+            ' · parse ' + (result.parseUs / 1000).toFixed(2) + 'ms' +
+            (result.funcs && result.funcs.length ? ' · funcs: ' + result.funcs.join(', ') : '');
+        }
+        astTreeEl.innerHTML = '';
+        if (result.tree) astTreeEl.appendChild(buildAstNode(result.tree, 0));
+      }
+
+      function requestAst() {
+        if (!worker) { logMessage('Worker not ready', 'warn'); return; }
+        if (astBtn) { astBtn.disabled = true; astBtn.textContent = 'Parsing…'; }
+        worker.postMessage({ type: 'ast', source: getSource() });
+      }
+
+      // Functions / call graph: who calls whom. Resolution is best-effort
+      // (see interp.AnalyzeCallGraph) — an unresolved call (e.g. fmt.Println,
+      // or a method call the analyzer couldn't uniquely attribute to a type)
+      // is still listed under "Calls" but renders as plain text, not a link.
+      function renderCallGraph(result) {
+        if (!callGraphListEl) return;
+        const funcs = result.funcs || [];
+        if (callGraphMetaEl) {
+          const totalCalls = funcs.reduce((sum, f) => sum + (f.calls ? f.calls.length : 0), 0);
+          callGraphMetaEl.textContent = funcs.length + ' function(s) · ' + totalCalls + ' call site(s)';
+        }
+        callGraphListEl.innerHTML = '';
+        if (funcs.length === 0) {
+          callGraphListEl.innerHTML = '<p class="inspector-note">No top-level functions found.</p>';
+          return;
+        }
+        const byName = {};
+        funcs.forEach(f => { byName[f.name] = f; });
+
+        funcs.forEach(f => {
+          const det = document.createElement('details');
+          det.className = 'callgraph-func';
+          det.open = funcs.length <= 6;
+
+          const sum = document.createElement('summary');
+          const nameBtn = document.createElement('button');
+          nameBtn.className = 'callgraph-name';
+          nameBtn.textContent = f.name;
+          nameBtn.title = 'Jump to definition (line ' + f.line + ')';
+          nameBtn.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            jumpToSource(f.line, 1);
+          });
+          sum.appendChild(nameBtn);
+
+          const counts = document.createElement('span');
+          counts.className = 'callgraph-counts';
+          const callCount = f.calls ? f.calls.length : 0;
+          const callerCount = f.calledBy ? f.calledBy.length : 0;
+          counts.textContent = callCount + ' call' + (callCount === 1 ? '' : 's') + ' · ' +
+            callerCount + ' caller' + (callerCount === 1 ? '' : 's');
+          sum.appendChild(counts);
+          det.appendChild(sum);
+
+          const body = document.createElement('div');
+          body.className = 'callgraph-body';
+          body.appendChild(buildCallGraphColumn('Calls', f.calls, (c) => ({
+            label: c.name,
+            title: 'Jump to call site (line ' + c.line + ')',
+            resolved: !!c.resolved,
+            onClick: () => jumpToSource(c.line, 1)
+          })));
+          body.appendChild(buildCallGraphColumn('Called by', f.calledBy, (callerName) => {
+            const caller = byName[callerName];
+            let jumpLine = caller ? caller.line : null;
+            if (caller && caller.calls) {
+              const site = caller.calls.find(c => c.resolved === f.name);
+              if (site) jumpLine = site.line;
+            }
+            return {
+              label: callerName,
+              title: jumpLine ? 'Jump to call site' : 'Location unavailable',
+              resolved: true,
+              onClick: () => { if (jumpLine) jumpToSource(jumpLine, 1); }
+            };
+          }, '— (entry point or unresolved)'));
+
+          det.appendChild(body);
+          callGraphListEl.appendChild(det);
+        });
+      }
+
+      function buildCallGraphColumn(title, entries, toItem, emptyLabel) {
+        const col = document.createElement('div');
+        col.className = 'callgraph-col';
+        const titleEl = document.createElement('div');
+        titleEl.className = 'callgraph-col-title';
+        titleEl.textContent = title;
+        col.appendChild(titleEl);
+        if (entries && entries.length) {
+          entries.forEach(entry => {
+            const info = toItem(entry);
+            const item = document.createElement('button');
+            item.className = 'callgraph-edge' + (info.resolved ? ' callgraph-resolved' : '');
+            item.textContent = info.label;
+            item.title = info.title || '';
+            item.addEventListener('click', info.onClick);
+            col.appendChild(item);
+          });
+        } else {
+          const none = document.createElement('span');
+          none.className = 'callgraph-none';
+          none.textContent = emptyLabel || '—';
+          col.appendChild(none);
+        }
+        return col;
+      }
+
+      function requestCallGraph() {
+        if (!worker) { logMessage('Worker not ready', 'warn'); return; }
+        if (callGraphBtn) { callGraphBtn.disabled = true; callGraphBtn.textContent = 'Analyzing…'; }
+        worker.postMessage({ type: 'callgraph', source: getSource() });
+      }
+
+      function renderBench(result) {
+        if (!benchResultsEl) return;
+        if (benchMetaEl) {
+          benchMetaEl.textContent = formatSteps(result.stepsPerOp) + ' steps/op · avg ' + result.avgMs.toFixed(2) + 'ms';
+        }
+        const rows = (result.runsMs || []).map((ms, i) =>
+          '<tr><td>#' + (i + 1) + '</td><td>' + ms.toFixed(2) + ' ms</td></tr>').join('');
+        benchResultsEl.innerHTML =
+          '<div class="bench-summary">' +
+            '<div class="stat-chip"><span class="stat-value">' + formatSteps(result.stepsPerOp) + '</span><span class="stat-label">steps/op (deterministic)</span></div>' +
+            '<div class="stat-chip"><span class="stat-value">' + result.avgMs.toFixed(2) + 'ms</span><span class="stat-label">avg</span></div>' +
+            '<div class="stat-chip"><span class="stat-value">' + result.minMs.toFixed(2) + 'ms</span><span class="stat-label">min</span></div>' +
+            '<div class="stat-chip"><span class="stat-value">' + result.maxMs.toFixed(2) + 'ms</span><span class="stat-label">max</span></div>' +
+          '</div>' +
+          '<table class="inspector-table"><thead><tr><th>Run</th><th>Wall time</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+          (result.suppressedMessages ? '<p class="inspector-note">' + result.suppressedMessages + ' output message(s) suppressed during benchmarking.</p>' : '');
+      }
+
+      function requestBench() {
+        if (!worker) { logMessage('Worker not ready', 'warn'); return; }
+        const iterations = Math.max(1, Math.min(100, parseInt(benchIterationsEl && benchIterationsEl.value, 10) || 5));
+        if (benchBtn) { benchBtn.disabled = true; benchBtn.textContent = 'Benchmarking…'; }
+        if (benchSectionEl) benchSectionEl.open = true;
+        setStatus('Benchmarking…', 'loading');
+        showOutputPanel('inspector');
+        logMessage('📊 Benchmarking ' + iterations + ' iteration(s)…', 'system');
+        worker.postMessage({ type: 'bench', source: getSource(), iterations });
+      }
+
+      const TRACE_RENDER_LIMIT = 500;
+
+      function renderTrace(events, traceCap) {
+        if (!traceTableEl) return;
+        if (traceSectionEl) traceSectionEl.open = true;
+        const total = events.length;
+        if (traceMetaEl) {
+          traceMetaEl.textContent = total + ' event(s)' +
+            (traceCap && total >= traceCap ? ' (ring buffer full — oldest dropped)' : '');
+        }
+        if (total === 0) {
+          traceTableEl.innerHTML = '<p class="inspector-note">No events recorded.</p>';
+          return;
+        }
+        const shown = events.slice(0, TRACE_RENDER_LIMIT);
+        const rows = shown.map(ev => {
+          const loc = ev.line ? ev.line + (ev.col ? ':' + ev.col : '') : '';
+          return '<tr class="trace-' + escapeHtml(ev.kind) + '">' +
+            '<td>' + ev.seq + '</td>' +
+            '<td>+' + (ev.ms || 0).toFixed(2) + '</td>' +
+            '<td><span class="trace-kind">' + escapeHtml(ev.kind) + '</span></td>' +
+            '<td>' + escapeHtml(ev.fn || '') + '</td>' +
+            (loc ? '<td><button class="trace-loc" data-line="' + ev.line + '" data-col="' + (ev.col || 1) + '">' + loc + '</button></td>' : '<td></td>') +
+            '<td>' + escapeHtml(ev.msg || '') + '</td>' +
+          '</tr>';
+        }).join('');
+        traceTableEl.innerHTML =
+          '<table class="inspector-table"><thead><tr><th>#</th><th>+ms</th><th>Kind</th><th>Function</th><th>Loc</th><th>Message</th></tr></thead><tbody>' +
+          rows + '</tbody></table>' +
+          (total > TRACE_RENDER_LIMIT ? '<p class="inspector-note">Showing first ' + TRACE_RENDER_LIMIT + ' of ' + total + ' events.</p>' : '');
+      }
+
+      if (traceTableEl) {
+        traceTableEl.addEventListener('click', (ev) => {
+          const btn = ev.target.closest('.trace-loc');
+          if (btn) jumpToSource(parseInt(btn.dataset.line, 10), parseInt(btn.dataset.col, 10));
+        });
+      }
+
+      if (astBtn) astBtn.onclick = requestAst;
+      if (callGraphBtn) callGraphBtn.onclick = requestCallGraph;
+      if (benchBtn) benchBtn.onclick = requestBench;
+      if (inspectBtn) {
+        inspectBtn.onclick = () => {
+          showOutputPanel('inspector');
+          requestAst();
+          requestCallGraph();
+        };
+      }
 
       if (formatBtn) {
         formatBtn.onclick = () => {
@@ -1086,14 +1614,6 @@ Select an example from the sidebar to get started! 🚀</div>
       if (fontSizeSelect) {
         const savedFontSize = localStorage.getItem('nanogo_font_size');
         if (savedFontSize) fontSizeSelect.value = savedFontSize;
-        function applyFontSize(size) {
-          const px = size + 'px';
-          if (editor && editor.getWrapperElement) {
-            editor.getWrapperElement().style.fontSize = px;
-            editor.refresh();
-          }
-          if (srcEl) srcEl.style.fontSize = px;
-        }
         applyFontSize(fontSizeSelect.value);
         fontSizeSelect.addEventListener('change', () => {
           applyFontSize(fontSizeSelect.value);

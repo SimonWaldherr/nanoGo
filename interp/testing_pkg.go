@@ -208,7 +208,9 @@ func registerTestingPackage(vm *Interpreter) {
 		return passed, nil
 	}}
 
-	bType := &TypeDef{Name: "B", Kind: "struct", Methods: map[string]*Function{}}
+	// N is intentionally guest-visible so browser demos can construct a
+	// testing.B value and exercise the same benchmark loop shape as go test.
+	bType := &TypeDef{Name: "B", Kind: "struct", Fields: []FieldDef{{Name: "N", Type: "int"}}, Methods: map[string]*Function{}}
 	vm.types["B"] = bType
 	bType.Methods["ResetTimer"] = &Function{Name: "ResetTimer", RecvType: "B", Native: func(args []any) (any, error) {
 		ensureBenchState(args[0]).ResetTimer()

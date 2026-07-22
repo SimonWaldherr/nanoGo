@@ -88,6 +88,11 @@ type Interpreter struct {
 	runMu     sync.Mutex
 	execution atomic.Pointer[execution]
 	tracer    atomic.Pointer[Tracer]
+
+	// lastSteps preserves the final step counter of the most recently ended
+	// execution so hosts can report deterministic cost after Run returns
+	// (StepCount only works while an execution is active).
+	lastSteps atomic.Uint64
 }
 
 // DefaultMaxContainerSize is the maximum slice, map hint, or channel capacity

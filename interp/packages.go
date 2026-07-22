@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	mrand "math/rand"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -15,11 +16,14 @@ import (
 	"sync"
 	"text/template"
 	"time"
+	"unicode/utf8"
 )
 
 // RegisterBuiltinPackages installs a tiny, curated set of std-like packages:
-// fmt, time, math, encoding/json, sync, regexp, strings, sort, math/rand,
-// browser, text/template, http, fs, os, storage, and debug.
+// fmt, time, math, encoding/json, sync, regexp, strings, sort, strconv,
+// math/rand, path, unicode/utf8, browser, text/template, http, fs, os,
+// storage, testing, and debug. Each package intentionally exposes only the
+// functions registered below; this is not a full Go standard library.
 func RegisterBuiltinPackages(vm *Interpreter) {
 
 	// --- fmt ---
@@ -328,6 +332,57 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return strconv.FormatInt(int64(ToInt(args[0])), ToInt(args[1])), nil
 	}}
 	vm.RegisterPackage("strconv", strconvPkg)
+
+	// --- path ---
+	// path is purely lexical and therefore has the same behavior in native and
+	// browser hosts. It is useful for URLs and virtual-filesystem paths without
+	// granting access to either resource.
+	pathPkg := &Package{Name: "path", Funcs: map[string]*Function{}}
+	pathPkg.Funcs["Base"] = &Function{Name: "Base", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		return path.Base(ToString(args[0])), nil
+	}}
+	pathPkg.Funcs["Clean"] = &Function{Name: "Clean", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		return path.Clean(ToString(args[0])), nil
+	}}
+	pathPkg.Funcs["Dir"] = &Function{Name: "Dir", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		return path.Dir(ToString(args[0])), nil
+	}}
+	pathPkg.Funcs["Ext"] = &Function{Name: "Ext", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		return path.Ext(ToString(args[0])), nil
+	}}
+	pathPkg.Funcs["IsAbs"] = &Function{Name: "IsAbs", Params: []string{"path"}, Native: func(args []any) (any, error) {
+		return path.IsAbs(ToString(args[0])), nil
+	}}
+	pathPkg.Funcs["Join"] = &Function{Name: "Join", IsVariadic: true, Native: func(args []any) (any, error) {
+		parts := make([]string, len(args))
+		for i, arg := range args {
+			parts[i] = ToString(arg)
+		}
+		return path.Join(parts...), nil
+	}}
+	vm.RegisterPackage("path", pathPkg)
+
+	// --- unicode/utf8 ---
+	// The string-oriented subset complements strings without exposing host
+	// state. Rune values are represented by nanoGo's integer values.
+	utf8Pkg := &Package{Name: "unicode/utf8", Funcs: map[string]*Function{}, Vars: map[string]any{
+		"RuneError": utf8.RuneError,
+		"RuneSelf":  utf8.RuneSelf,
+		"UTFMax":    utf8.UTFMax,
+	}}
+	utf8Pkg.Funcs["RuneCountInString"] = &Function{Name: "RuneCountInString", Params: []string{"s"}, Native: func(args []any) (any, error) {
+		return utf8.RuneCountInString(ToString(args[0])), nil
+	}}
+	utf8Pkg.Funcs["RuneLen"] = &Function{Name: "RuneLen", Params: []string{"r"}, Native: func(args []any) (any, error) {
+		return utf8.RuneLen(rune(ToInt(args[0]))), nil
+	}}
+	utf8Pkg.Funcs["ValidRune"] = &Function{Name: "ValidRune", Params: []string{"r"}, Native: func(args []any) (any, error) {
+		return utf8.ValidRune(rune(ToInt(args[0]))), nil
+	}}
+	utf8Pkg.Funcs["ValidString"] = &Function{Name: "ValidString", Params: []string{"s"}, Native: func(args []any) (any, error) {
+		return utf8.ValidString(ToString(args[0])), nil
+	}}
+	vm.RegisterPackage("unicode/utf8", utf8Pkg)
 
 	// --- sync.WaitGroup ---
 	// We expose a struct type WaitGroup with methods Add/Done/Wait, backed by Go's sync.WaitGroup.
@@ -924,6 +979,16 @@ func (vm *Interpreter) installImportedPackage(alias, path string) {
 			RegisterBuiltinPackages(vm)
 		}
 		vm.globals.Vars[alias] = vm.packages["strconv"]
+	case "path":
+		if _, ok := vm.packages["path"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
+		vm.globals.Vars[alias] = vm.packages["path"]
+	case "unicode/utf8":
+		if _, ok := vm.packages["unicode/utf8"]; !ok {
+			RegisterBuiltinPackages(vm)
+		}
+		vm.globals.Vars[alias] = vm.packages["unicode/utf8"]
 	case "sync":
 		if _, ok := vm.packages["sync"]; !ok {
 			RegisterBuiltinPackages(vm)

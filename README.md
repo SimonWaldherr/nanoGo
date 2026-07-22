@@ -1,6 +1,6 @@
 # nanoGo
 
-> **A lightweight Go interpreter designed for WebAssembly** — Bringing the power of Go to the browser with minimal overhead
+> **A Go-subset interpreter for native hosts and WebAssembly** — execute supported Go source dynamically in a browser playground, REPL, CLI, or embedded host.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Go Version](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev/)
@@ -14,35 +14,15 @@ nanoGo is a **minimalist Go interpreter** written in Go. It can run Go source dy
 
 **Key Distinction:** Instead of compiling Go programs ahead-of-time to WASM, nanoGo is an interpreter written in Go, compiled to WASM, that can execute Go source code dynamically at runtime.
 
-## ✨ Why Go in the Browser (via WebAssembly)?
+## ✨ What nanoGo provides
 
-Running Go in the browser through WebAssembly opens up exciting possibilities that traditional JavaScript development cannot easily match:
+nanoGo is useful where executing a small, controlled Go-like program at runtime is more important than compiling a complete Go application. It parses and evaluates a supported subset of Go; it does **not** invoke the Go compiler or perform complete static type checking. Consequently, a program that works in nanoGo is not automatically portable to Go, and a valid Go program may use language or library features nanoGo does not implement.
 
-### 🎯 **Type Safety & Performance**
-- **Strong Static Typing**: Catch errors at compile-time rather than runtime, leading to more robust browser applications
-- **Near-Native Performance**: WebAssembly executes at near-native speed, making Go code in the browser significantly faster than equivalent JavaScript for compute-intensive tasks
-- **Predictable Performance**: Go's garbage collector and memory management provide consistent performance characteristics
-
-### 🔧 **Developer Experience**
-- **Familiar Tooling**: Use the Go toolchain, testing framework, and ecosystem you already know
-- **Code Reuse**: Share business logic between backend (Go servers) and frontend (browser) without rewrites
-- **Goroutines in the Browser**: Leverage Go's powerful concurrency primitives (goroutines, channels) for complex async operations
-- **Standard Library Access**: Use familiar Go packages like `fmt`, `time`, `sync`, `strings`, `regexp`, and more
-
-### 🛡️ **Safety & Security**
-- **Memory Safety**: Go's memory management eliminates entire classes of security vulnerabilities (buffer overflows, use-after-free)
-- **Sandboxed Execution**: WebAssembly provides a secure sandbox, and nanoGo's interpreter adds another isolation layer
-- **Type Safety**: Prevent common JavaScript pitfalls like type coercion bugs and undefined behavior
-
-### 🌐 **Universal Platform**
-- **Write Once, Run Everywhere**: The same Go code can run on servers, desktop, mobile, and now browsers
-- **No Transpilation Hassles**: Unlike TypeScript or other compile-to-JS languages, you're running actual Go semantics
-- **Future-Proof**: WebAssembly is a W3C standard supported by all major browsers
-
-### 📦 **Lightweight & Portable**
-- **Small Binary Size**: nanoGo's interpreter is extremely compact, making it ideal for embedded playground scenarios
-- **No Runtime Dependencies**: Everything needed to run Go code is bundled in the WASM module
-- **Instant Load Times**: Fast initialization means your Go code starts executing quickly
+- **Interactive execution:** edit and run supported Go source in a browser, REPL, CLI, or embedded host.
+- **Concurrency primitives:** guest goroutines, channels, `select`, timers, and a `sync.WaitGroup` subset.
+- **Curated libraries:** a documented, partial set of standard-library-like packages plus browser and host integrations.
+- **Host-controlled access:** filesystem and HTTP operations are denied by default in a newly created interpreter and must be granted through `Capabilities` and host natives. The browser playground deliberately enables its private VFS and browser-mediated HTTP; CORS still applies.
+- **Resource controls:** hosts can set execution deadlines, step limits, container-size limits, and goroutine limits. These controls are cooperative and do not make arbitrary host natives safe.
 
 ### 💡 **Unique Use Cases**
 - **Interactive Tutorials**: Create Go learning platforms that run entirely in the browser
@@ -55,14 +35,14 @@ Running Go in the browser through WebAssembly opens up exciting possibilities th
 ## 🌟 Features
 
 ### Core Capabilities
-- ✅ **Go Language Support**: Variables, functions, structs, interfaces, slices, maps
+- ✅ **Supported Go subset**: Variables, functions, structs, slices, maps, interfaces, channels, and selected control-flow constructs
 - ✅ **Concurrency**: Goroutines and channels, including cancellation-aware waits
-- ✅ **Built-in Packages**: A curated subset including `fmt`, `time`, `sync`, `math`, `strings`, `regexp`, `json`, `sort`, `os`, `fs`, and `testing`
+- ✅ **Built-in Packages**: Curated subsets of `fmt`, `time`, `sync`, `math`, `math/rand`, `strings`, `regexp`, `sort`, `strconv`, `path`, `unicode/utf8`, `encoding/json`/`json`, `os`, `fs`, and `testing`
 - ✅ **Browser Integration**: Special `browser` package for DOM manipulation and canvas drawing
-- ✅ **HTTP Client**: Make HTTP requests from Go code in the browser
-- ✅ **Template Engine**: `text/template` support for dynamic content generation
-- ✅ **Browser Storage**: Persist data for the active playground session
-- ✅ **Math & Random**: Full `math` and `math/rand` package support
+- ✅ **HTTP facade**: Browser code can use nanoGo's `http.GetText`/`PostText` facade, subject to CORS; embedded hosts must provide and authorize a transport native
+- ✅ **Template helper**: `text/template.RenderString` expands a template; it does not provide `html/template` escaping
+- ✅ **Session storage**: The playground's worker-local `storage` facade persists only while that worker remains alive
+- ✅ **Math & random subsets**: Selected `math` and `math/rand` functions
 - ✅ **Multi-Package Modules**: Load multi-file, multi-package programs from a VFS module, run/hot-swap individual functions, and run tests and benchmarks that use nanoGo's supported `testing` subset (see [interp/loader](interp/loader) and [interp/index](interp/index))
 
 ### Execution Modes
@@ -71,15 +51,15 @@ Running Go in the browser through WebAssembly opens up exciting possibilities th
 - **📝 REPL Mode**: Interactive Read-Eval-Print-Loop for experimentation
 
 ### Safety Features
-- **Sandboxed Execution**: Safe interpreter environment prevents malicious code
-- **Controlled Natives**: Limited host function access for security
+- **Capability-gated execution**: The interpreter denies its built-in filesystem and HTTP facades by default; a host must still securely implement every native it registers
+- **Controlled natives**: Host functions are explicit capabilities, not an automatic security boundary
 - **No Direct Host File System Access**: Guest access goes through a capability-checked VFS or explicitly registered host native
 
 ## 🎮 Quick Start
 
 ### Try It Online
 
-Visit the **[nanoGo Web Playground](#)** to start writing Go code in your browser immediately—no installation required!
+There is no hosted playground URL in this repository. Build and serve the included playground locally as shown below.
 
 ### Build Locally
 
@@ -98,13 +78,86 @@ make build-cli
 make run-demo
 ```
 
+## 🤖 MCP Server for AI Coding Clients
+
+`nanogo-mcp` turns nanoGo into a **safe, temporary Go workspace for an MCP
+client**. MCP (Model Context Protocol) is the JSON-RPC protocol through which
+AI coding clients discover tools and context. Rather than giving an agent
+unrestricted shell access, this server lets it create Go files in an in-memory
+virtual filesystem (VFS), inspect and test them, and execute them with
+nanoGo's sandbox.
+
+This makes it useful for:
+
+- validating small Go examples, algorithms, and bug reproductions;
+- teaching or reviewing Go code with parser, call-graph, and complexity data;
+- iterating on a multi-file nanoGo module entirely in a temporary workspace;
+- running the supported `TestXxx(t *testing.T)` subset before executing a
+  program; and
+- building agent workflows that need no access to the host disk or network.
+
+Build the stdio server with:
+
+```bash
+make build-mcp
+```
+
+Then configure an MCP-capable client to launch the produced executable. The
+exact configuration location is client-specific; its command entry follows
+this shape:
+
+```json
+{
+  "mcpServers": {
+    "nanogo": {
+      "command": "/absolute/path/to/nanoGo/build/nanogo-mcp"
+    }
+  }
+}
+```
+
+The server implements the MCP stdio transport: JSON-RPC messages use stdin and
+stdout, while diagnostic messages go only to stderr. It negotiates MCP
+versions from `2024-11-05` through `2025-11-25`, and exposes the
+`nanogo://guide` resource with its workflow and safety notes.
+
+### Agent workflow and tools
+
+For a single snippet, call `fmt_code`, `vet_code`, `inspect_code`, or
+`call_graph` before `run_code`. For a project, create `go.mod` and source files
+with `vfs_write` (`create_parents: true`), use `vfs_tree` or `index_module` to
+orient in the workspace, run `test_module`, and finish with `run_module`.
+
+| Need | MCP tools |
+|---|---|
+| Execute a self-contained program | `run_code` |
+| Format and fast static checks | `fmt_code`, `vet_code` |
+| Understand source structure without execution | `inspect_code`, `call_graph` |
+| Understand a complete VFS project | `index_module`, `vfs_tree`, `vfs_stat` |
+| Run a multi-file module or its tests | `run_module`, `test_module` |
+| Manage the temporary workspace | `vfs_read`, `vfs_write`, `vfs_list`, `vfs_mkdir`, `vfs_chdir`, `vfs_remove` |
+
+`inspect_code`, `call_graph`, and `index_module` return compact JSON in MCP
+text content, so clients can reason over the result without executing guest
+code. Their result sizes are bounded by `max_functions`, `max_depth`, or
+`max_entries` parameters where appropriate.
+
+### Safety model and limits
+
+The VFS is held only for the lifetime of the MCP server process and is removed
+when that process exits. Guest Go code can read and write that VFS, but it
+cannot access the host filesystem or network through this server. Execution
+timeouts default to 10 seconds and are limited to 1–60 seconds, in addition to
+nanoGo's interpreter resource limits. Static analysis is syntactic and
+best-effort; it complements rather than replaces the Go compiler or `go vet`.
+
 ### Project Structure
 
 ```
 nanoGo/
 ├── cmd/
+│   ├── mcp/        # MCP server for AI coding clients
 │   ├── wasm/       # WebAssembly build for browser
-│   ├── cli/        # Command-line interpreter
 │   └── repl/       # Interactive REPL
 ├── interp/         # Go interpreter implementation
 ├── runtime/        # Runtime support (browser APIs, stdlib)
@@ -212,6 +265,8 @@ func main() {
     jsonStr := json.Marshal(data)
     fmt.Println("JSON:", jsonStr)
     
+    // nanoGo returns the decoded value; unlike encoding/json in Go, it does
+    // not take a destination pointer or return an error.
     parsed := json.Unmarshal(jsonStr)
     fmt.Println("Parsed:", parsed)
 }
@@ -505,15 +560,19 @@ nanoGo implements a **tree-walking interpreter** that parses Go source code into
 nanoGo includes a curated set of built-in packages:
 
 - **Core**: `fmt`, `sync`, `time`
-- **Data**: `encoding/json` (also available as `json`), `strings`, `regexp`, `sort`, `strconv`
-- **Math**: `math`, `math/rand`
+- **Data**: `encoding/json` (also available as `json`), `strings`, `regexp`, `sort`, `strconv`, `path`, `unicode/utf8`
+- **Math**: selected `math` and `math/rand` functions
 - **Text & tooling**: `text/template`, `debug`, and a supported subset of `testing`
 - **Host-bound APIs**: `browser`, `storage`, `fs`, `os`, and `http`; filesystem/network calls require `Capabilities`, while APIs that reach host resources require the corresponding host native
 
-This is deliberately not the full Go standard library. In particular,
+This is deliberately not the full Go standard library: each listed package is
+a subset with only the functions described by its registration in
+[`interp/packages.go`](interp/packages.go). In particular,
 `encoding/json.Unmarshal` returns the decoded value instead of filling a
 pointer, so guest code should follow nanoGo's API rather than assume complete
-stdlib compatibility.
+stdlib compatibility. `path` provides `Base`, `Clean`, `Dir`, `Ext`, `IsAbs`,
+and `Join`; `unicode/utf8` provides `RuneCountInString`, `RuneLen`,
+`ValidRune`, and `ValidString`, plus `RuneError`, `RuneSelf`, and `UTFMax`.
 
 ### Multi-Package Programs & Tooling
 
@@ -698,8 +757,9 @@ Use `make build-wasm` to verify the WASM target instead.
 
 ## ⚡ Performance & Deployment
 
-The web playground ships a single ~7.7 MB `nanogo.wasm` artifact. A few simple
-deployment tweaks dramatically improve cold-load time:
+The size of `nanogo.wasm` depends on the Go toolchain and build inputs. Use
+`make size-report` after a local build instead of relying on a fixed size. A
+few deployment tweaks can improve cold-load time:
 
 ### 1. Serve pre-compressed WASM
 
@@ -745,9 +805,8 @@ or the MIME type is wrong.
 
 ### 3. HTTP caching
 
-`nanogo.wasm`, `wasm_exec.js`, `app.js`, and CodeMirror are all immutable
-between releases. Setting `Cache-Control: public, max-age=31536000, immutable`
-turns repeat visits into ~0-byte loads.
+Version static assets deliberately. Only then is a long-lived immutable cache
+policy safe; otherwise a browser can retain an outdated worker or WASM file.
 
 ### 4. Built-in Service Worker
 
@@ -762,8 +821,8 @@ the core offline assets:
 - `nanogo.wasm`
 - the CodeMirror CDN files
 
-That means repeat visits can start instantly even when the WASM is large or
-the network is slow. When you change any of those assets, bump the
+That can improve repeat visits when the assets are already cached. When you
+change any of those assets, bump the
 `CACHE_NAME` in `web/sw.js` so clients refresh their cached copy immediately.
 
 ## 🎯 Use Cases
@@ -771,8 +830,8 @@ the network is slow. When you change any of those assets, bump the
 ### 1. **Educational Platforms**
 Create interactive Go tutorials where students can write and execute code without installing anything:
 - No server-side execution needed
-- Instant feedback
-- Safe sandbox environment
+- Feedback without a local Go toolchain
+- Capability-constrained execution when the host configures restrictive limits and natives
 
 ### 2. **Live Documentation**
 Embed executable Go examples directly in documentation:
@@ -797,7 +856,7 @@ Quick Go experimentation without local setup:
 Host programming competitions with Go:
 - Browser-based coding environment
 - Immediate code execution
-- Fair sandboxed evaluation
+- Host-configured, capability-constrained evaluation; do not treat the playground defaults as a competition-security boundary
 
 ## 🤝 Contributing
 
@@ -831,17 +890,13 @@ git push origin feature/amazing-feature
 # Open a Pull Request
 ```
 
-## 📊 Comparison with Alternatives
+## 📊 Positioning
 
-| Feature | nanoGo | TinyGo | GopherJS |
-|---------|--------|--------|----------|
-| **Compilation** | Interpreted | AOT to WASM | Transpiled to JS |
-| **Binary Size** | Very Small | Small-Medium | Large |
-| **Dynamic Execution** | ✅ Yes | ❌ No | ❌ No |
-| **Full Go Stdlib** | ❌ Subset | ⚠️ Partial | ✅ Yes |
-| **Concurrency** | ✅ Goroutines | ✅ Goroutines | ✅ Goroutines |
-| **Performance** | Medium | High | Medium |
-| **Use Case** | Playgrounds, REPL | Production apps | Legacy projects |
+nanoGo interprets supported Go source at runtime. It is therefore best suited
+to small playgrounds, teaching tools, controlled automation, and embedded
+experiments—not as a substitute for compiling a production Go application to
+WebAssembly. Measure the generated WASM size and runtime characteristics for
+your own workload.
 
 ## 📝 Limitations
 

@@ -25,9 +25,15 @@
   --gradient-bg: linear-gradient(112deg, #101a2b, #0b101b 60%, #0a1622);
   --radius: 14px;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  /* iOS safe-area insets (notch / home indicator). Zero on every other
+     platform; only non-zero here when the viewport meta has viewport-fit=cover. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
 }
 
-* { box-sizing: border-box; }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
 html { min-height: 100%; background: var(--bg); }
 
@@ -40,9 +46,27 @@ body {
     var(--bg);
   color: var(--text);
   font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* Padding, not the old 100vh trick: keeps content clear of the iPhone home
+     indicator / rounded corners without fighting Safari's dynamic toolbar. */
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+  padding-bottom: var(--safe-bottom);
 }
 
 button, input, select { font: inherit; }
+
+@media (hover: none) and (pointer: coarse) {
+  /* Touch devices: a light press-down replaces the (absent) hover state so
+     taps still feel responsive, and every tap target clears Apple's 44pt
+     minimum. Scoped to coarse pointers so mouse/trackpad users keep the
+     existing hover-only feedback untouched. */
+  button:not(:disabled):active, .upload-control:active, .header-link:active,
+  .example-item:active, .tag-btn:active, .output-tab:active, .examples-toggle-label:active {
+    background: var(--surface-hover);
+    transform: scale(.97);
+  }
+  button, select, .upload-control, .header-link, .examples-toggle-label { min-height: 44px; }
+}
 
 button, select, .upload-control {
   min-height: 36px;
@@ -82,7 +106,7 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
   width: min(1720px, 100%);
   min-height: 68px;
   margin: 0 auto;
-  padding: 12px clamp(16px, 3vw, 42px);
+  padding: max(12px, var(--safe-top)) max(clamp(16px, 3vw, 42px), calc(var(--safe-right) + 16px)) 12px max(clamp(16px, 3vw, 42px), calc(var(--safe-left) + 16px));
   gap: 16px;
 }
 
@@ -96,6 +120,12 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .upload-control input { display: none; }
 .header-link { padding: 7px 10px; color: var(--text-muted); font-size: 13px; text-decoration: none; }
 .header-link:hover { color: var(--accent-hover); }
+
+/* Hidden below the phone breakpoint (see media query) so header/controls
+   collapse to icon-only buttons; kept in the DOM (not display:none on the
+   button) so title="" tooltips and screen readers still get the full name. */
+.btn-label { white-space: nowrap; }
+.shortcut-hint { color: inherit; opacity: .8; font-weight: 500; }
 
 .theme-popup {
   position: absolute;
@@ -151,6 +181,18 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
   font-weight: 700;
 }
 
+/* Examples panel collapse toggle — a checkbox + label, no JS. The checkbox
+   itself is visually hidden (but stays focusable/tabbable via the label's
+   `for`); only the phone media query below actually makes it collapse the
+   body, so desktop/tablet keep the always-expanded layout untouched. */
+.examples-toggle-input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.examples-toggle-label { width: 100%; cursor: pointer; }
+/* The chevron only means something where the collapse behavior is actually
+   active (see the max-width:640px query) — hidden otherwise so a wider
+   viewport doesn't show an inert "closed" arrow above always-expanded content. */
+.examples-chevron { display: none; color: var(--text-dim); font-size: 11px; transition: transform .18s ease; }
+.examples-panel-body { display: block; }
+
 .example-search {
   width: calc(100% - 28px);
   margin: 12px 14px 10px;
@@ -168,10 +210,10 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .tag-btn { min-height: 26px; padding: 3px 8px; border-radius: 999px; color: var(--text-muted); font-size: 11px; }
 .tag-btn.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 20%, var(--surface-raised)); color: var(--accent-hover); }
 
-.examples-list { max-height: min(58vh, 570px); overflow: auto; border-top: 1px solid var(--border); }
+.examples-list { max-height: min(58vh, 570px); overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; border-top: 1px solid var(--border); }
 .example-item { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 8px; padding: 11px 13px; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent); border-radius: 0; background: transparent; text-align: left; }
 .example-item:hover { background: var(--surface-raised); }
-.example-item.active { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 24%, var(--surface)), var(--surface-raised)); box-shadow: inset 3px 0 var(--accent); }
+.example-item.active { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 24%, var(--surface)), var(--surface-raised)); box-shadow: inset 3px 0 var(--accent), inset 0 1px color-mix(in srgb, var(--accent) 14%, transparent); }
 .example-info { min-width: 0; }
 .example-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 680; }
 .example-desc { display: -webkit-box; overflow: hidden; margin-top: 2px; color: var(--text-muted); font-size: 11px; line-height: 1.35; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
@@ -185,8 +227,18 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .info-content ul { margin: 8px 0 0; padding-left: 18px; }
 .info-content code { padding: 1px 4px; border-radius: 4px; background: var(--code-bg); color: var(--accent-hover); font-family: var(--mono); font-size: 11px; }
 
+.practice-panel { position: relative; overflow: hidden; padding: 16px; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: var(--radius); background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 13%, var(--surface)), var(--surface) 62%); box-shadow: var(--shadow); }
+.practice-panel::after { position: absolute; right: -36px; bottom: -46px; width: 138px; height: 138px; border: 1px solid color-mix(in srgb, var(--success) 30%, transparent); border-radius: 50%; content: ""; }
+.practice-kicker { margin: 0 0 6px; color: var(--success); font-size: 10px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.practice-panel h2 { position: relative; z-index: 1; max-width: 20ch; margin: 0; font-size: 16px; line-height: 1.25; letter-spacing: -.02em; }
+.practice-panel > p:not(.practice-kicker) { position: relative; z-index: 1; margin: 9px 0 13px; color: var(--text-muted); font-size: 12px; line-height: 1.55; }
+.practice-points { position: relative; z-index: 1; display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; color: var(--text); font-size: 11px; }
+.practice-points li { display: flex; align-items: center; gap: 8px; }
+.practice-points span { display: inline-grid; width: 22px; height: 22px; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border)); border-radius: 6px; background: color-mix(in srgb, var(--accent) 10%, var(--code-bg)); color: var(--accent-hover); font-family: var(--mono); font-size: 9px; font-weight: 700; }
+
 .editor-section { display: grid; gap: 12px; }
-.editor-header { display: flex; align-items: center; justify-content: space-between; min-height: 76px; padding: 14px 16px; gap: 16px; }
+.editor-header { position: relative; display: flex; align-items: center; justify-content: space-between; min-height: 76px; padding: 14px 16px; gap: 16px; }
+.editor-header::before { position: absolute; top: 0; left: 0; width: 46px; height: 2px; border-radius: 0 0 3px 0; background: linear-gradient(90deg, var(--success), var(--accent)); content: ""; }
 .section-title { margin: 0; font-size: 17px; letter-spacing: -.01em; }
 .editor-meta { display: flex; align-items: center; gap: 6px; margin: 3px 0 0; color: var(--text-muted); font-size: 11px; }
 .editor-meta span { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 15%, transparent); }
@@ -205,7 +257,7 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .input-group { display: inline-flex; align-items: center; gap: 5px; margin-left: 3px; color: var(--text-muted); font-size: 11px; }
 .input-group select, .input-group input { min-height: 32px; max-width: 92px; padding: 4px 7px; font-size: 12px; }
 
-.editor-container { min-height: 620px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--code-bg); box-shadow: var(--shadow-lg); }
+.editor-container { min-height: 620px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--code-bg); box-shadow: var(--shadow-lg), 0 0 0 1px color-mix(in srgb, var(--accent) 5%, transparent); }
 #src { width: 100%; min-height: 620px; padding: 16px; resize: vertical; border: 0; outline: 0; background: var(--code-bg); color: var(--text); font-family: var(--mono); line-height: 1.6; }
 
 /* CodeMirror: Go mode supplies the token classes; these rules make syntax
@@ -234,9 +286,9 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .output-actions { display: flex; align-items: center; gap: 7px; }
 #execTime { min-width: 32px; color: var(--text-dim); font-family: var(--mono); font-size: 11px; text-align: right; }
 .output-content { flex: 1; min-height: 0; padding: 12px; }
-.canvas-container { display: grid; min-height: 260px; place-items: center; overflow: auto; border: 1px solid var(--border); border-radius: 9px; background: #080d13; }
+.canvas-container { display: grid; min-height: 260px; place-items: center; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; border: 1px solid var(--border); border-radius: 9px; background: #080d13; }
 #life { max-width: 100%; image-rendering: pixelated; }
-#log { height: min(59vh, 650px); overflow: auto; padding: 2px 1px; color: var(--text); font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre-wrap; }
+#log { height: min(59vh, 650px); overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 2px 1px; color: var(--text); font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre-wrap; }
 .log-line { padding: 2px 5px; border-radius: 4px; word-break: break-word; transition: opacity .3s ease; }
 .log-line.log-error { color: var(--error); background: color-mix(in srgb, var(--error) 8%, transparent); }
 .log-line.log-warn { color: var(--warning); }
@@ -244,6 +296,76 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .log-line.fading { opacity: .58; } .log-line.old { opacity: .3; }
 #output { min-height: 260px; overflow: auto; padding: 14px; border: 1px solid var(--border); border-radius: 9px; background: #fff; color: #172033; }
 #output :first-child { margin-top: 0; }
+
+/* Output panel tabs. Always a single scrollable row rather than wrapping:
+   on a phone four wrapped pill buttons would eat two lines of height for
+   little benefit, while a horizontally-scrollable "segmented control" row
+   is a familiar iOS pattern and costs one line regardless of width. */
+.output-tabs { display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.output-tabs::-webkit-scrollbar { display: none; }
+.output-tab { flex: 0 0 auto; min-height: 32px; padding: 5px 11px; border-radius: 999px; color: var(--text-muted); font-size: 12px; font-weight: 650; white-space: nowrap; }
+.output-tab.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--surface-raised)); color: var(--accent-hover); }
+
+/* Execution inspector */
+.inspector-content { display: grid; gap: 12px; align-content: start; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; max-height: min(72vh, 760px); }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; }
+.stat-chip { display: grid; gap: 2px; padding: 9px 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--code-bg); }
+.stat-chip .stat-value { color: var(--accent-hover); font-family: var(--mono); font-size: 14px; font-weight: 700; }
+.stat-chip .stat-label { color: var(--text-dim); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
+
+.inspector-section { border: 1px solid var(--border); border-radius: 9px; background: color-mix(in srgb, var(--surface-raised) 55%, transparent); }
+.inspector-section > summary { padding: 9px 12px; cursor: pointer; user-select: none; font-size: 13px; font-weight: 700; }
+.inspector-section > summary::marker { color: var(--text-dim); }
+.inspector-section[open] > summary { border-bottom: 1px solid var(--border); }
+.inspector-hint { margin-left: 8px; color: var(--text-dim); font-size: 11px; font-weight: 500; }
+.inspector-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px 4px; }
+.inspector-field { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 12px; }
+.inspector-field input[type="number"] { width: 64px; min-height: 30px; padding: 3px 7px; border: 1px solid var(--border); border-radius: 7px; background: var(--code-bg); color: var(--text); }
+.inspector-note { color: var(--text-dim); font-size: 11px; }
+.inspector-error { margin: 10px 12px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--error) 45%, var(--border)); border-radius: 7px; color: var(--error); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+.mini-btn { min-height: 30px; padding: 4px 10px; font-size: 12px; }
+
+/* AST tree */
+.ast-tree { max-height: 380px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 8px 12px 12px; font-family: var(--mono); font-size: 12px; line-height: 1.7; }
+.ast-node > summary { cursor: pointer; user-select: none; list-style-position: outside; }
+.ast-node > summary::marker { color: var(--text-dim); font-size: 10px; }
+.ast-children { margin-left: 14px; padding-left: 10px; border-left: 1px solid color-mix(in srgb, var(--border) 75%, transparent); }
+.ast-leaf { padding-left: 13px; }
+.ast-label { display: inline-flex; align-items: baseline; gap: 6px; }
+.ast-type { color: var(--accent-hover); font-weight: 650; }
+.ast-name { color: var(--warning); }
+.ast-pos { color: var(--text-dim); font-size: 10px; cursor: pointer; }
+.ast-pos:hover { color: var(--accent); text-decoration: underline; }
+.ast-count { margin-left: 7px; padding: 0 5px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-dim); font-size: 10px; }
+
+/* Inspector tables (trace, benchmark) */
+.trace-table, .bench-results { padding: 4px 12px 12px; }
+.inspector-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; }
+.inspector-table th { position: sticky; top: 0; padding: 5px 7px; border-bottom: 1px solid var(--border-light); background: var(--surface-raised); color: var(--text-muted); font-weight: 700; text-align: left; }
+.inspector-table td { padding: 3.5px 7px; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); color: var(--text); vertical-align: top; word-break: break-word; }
+.trace-table { max-height: 340px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.trace-kind { padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+.trace-call_start .trace-kind, .trace-call_end .trace-kind { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); color: var(--accent-hover); }
+.trace-goroutine_start .trace-kind, .trace-goroutine_end .trace-kind { border-color: color-mix(in srgb, var(--success) 45%, var(--border)); color: var(--success); }
+.trace-run_start .trace-kind, .trace-run_end .trace-kind { border-color: var(--border-light); color: var(--text); }
+.trace-capability_denied .trace-kind, .trace-test_error .trace-kind, .trace-test_fatal .trace-kind { border-color: color-mix(in srgb, var(--error) 55%, var(--border)); color: var(--error); }
+.trace-debug_q .trace-kind, .trace-debug_mark .trace-kind { border-color: color-mix(in srgb, var(--warning) 50%, var(--border)); color: var(--warning); }
+.trace-loc { min-height: 0; padding: 0 5px; border: 0; background: transparent; color: var(--accent); font-family: var(--mono); font-size: 11px; text-decoration: underline; cursor: pointer; }
+.bench-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 10px; }
+
+/* Call graph (Functions section) */
+.callgraph-list { display: grid; gap: 6px; padding: 4px 12px 12px; max-height: 380px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.callgraph-func { border: 1px solid var(--border); border-radius: 8px; background: var(--code-bg); }
+.callgraph-func > summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 10px; cursor: pointer; list-style: none; }
+.callgraph-func > summary::-webkit-details-marker { display: none; }
+.callgraph-name { min-height: 0; padding: 2px 7px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); border-radius: 6px; background: color-mix(in srgb, var(--accent) 10%, var(--surface-raised)); color: var(--accent-hover); font-family: var(--mono); font-size: 12px; font-weight: 700; }
+.callgraph-counts { color: var(--text-dim); font-size: 10.5px; white-space: nowrap; }
+.callgraph-body { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 2px 12px 10px; border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.callgraph-col { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+.callgraph-col-title { margin: 6px 0 1px; color: var(--text-dim); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.callgraph-edge { min-height: 0; max-width: 100%; padding: 2px 7px; overflow: hidden; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); font-family: var(--mono); font-size: 11px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.callgraph-edge.callgraph-resolved { border-color: color-mix(in srgb, var(--success) 40%, var(--border)); color: var(--success); }
+.callgraph-none { color: var(--text-dim); font-size: 11px; font-style: italic; }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -264,4 +386,74 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 
 @media (max-width: 1280px) { .main { grid-template-columns: minmax(220px, 270px) minmax(430px, 1fr); } .output-section { grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(0, 1fr)); } .output-panel.active { min-height: 270px; } #log { height: 280px; } }
 @media (max-width: 900px) { .header-content { align-items: flex-start; flex-direction: column; } .main { grid-template-columns: 1fr; } .sidebar { grid-template-columns: minmax(0, 1fr) minmax(240px, .8fr); } .output-section { grid-column: auto; grid-template-columns: 1fr; } .editor-container, .CodeMirror, .CodeMirror-scroll, #src { min-height: 480px; height: 480px; } }
-@media (max-width: 620px) { .brand-subtitle { display: none; } .header-actions { justify-content: flex-start; } .main { padding: 14px; } .sidebar { grid-template-columns: 1fr; } .editor-header { align-items: flex-start; flex-direction: column; } .controls { gap: 6px; } .input-group { margin-left: 0; } .editor-container, .CodeMirror, .CodeMirror-scroll, #src { min-height: 400px; height: 400px; } }
+
+/* Phone breakpoint (iPhone in portrait or landscape, plus small Android).
+   Below this width the two-column sidebar from the 900px tier no longer
+   has room, so everything goes single-column and several desktop-oriented
+   affordances (long button labels, an always-open example list, a keyboard
+   shortcut hint) get replaced with touch/small-screen equivalents. */
+@media (max-width: 640px) {
+  .brand-subtitle { display: none; }
+  .header-actions { justify-content: flex-start; }
+  .main { padding: 14px; gap: 14px; }
+  .sidebar { grid-template-columns: 1fr; gap: 12px; }
+  .editor-header { align-items: flex-start; flex-direction: column; }
+  .editor-section { gap: 10px; }
+  .controls { gap: 6px; }
+  .input-group { margin-left: 0; }
+
+  /* Icon-only buttons: the emoji stays, the trailing label collapses. The
+     Run button keeps its own label (it's the primary action) but sheds the
+     "(Ctrl/⌘+Enter)" hint, which is meaningless without a hardware keyboard. */
+  .btn-label, .shortcut-hint { display: none; }
+  .header-actions > button, .upload-control, .header-link,
+  .controls > button:not(.primary) { min-width: 44px; padding-left: 8px; padding-right: 8px; }
+
+  /* Comfortable tap targets everywhere (Apple HIG: 44pt minimum), and 16px
+     form-control text so Safari never zooms the page in on focus. */
+  button, select, .upload-control, .header-link { min-height: 44px; }
+  input, select, textarea { font-size: 16px; }
+  .example-search, .tag-btn, .copy-btn, .mini-btn, .inspector-field input,
+  .input-group select, .input-group input { min-height: 44px; }
+  .input-group select, .input-group input { max-width: 130px; font-size: 14px; }
+  .callgraph-edge { min-height: 30px; padding: 5px 9px; }
+
+  /* Promotional panel: useful context on a wide screen, just scroll-length
+     tax on a phone where the editor should be reachable quickly. */
+  .practice-panel { display: none; }
+
+  /* Examples list starts collapsed (see the checkbox toggle in the HTML)
+     so a first-time visitor isn't forced to scroll past dozens of demos
+     before reaching the editor; tapping the header re-expands it in place. */
+  .examples-chevron { display: inline; }
+  .examples-panel-body { display: none; }
+  .examples-toggle-input:checked ~ .examples-panel-body { display: block; }
+  .examples-toggle-input:checked ~ .examples-toggle-label .examples-chevron { transform: rotate(180deg); }
+  .examples-list { max-height: min(48vh, 420px); }
+
+  /* Shorter panels so the page doesn't turn into an endless scroll: only
+     one output panel is ever visible at a time (the tabs hide the rest),
+     so this is the actual per-screen cost, not a sum across all of them. */
+  .editor-container, .CodeMirror, .CodeMirror-scroll, #src { min-height: 340px; height: 340px; }
+  .output-panel { min-height: 240px; }
+  .canvas-container, #output { min-height: 220px; }
+  #log { height: min(42vh, 420px); }
+  .inspector-content { max-height: min(60vh, 560px); }
+}
+
+/* Smallest phones (iPhone SE / mini and narrower): trim padding further. */
+@media (max-width: 380px) {
+  .main { padding: 10px; }
+  .controls > button, .header-actions > button, .upload-control, .header-link { min-width: 44px; padding-left: 6px; padding-right: 6px; }
+  .stats-grid, .bench-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* iPhone in landscape: viewport height is short (~375–430px), so tall fixed
+   panels would otherwise force scrolling for even a single line of output. */
+@media (max-height: 480px) and (orientation: landscape) {
+  .editor-container, .CodeMirror, .CodeMirror-scroll, #src { min-height: 220px; height: 220px; }
+  .output-panel { min-height: 180px; }
+  #log { height: min(38vh, 260px); }
+  .examples-list { max-height: 30vh; }
+  .inspector-content { max-height: 46vh; }
+}

@@ -1,6 +1,7 @@
 package loader
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -110,5 +111,34 @@ func main() {}
 	}
 	if !strings.Contains(err.Error(), "github.com/someone/other") {
 		t.Errorf("expected the error to name the offending import, got: %v", err)
+	}
+}
+
+func TestLoadModuleRecognizesPathAndUTF8Builtins(t *testing.T) {
+	vfs := interp.NewVFS()
+	writeLoaderFile(t, vfs, "/proj/go.mod", "module example.com/proj\n")
+	writeLoaderFile(t, vfs, "/proj/main.go", `package main
+
+import (
+    "fmt"
+    "path"
+    "unicode/utf8"
+)
+
+func main() {
+    fmt.Println(path.Base("/api/users.json"), utf8.RuneCountInString("Go✓"))
+}
+`)
+
+	prog, err := LoadModule(vfs, "/proj", Options{})
+	if err != nil {
+		t.Fatalf("LoadModule: %v", err)
+	}
+	vm, out := newLoaderTestVM()
+	if err := RunProgram(context.Background(), vm, prog, "main"); err != nil {
+		t.Fatalf("RunProgram: %v", err)
+	}
+	if got, want := out.String(), "users.json 3\n"; got != want {
+		t.Fatalf("builtin package output = %q, want %q", got, want)
 	}
 }

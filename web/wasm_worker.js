@@ -8,12 +8,69 @@ let goReady = false;
 let _readyResolve;
 const _readyPromise = new Promise((resolve) => { _readyResolve = resolve; });
 
+// ---------------------------------------------------------------------------
+// Outbound message batching.
+//
+// Guest programs can emit thousands of `log` / `canvas-set` messages in a
+// tight loop (Game of Life paints every cell of every generation). One
+// postMessage per event means one structured clone + one main-thread task
+// per cell, which dominates total run time. High-frequency message types are
+// therefore buffered and shipped as a single `{type:'batch', items:[...]}`
+// message: on flush points (canvas-flush, run end), when the buffer is full,
+// or on the next microtask once the synchronous Go slice yields (covers
+// animated demos that time.Sleep between frames).
+// ---------------------------------------------------------------------------
+const BATCHABLE = { 'log': 1, 'warn': 1, 'canvas-set': 1, 'canvas-size': 1, 'canvas-flush': 1 };
+const BATCH_LIMIT = 2048;
+let _batch = [];
+let _batchScheduled = false;
+
+function flushBatch() {
+  _batchScheduled = false;
+  if (_batch.length === 0) return;
+  const items = _batch;
+  _batch = [];
+  if (items.length === 1) {
+    self.postMessage(items[0]);
+  } else {
+    self.postMessage({ type: 'batch', items: items });
+  }
+}
+
+function postFromGuest(msg) {
+  const t = msg && msg.type;
+  if (t && BATCHABLE[t]) {
+    _batch.push(msg);
+    if (t === 'canvas-flush' || _batch.length >= BATCH_LIMIT) {
+      flushBatch();
+    } else if (!_batchScheduled) {
+      _batchScheduled = true;
+      // Microtasks run whenever the Go scheduler yields to the event loop
+      // (time.Sleep, channel waits), so animations stay live while tight
+      // loops still coalesce into large batches.
+      Promise.resolve().then(flushBatch);
+    }
+    return;
+  }
+  // Low-frequency / ordering-sensitive messages (dom-*, error, alert…):
+  // flush pending batched output first to preserve global ordering.
+  flushBatch();
+  self.postMessage(msg);
+}
+
+// parseStats parses the JSON string a stats-aware WASM build returns from
+// nanoGoRun/nanoGoAst/nanoGoBench. Older builds return undefined -> null.
+function parseStats(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+
 self.onmessage = async function (ev) {
   const msg = ev.data;
   if (msg && msg.type === 'init') {
     try {
       await initWasmWorker();
-      self.postMessage({ type: 'ready' });
+      self.postMessage({ type: 'ready', capabilities: getCapabilities() });
     } catch (e) {
       self.postMessage({ type: 'error', text: 'WASM init failed: ' + (e && e.message ? e.message : String(e)) });
     }
@@ -34,6 +91,7 @@ self.onmessage = async function (ev) {
     }
     const t0 = Date.now();
     try {
+      let stats = null;
       if (msg.mode === 'deferred') {
         // Buffer all worker->host messages until the run completes,
         // then flush them in order. Wrap in try/finally so a thrown
@@ -43,18 +101,91 @@ self.onmessage = async function (ev) {
         const buffer = [];
         self.postMessage = function (m) { buffer.push(m); };
         try {
-          self.nanoGoRun(msg.source);
+          stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace));
         } finally {
+          flushBatch();
           self.postMessage = origPost;
           for (const m of buffer) { origPost.call(self, m); }
-          origPost.call(self, { type: 'done', elapsed: Date.now() - t0 });
+          origPost.call(self, { type: 'done', elapsed: Date.now() - t0, stats: stats });
         }
       } else {
-        self.nanoGoRun(msg.source);
-        self.postMessage({ type: 'done', elapsed: Date.now() - t0 });
+        stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace));
+        flushBatch();
+        self.postMessage({ type: 'done', elapsed: Date.now() - t0, stats: stats });
       }
     } catch (err) {
+      flushBatch();
       self.postMessage({ type: 'error', text: String(err) });
+    }
+    return;
+  }
+  if (msg && msg.type === 'ast') {
+    if (!goReady || typeof self.nanoGoAst !== 'function') {
+      self.postMessage({ type: 'ast-result', error: 'AST inspection not available in this WASM build' });
+      return;
+    }
+    try {
+      const res = parseStats(self.nanoGoAst(msg.source || ''));
+      if (!res) {
+        self.postMessage({ type: 'ast-result', error: 'AST inspection returned no data' });
+      } else if (res.error) {
+        self.postMessage({ type: 'ast-result', error: res.error });
+      } else {
+        self.postMessage({ type: 'ast-result', result: res });
+      }
+    } catch (e) {
+      self.postMessage({ type: 'ast-result', error: String(e) });
+    }
+    return;
+  }
+  if (msg && msg.type === 'callgraph') {
+    if (!goReady || typeof self.nanoGoCallGraph !== 'function') {
+      self.postMessage({ type: 'callgraph-result', error: 'call graph not available in this WASM build' });
+      return;
+    }
+    try {
+      const res = parseStats(self.nanoGoCallGraph(msg.source || ''));
+      if (!res) {
+        self.postMessage({ type: 'callgraph-result', error: 'call graph returned no data' });
+      } else if (res.error) {
+        self.postMessage({ type: 'callgraph-result', error: res.error });
+      } else {
+        self.postMessage({ type: 'callgraph-result', result: res });
+      }
+    } catch (e) {
+      self.postMessage({ type: 'callgraph-result', error: String(e) });
+    }
+    return;
+  }
+  if (msg && msg.type === 'bench') {
+    if (!goReady || typeof self.nanoGoBench !== 'function') {
+      self.postMessage({ type: 'bench-result', error: 'benchmark not available in this WASM build' });
+      return;
+    }
+    // Silence guest output while benchmarking: the same program runs many
+    // times and its prints/canvas writes would flood the host. Count what
+    // was suppressed so the UI can say so.
+    const origHook = self.nanoGoPostMessage;
+    let suppressed = 0;
+    self.nanoGoPostMessage = function (m) {
+      const t = m && m.type;
+      if (t === 'error') { origHook(m); return; }
+      suppressed++;
+    };
+    try {
+      const res = parseStats(self.nanoGoBench(msg.source || '', Number(msg.iterations) | 0));
+      if (!res) {
+        self.postMessage({ type: 'bench-result', error: 'benchmark returned no data' });
+      } else if (res.error) {
+        self.postMessage({ type: 'bench-result', error: res.error, result: res });
+      } else {
+        res.suppressedMessages = suppressed;
+        self.postMessage({ type: 'bench-result', result: res });
+      }
+    } catch (e) {
+      self.postMessage({ type: 'bench-result', error: String(e) });
+    } finally {
+      self.nanoGoPostMessage = origHook;
     }
     return;
   }
@@ -105,6 +236,22 @@ self.onmessage = async function (ev) {
   }
 };
 
+function getCapabilities() {
+  try {
+    if (typeof self.nanoGoVersion === 'function') {
+      const info = parseStats(self.nanoGoVersion());
+      if (info) return info;
+    }
+  } catch (e) {/*no-op*/}
+  return {
+    hasFormat: typeof self.nanoGoFormat === 'function',
+    hasVet: typeof self.nanoGoVet === 'function',
+    hasAst: typeof self.nanoGoAst === 'function',
+    hasCallGraph: typeof self.nanoGoCallGraph === 'function',
+    hasBench: typeof self.nanoGoBench === 'function'
+  };
+}
+
 async function initWasmWorker() {
   if (goReady) return;
   importScripts('wasm_exec.js');
@@ -116,7 +263,8 @@ async function initWasmWorker() {
     if (_readyResolve) { _readyResolve(); _readyResolve = null; }
   };
   // Hook for runtime to call to send structured messages to host.
-  self.nanoGoPostMessage = function (msg) { self.postMessage(msg); };
+  // Routed through the batching layer above.
+  self.nanoGoPostMessage = postFromGuest;
 
   // Prefer streaming instantiation: starts compilation while bytes are
   // still arriving and avoids buffering the full module in memory.
@@ -160,6 +308,9 @@ async function initWasmWorker() {
   self.nanoGoSetScale = self.nanoGoSetScale || self.globalThis?.nanoGoSetScale;
   self.nanoGoFormat   = self.nanoGoFormat   || self.globalThis?.nanoGoFormat;
   self.nanoGoVet      = self.nanoGoVet      || self.globalThis?.nanoGoVet;
+  self.nanoGoAst        = self.nanoGoAst        || self.globalThis?.nanoGoAst;
+  self.nanoGoCallGraph  = self.nanoGoCallGraph  || self.globalThis?.nanoGoCallGraph;
+  self.nanoGoBench      = self.nanoGoBench      || self.globalThis?.nanoGoBench;
   self.nanoGoVersion  = self.nanoGoVersion  || self.globalThis?.nanoGoVersion;
 
   if (typeof self.nanoGoRun !== 'function') {

@@ -1,5 +1,5 @@
 // Bump this when shell assets change: most local assets are served cache-first.
-const CACHE_NAME = 'nanogo-playground-ui-v2';
+const CACHE_NAME = 'nanogo-playground-ui-v7';
 const PRECACHE_URLS = [
   './',
   './index.html',
@@ -8,7 +8,6 @@ const PRECACHE_URLS = [
   './wasm_worker.js',
   './examples.js',
   './nanogo.wasm',
-  './app.js',
   './assets/logo.svg',
   'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css',
   'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js',
@@ -30,7 +29,6 @@ function isLocalAsset(url) {
     url.pathname.endsWith('/wasm_worker.js') ||
     url.pathname.endsWith('/examples.js') ||
     url.pathname.endsWith('/nanogo.wasm') ||
-    url.pathname.endsWith('/app.js') ||
     url.pathname.endsWith('/assets/logo.svg')
   );
 }

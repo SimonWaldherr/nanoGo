@@ -1308,6 +1308,27 @@ func main() {
 	}
 }
 
+func TestPathAndUTF8Packages(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+
+import (
+	"fmt"
+	"path"
+	"unicode/utf8"
+)
+
+func main() {
+	fmt.Println(path.Join("/api", "v1", "../users"))
+	fmt.Println(path.Base("/api/users.json"), path.Ext("/api/users.json"), path.IsAbs("/api"))
+	fmt.Println(utf8.RuneCountInString("Go✓"), utf8.RuneLen(0x2713), utf8.ValidString("Go✓"), utf8.ValidRune(0x2713))
+}
+`)
+	if got, want := out, "/api/users\nusers.json .json true\n3 3 true true\n"; got != want {
+		t.Fatalf("path/utf8 output = %q, want %q", got, want)
+	}
+}
+
 // --------------- multi-return error capture tests ---------------
 
 func TestMultiReturnErrorCapture(t *testing.T) {

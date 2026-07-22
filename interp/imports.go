@@ -21,6 +21,8 @@ var BuiltinImportPaths = map[string]bool{
 	"strings":       true,
 	"sort":          true,
 	"strconv":       true,
+	"path":          true,
+	"unicode/utf8":  true,
 	"sync":          true,
 	"regexp":        true,
 	"browser":       true,

@@ -85,3 +85,11 @@ func (vm *Interpreter) StepCount() uint64 {
 	}
 	return e.steps.Load()
 }
+
+// LastStepCount returns the final step counter of the most recently completed
+// execution, or 0 if this interpreter has never run. Unlike StepCount it works
+// after Run/RunContext has returned, so hosts (the WASM playground, CLIs) can
+// report the deterministic cost of the run they just performed.
+func (vm *Interpreter) LastStepCount() uint64 {
+	return vm.lastSteps.Load()
+}
