@@ -30,9 +30,14 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
-cli
-nanogo-cli
-nanogo-repl
+
+# Native build-output binaries produced at the repo root. These are anchored
+# with a leading "/" on purpose: an unanchored name like "cli" or "mcp" also
+# matches a *directory* of that name anywhere in the tree (e.g. cmd/cli,
+# cmd/mcp), which silently makes git ignore new source files added there.
+/cli
+/nanogo-cli
+/nanogo-repl
 
 # Build artifacts
 build/
@@ -41,5 +46,5 @@ build/
 web/nanogo.wasm
 web/nanogo.wasm.gz
 web/nanogo.wasm.br
-mcp
-wasm
+/mcp
+/wasm

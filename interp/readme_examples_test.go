@@ -12,11 +12,16 @@ func readmeGoExamples(t *testing.T) []string {
 	if err != nil {
 		t.Fatalf("read README: %v", err)
 	}
+	// Normalize line endings so the fence matching below works regardless of
+	// how the README was checked out. On Windows (git core.autocrlf=true) the
+	// working tree uses CRLF, which would otherwise leave a trailing "\r" on
+	// every line and stop "```go" fences from matching.
+	normalized := strings.ReplaceAll(string(contents), "\r\n", "\n")
 
 	var examples []string
 	var source strings.Builder
 	inGoBlock := false
-	for _, line := range strings.Split(string(contents), "\n") {
+	for _, line := range strings.Split(normalized, "\n") {
 		switch {
 		case line == "```go":
 			if inGoBlock {
