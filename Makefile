@@ -1,4 +1,4 @@
-.PHONY: all build-wasm build-wasm-compressed build-cli build-mcp build-repl run-demo clean test test-race vet fuzz benchmark benchmark-go profile-cpu profile-mem trace tidy size-report
+.PHONY: all build-wasm build-wasm-compressed build-cli build-mcp build-repl run-demo clean test test-race vet vet-wasm fmt-check fuzz benchmark benchmark-go profile-cpu profile-mem trace tidy size-report
 
 MODULE := simonwaldherr.de/go/nanogo
 
@@ -62,8 +62,24 @@ test-race:
 
 vet:
 	# cmd/wasm and runtime are js/wasm-only; vet the native packages here and
-	# validate the browser side separately through build-wasm.
+	# validate the browser side separately through build-wasm and vet-wasm.
 	go vet ./interp ./interp/loader ./interp/index ./cmd/cli ./cmd/mcp ./cmd/repl
+
+# Vet the js/wasm-only packages that `vet` cannot build for the host.
+vet-wasm:
+	GOOS=js GOARCH=wasm go vet ./cmd/wasm ./runtime
+
+# Fail if any tracked Go file is not gofmt-formatted. This runs clean on an
+# LF checkout (enforced by .gitattributes); on a stale CRLF working tree run
+# `git add --renormalize .` first so line endings do not create false hits.
+fmt-check:
+	@unformatted=$$(gofmt -l $$(git ls-files '*.go')); \
+	if [ -n "$$unformatted" ]; then \
+		echo "These files are not gofmt-formatted:"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi; \
+	echo "gofmt: all tracked Go files are formatted"
 
 # A short, reproducible coverage-guided fuzz pass. Run longer fuzz campaigns
 # in CI or locally with: go test ./interp -run '^$$' -fuzz=FuzzInterpreterNeverPanics -fuzztime=10m

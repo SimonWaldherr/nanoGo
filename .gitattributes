@@ -1,0 +1,17 @@
+# Normalize line endings. Store text as LF in the repository AND check it out
+# as LF in working trees on every platform, including Windows. This project's
+# tooling assumes LF: gofmt rewrites to LF, and text/line processing in tests
+# (e.g. the README-example extractor) splits on "\n". Without this, a Windows
+# checkout with core.autocrlf=true produces CRLF working trees, which makes
+# `gofmt -l` flag every file and previously broke a test.
+* text=auto eol=lf
+
+# Treat known binary artifacts as binary so git never applies EOL conversion
+# or diffs them as text (these are normally build outputs and git-ignored, but
+# be explicit in case one is ever force-added).
+*.wasm  binary
+*.gz    binary
+*.br    binary
+*.png   binary
+*.ico   binary
+*.pdf   binary

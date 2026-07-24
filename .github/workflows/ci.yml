@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Vet, test, and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          # This module has no external dependencies (no go.sum), so module
+          # caching would only add a "no go.sum found" warning.
+          cache: false
+
+      - name: Formatting (gofmt)
+        run: make fmt-check
+
+      - name: Static checks (go vet)
+        run: make vet
+
+      - name: Static checks (js/wasm)
+        run: make vet-wasm
+
+      - name: Unit tests
+        run: make test
+
+      - name: CLI tests
+        run: go test ./cmd/cli
+
+      - name: Race detector
+        run: make test-race
+
+      - name: Build native CLI
+        run: make build-cli
+
+      - name: Build MCP server
+        run: make build-mcp
+
+      - name: Build WebAssembly playground
+        run: make build-wasm
