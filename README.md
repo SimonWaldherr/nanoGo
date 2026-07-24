@@ -903,11 +903,16 @@ the core offline assets:
 - `wasm_worker.js`
 - `examples.js`
 - `nanogo.wasm`
+- `manifest.webmanifest`
+- `assets/logo.svg`
 - the CodeMirror CDN files
 
-That can improve repeat visits when the assets are already cached. When you
-change any of those assets, bump the
-`CACHE_NAME` in `web/sw.js` so clients refresh their cached copy immediately.
+That can improve repeat visits when the assets are already cached. The cache is
+versioned per deploy: the GitHub Pages workflow replaces the `__BUILD_ID__`
+token in `CACHE_NAME` with the commit SHA, so every deployment gets a distinct
+cache and returning visitors automatically pick up changed assets. For local
+development (served without that substitution), bump the `ui<N>` suffix in
+`web/sw.js`'s `CACHE_NAME` if you need to force a fresh cache.
 
 ## 🎯 Use Cases
 

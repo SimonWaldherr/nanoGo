@@ -1,0 +1,20 @@
+{
+  "name": "nanoGo — Go in the browser",
+  "short_name": "nanoGo",
+  "description": "A Go-subset interpreter compiled to WebAssembly. Write and run Go — goroutines, channels, tests and benchmarks — entirely in the browser, with no server and no local toolchain.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#080c14",
+  "theme_color": "#080c14",
+  "categories": ["developer", "education", "productivity"],
+  "icons": [
+    {
+      "src": "assets/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

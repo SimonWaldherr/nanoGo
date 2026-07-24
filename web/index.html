@@ -4,6 +4,37 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>nanoGo — Go in the browser</title>
+
+  <!-- Primary metadata: describes the page for search engines and link unfurls. -->
+  <meta name="description" content="nanoGo is a Go-subset interpreter compiled to WebAssembly. Write and run Go in your browser — goroutines, channels, a standard-library subset, tests and benchmarks — with no server and no local toolchain." />
+  <meta name="author" content="Simon Waldherr" />
+  <meta name="keywords" content="Go, Golang, WebAssembly, WASM, playground, interpreter, browser, goroutines, channels, sandbox" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="theme-color" content="#080c14" />
+  <link rel="canonical" href="https://simonwaldherr.github.io/nanoGo/" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="assets/logo.svg" />
+
+  <!-- Open Graph: controls how the page previews on Slack, Discord, LinkedIn, etc. -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="nanoGo" />
+  <meta property="og:title" content="nanoGo — run Go in your browser" />
+  <meta property="og:description" content="A Go-subset interpreter in WebAssembly. Edit and run Go — goroutines, channels, tests, benchmarks — entirely client-side." />
+  <meta property="og:url" content="https://simonwaldherr.github.io/nanoGo/" />
+  <meta property="og:image" content="https://simonwaldherr.github.io/nanoGo/assets/logo.svg" />
+
+  <!-- Twitter/X card -->
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="nanoGo — run Go in your browser" />
+  <meta name="twitter:description" content="A Go-subset interpreter in WebAssembly. Edit and run Go entirely client-side — no server, no toolchain." />
+  <meta name="twitter:image" content="https://simonwaldherr.github.io/nanoGo/assets/logo.svg" />
+
+  <!-- Installable PWA hints (a service worker is registered below). -->
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="nanoGo" />
+
   <link rel="icon" href="assets/logo.svg">
   <!-- CodeMirror powers syntax highlighting and the editor gutter. Its CSS
        loads before styles.css so the playground theme rules win the cascade;

@@ -1,5 +1,10 @@
-// Bump this when shell assets change: most local assets are served cache-first.
-const CACHE_NAME = 'nanogo-playground-ui-v20';
+// CACHE_NAME is versioned per deployment: the GitHub Pages workflow replaces
+// the __BUILD_ID__ token with the commit SHA (see
+// .github/workflows/deploy-pages.yml), so every deploy gets a distinct cache
+// and returning visitors never keep stale assets. When served without that
+// substitution (local dev), the literal token is a valid, stable name — bump
+// the "uiN" suffix if you need to force a fresh local cache.
+const CACHE_NAME = 'nanogo-playground-ui1-__BUILD_ID__';
 const PRECACHE_URLS = [
   './',
   './index.html',
@@ -8,6 +13,7 @@ const PRECACHE_URLS = [
   './wasm_worker.js',
   './examples.js',
   './nanogo.wasm',
+  './manifest.webmanifest',
   './assets/logo.svg',
   'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css',
   'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js',
@@ -29,6 +35,7 @@ function isLocalAsset(url) {
     url.pathname.endsWith('/wasm_worker.js') ||
     url.pathname.endsWith('/examples.js') ||
     url.pathname.endsWith('/nanogo.wasm') ||
+    url.pathname.endsWith('/manifest.webmanifest') ||
     url.pathname.endsWith('/assets/logo.svg')
   );
 }
