@@ -741,6 +741,171 @@ func main() {
   if grid[ty][tx] >= 0 { fmt.Println("route found in", grid[ty][tx], "steps") } else { fmt.Println("no route found") }
 }
 `,
+  "Julia Set": `package main
+
+import (
+  "browser"
+  "fmt"
+)
+
+func juliaSteps(zx float64, zy float64) int {
+  for step := 0; step < 56; step++ {
+    xx := zx*zx - zy*zy - 0.72
+    zy = 2*zx*zy + 0.18
+    zx = xx
+    if zx*zx+zy*zy > 9 { return step }
+  }
+  return 56
+}
+
+func main() {
+  w, h := 80, 48
+  fmt.Println("Julia set — fixed complex constant, 80 × 48 samples")
+  browser.CanvasSize(w, h)
+  for y := 0; y < h; y++ {
+    zy := float64(y)*2.5/float64(h) - 1.25
+    for x := 0; x < w; x++ {
+      zx := float64(x)*3.4/float64(w) - 1.7
+      depth := juliaSteps(zx, zy)
+      level := 0
+      if depth < 56 { level = 2 + depth%6 }
+      browser.CanvasSetLevel(x, y, level)
+    }
+  }
+  browser.CanvasFlush()
+  fmt.Println("done")
+}
+`,
+  "Rule 30": `package main
+
+import (
+  "browser"
+  "fmt"
+  "time"
+)
+
+func main() {
+  w, h := 64, 36
+  row := make([]int, w)
+  row[w/2] = 1
+  fmt.Println("Rule 30 — an elementary cellular automaton")
+  browser.CanvasSize(w, h)
+  for y := 0; y < h; y++ {
+    for x := 0; x < w; x++ {
+      if row[x] == 1 { browser.CanvasSetLevel(x, y, 2+y%6) }
+    }
+    browser.CanvasFlush()
+    next := make([]int, w)
+    for x := 0; x < w; x++ {
+      left, center, right := 0, row[x], 0
+      if x > 0 { left = row[x-1] }
+      if x < w-1 { right = row[x+1] }
+      if left == 1 {
+        if center == 0 && right == 0 { next[x] = 1 }
+      } else if center == 1 || right == 1 {
+        next[x] = 1
+      }
+    }
+    row = next
+    time.Sleep(34)
+  }
+  fmt.Println("done")
+}
+`,
+  "Knight's Tour": `package main
+
+import (
+  "browser"
+  "fmt"
+  "time"
+)
+
+func onward(board []int, x int, y int) int {
+  dx := []int{1, 2, 2, 1, -1, -2, -2, -1}
+  dy := []int{-2, -1, 1, 2, 2, 1, -1, -2}
+  count := 0
+  for i := 0; i < 8; i++ {
+    nx, ny := x+dx[i], y+dy[i]
+    if nx >= 0 && nx < 8 && ny >= 0 && ny < 8 {
+      if board[ny*8+nx] == 0 { count++ }
+    }
+  }
+  return count
+}
+
+func drawTour(board []int, px int, py int) {
+  for y := 0; y < 8; y++ {
+    for x := 0; x < 8; x++ {
+      level := 1 + (x+y)%2
+      if board[y*8+x] > 0 { level = 2 + board[y*8+x]%6 }
+      browser.CanvasSetLevel(x, y, level)
+    }
+  }
+  browser.CanvasSetLevel(px, py, 7)
+  browser.CanvasFlush()
+}
+
+func main() {
+  board := make([]int, 64)
+  dx := []int{1, 2, 2, 1, -1, -2, -2, -1}
+  dy := []int{-2, -1, 1, 2, 2, 1, -1, -2}
+  x, y := 0, 0
+  board[y*8+x] = 1
+  browser.CanvasSize(8, 8)
+  fmt.Println("Knight's tour — Warnsdorff's heuristic")
+  for step := 2; step <= 64; step++ {
+    best, bestScore := -1, 9
+    for move := 0; move < 8; move++ {
+      nx, ny := x+dx[move], y+dy[move]
+      if nx >= 0 && nx < 8 && ny >= 0 && ny < 8 {
+        if board[ny*8+nx] == 0 {
+          score := onward(board, nx, ny)
+          if score < bestScore { best, bestScore = move, score }
+        }
+      }
+    }
+    if best < 0 { break }
+    x, y = x+dx[best], y+dy[best]
+    board[y*8+x] = step
+    drawTour(board, x, y)
+    time.Sleep(45)
+  }
+  fmt.Println("done")
+}
+`,
+  "Metaballs": `package main
+
+import (
+  "browser"
+  "fmt"
+  "time"
+)
+
+func main() {
+  w, h := 56, 32
+  browser.CanvasSize(w, h)
+  fmt.Println("Metaballs — additive distance fields")
+  for frame := 0; frame < 48; frame++ {
+    ax, ay := 12+frame%24, 8+(frame*3)%14
+    bx, by := 42-(frame*2)%24, 22-(frame*5)%14
+    for y := 0; y < h; y++ {
+      for x := 0; x < w; x++ {
+        da := (x-ax)*(x-ax) + (y-ay)*(y-ay)
+        db := (x-bx)*(x-bx) + (y-by)*(y-by)
+        level := 0
+        if da+db < 430 { level = 2 }
+        if da+db < 260 { level = 4 }
+        if da+db < 150 { level = 6 }
+        if da < 16 || db < 16 { level = 7 }
+        browser.CanvasSetLevel(x, y, level)
+      }
+    }
+    browser.CanvasFlush()
+    time.Sleep(30)
+  }
+  fmt.Println("done")
+}
+`,
   "HTTP Client GET": `package main
 
 import (

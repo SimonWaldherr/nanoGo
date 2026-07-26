@@ -396,7 +396,11 @@ Select an example from the sidebar to get started! 🚀</div>
         'Lissajous Curve': { output: 'canvas', description: 'Animated parametric sine curve with palette levels', badge: 'Math', tags: ['Math', 'Animation', 'Graphics'] },
         'Fireworks': { output: 'canvas', description: 'A deterministic color particle explosion', badge: 'Animation', tags: ['Animation', 'Graphics', 'Math'] },
         'Wave Interference': { output: 'canvas', description: 'Two animated sine waves painted as a color field', badge: 'Math', tags: ['Math', 'Animation', 'Graphics'] },
-        'Pathfinding Wave': { output: 'canvas', description: 'Animated breadth-first search over a generated maze', badge: 'Algorithms', tags: ['Algorithms', 'Animation', 'Simulation', 'Graphics'] }
+        'Pathfinding Wave': { output: 'canvas', description: 'Animated breadth-first search over a generated maze', badge: 'Algorithms', tags: ['Algorithms', 'Animation', 'Simulation', 'Graphics'] },
+        'Julia Set': { output: 'canvas', description: 'A second escape-time fractal with a fixed complex constant', badge: 'Math', tags: ['Math', 'Graphics', 'Algorithms'] },
+        'Rule 30': { output: 'canvas', description: 'An elementary cellular automaton growing row by row', badge: 'Simulation', tags: ['Simulation', 'Animation', 'Graphics', 'Algorithms'] },
+        "Knight's Tour": { output: 'canvas', description: 'Warnsdorff-guided knight traversal of a chessboard', badge: 'Algorithms', tags: ['Algorithms', 'Animation', 'Graphics'] },
+        'Metaballs': { output: 'canvas', description: 'Moving additive distance fields with palette shading', badge: 'Graphics', tags: ['Graphics', 'Animation', 'Math', 'Simulation'] }
         , 'HTTP Client GET': { output: 'console', description: 'GET JSON and display a response snippet', badge: 'Web' }
         , 'HTTP Client POST': { output: 'console', description: 'POST JSON with response and CORS error handling', badge: 'Web' }
         , 'HTTP Client Errors': { output: 'console', description: 'Handle a non-2xx HTTP response with text, err', badge: 'Web' }
@@ -430,7 +434,7 @@ Select an example from the sidebar to get started! 🚀</div>
         if (examplesLoadPromise) return examplesLoadPromise;
         examplesLoadPromise = new Promise((resolve, reject) => {
           const script = document.createElement('script');
-          script.src = 'examples.js?7';
+          script.src = 'examples.js?8';
           script.async = true;
           script.dataset.nanogoExamples = 'true';
           script.onload = () => {
@@ -439,7 +443,7 @@ Select an example from the sidebar to get started! 🚀</div>
           };
           script.onerror = () => {
             examplesLoadPromise = null;
-            reject(new Error('Failed to load examples.js?7'));
+            reject(new Error('Failed to load examples.js?8'));
           };
           document.body.appendChild(script);
         });
@@ -619,6 +623,22 @@ Select an example from the sidebar to get started! 🚀</div>
         , 'Pathfinding Wave': `
           <p><strong>Pathfinding Wave</strong></p>
           <p>Breadth-first search expands a distance wave through deterministic obstacles. Colors encode walls, frontier distance, start, and goal.</p>
+        `
+        , 'Julia Set': `
+          <p><strong>Julia Set</strong></p>
+          <p>The same escape-time technique as Mandelbrot, but each pixel starts as <code>z</code> while the complex constant stays fixed. The result is a distinctly different bitmap fractal.</p>
+        `
+        , 'Rule 30': `
+          <p><strong>Rule 30</strong></p>
+          <p>Each new row is determined solely by three cells above it. This compact cellular automaton produces a surprisingly asymmetric, chaotic pattern from a single seed.</p>
+        `
+        , "Knight's Tour": `
+          <p><strong>Knight's Tour</strong></p>
+          <p>Warnsdorff’s heuristic chooses the next square with the fewest onward moves. The board gradually fills to make a classic graph-traversal problem visible.</p>
+        `
+        , 'Metaballs': `
+          <p><strong>Metaballs</strong></p>
+          <p>Two moving points contribute squared-distance fields. Thresholds turn their sum into soft-looking, merging colored blobs without requiring pixel images.</p>
         `
         , 'HTTP Client GET': `
           <p><strong>HTTP Client: GET</strong></p>
