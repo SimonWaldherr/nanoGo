@@ -588,6 +588,159 @@ func main() {
   fmt.Println("sorted:", values)
 }
 `,
+  "Lissajous Curve": `package main
+
+import (
+  "browser"
+  "fmt"
+  "math"
+  "time"
+)
+
+func main() {
+  w, h := 64, 36
+  browser.CanvasSize(w, h)
+  fmt.Println("Lissajous curve — 54 animated phases")
+  for phase := 0; phase < 54; phase++ {
+    for y := 0; y < h; y++ {
+      for x := 0; x < w; x++ { browser.CanvasSetLevel(x, y, 0) }
+    }
+    for i := 0; i < 220; i++ {
+      t := float64(i) * math.Pi * 2 / 220
+      x := w/2 + int(math.Sin(3*t+float64(phase)*0.12)*float64(w/2-3))
+      y := h/2 + int(math.Sin(2*t+float64(phase)*0.17)*float64(h/2-3))
+      browser.CanvasSetLevel(x, y, 2+(i+phase)%6)
+    }
+    browser.CanvasFlush()
+    time.Sleep(28)
+  }
+  fmt.Println("done")
+}
+`,
+  "Fireworks": `package main
+
+import (
+  "browser"
+  "fmt"
+  "time"
+)
+
+func main() {
+  w, h := 56, 32
+  browser.CanvasSize(w, h)
+  fmt.Println("Fireworks — deterministic particle burst")
+  for frame := 0; frame < 48; frame++ {
+    for y := 0; y < h; y++ {
+      for x := 0; x < w; x++ { browser.CanvasSetLevel(x, y, 0) }
+    }
+    for particle := 0; particle < 56; particle++ {
+      vx := particle%9 - 4
+      vy := particle/9 - 3
+      x := w/2 + vx*frame/4
+      y := h/2 + vy*frame/5 + frame*frame/110
+      if x >= 0 && x < w && y >= 0 && y < h {
+        browser.CanvasSetLevel(x, y, 2+(particle+frame/4)%6)
+        if frame < 22 { browser.CanvasSetLevel(w/2+vx*(frame-1)/4, h/2+vy*(frame-1)/5+(frame-1)*(frame-1)/110, 1) }
+      }
+    }
+    browser.CanvasFlush()
+    time.Sleep(30)
+  }
+  fmt.Println("done")
+}
+`,
+  "Wave Interference": `package main
+
+import (
+  "browser"
+  "fmt"
+  "math"
+  "time"
+)
+
+func main() {
+  w, h := 48, 28
+  browser.CanvasSize(w, h)
+  fmt.Println("Wave interference — two moving sources")
+  for frame := 0; frame < 30; frame++ {
+    for y := 0; y < h; y++ {
+      for x := 0; x < w; x++ {
+        a := math.Sin(float64(x)*0.23 + float64(y)*0.17 + float64(frame)*0.16)
+        b := math.Sin(float64(x)*0.11 - float64(y)*0.29 - float64(frame)*0.11)
+        level := 2 + int((a+b+2)*1.25)
+        browser.CanvasSetLevel(x, y, level)
+      }
+    }
+    browser.CanvasFlush()
+    time.Sleep(26)
+  }
+  fmt.Println("done")
+}
+`,
+  "Pathfinding Wave": `package main
+
+import (
+  "browser"
+  "fmt"
+  "time"
+)
+
+func visit(grid [][]int, queue []int, x int, y int, nx int, ny int) []int {
+  if nx >= 0 && nx < len(grid[0]) && ny >= 0 && ny < len(grid) && grid[ny][nx] == -1 {
+    grid[ny][nx] = grid[y][x] + 1
+    queue = append(queue, nx)
+    queue = append(queue, ny)
+  }
+  return queue
+}
+
+func draw(grid [][]int, sx int, sy int, tx int, ty int) {
+  for y := 0; y < len(grid); y++ {
+    for x := 0; x < len(grid[y]); x++ {
+      level := 0
+      if grid[y][x] == -2 { level = 1 }
+      if grid[y][x] >= 0 { level = 2 + grid[y][x]%6 }
+      browser.CanvasSetLevel(x, y, level)
+    }
+  }
+  browser.CanvasSetLevel(sx, sy, 7)
+  browser.CanvasSetLevel(tx, ty, 7)
+  browser.CanvasFlush()
+}
+
+func main() {
+  w, h := 32, 20
+  sx, sy, tx, ty := 1, 1, w-2, h-2
+  grid := make([][]int, h)
+  for y := 0; y < h; y++ {
+    grid[y] = make([]int, w)
+    for x := 0; x < w; x++ {
+      grid[y][x] = -1
+      if x == 0 || y == 0 || x == w-1 || y == h-1 || (x*11+y*7+x*y)%17 < 3 { grid[y][x] = -2 }
+    }
+  }
+  grid[sy][sx] = 0
+  grid[ty][tx] = -1
+  queue := []int{sx, sy}
+  fmt.Println("Pathfinding wave — breadth-first search")
+  browser.CanvasSize(w, h)
+  for head := 0; head < len(queue); head += 2 {
+    x := queue[head]
+    y := queue[head+1]
+    queue = visit(grid, queue, x, y, x+1, y)
+    queue = visit(grid, queue, x, y, x-1, y)
+    queue = visit(grid, queue, x, y, x, y+1)
+    queue = visit(grid, queue, x, y, x, y-1)
+    if head%10 == 0 {
+      draw(grid, sx, sy, tx, ty)
+      time.Sleep(30)
+    }
+    if grid[ty][tx] >= 0 { break }
+  }
+  draw(grid, sx, sy, tx, ty)
+  if grid[ty][tx] >= 0 { fmt.Println("route found in", grid[ty][tx], "steps") } else { fmt.Println("no route found") }
+}
+`,
   "HTTP Client GET": `package main
 
 import (

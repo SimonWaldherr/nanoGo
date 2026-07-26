@@ -392,7 +392,11 @@ Select an example from the sidebar to get started! 🚀</div>
         'Scanner': { output: 'canvas', description: 'Sweeping scanner with pulsing targets', badge: 'Animation', tags: ['Animation', 'Graphics', 'Simulation'] },
         'Mandelbrot Set': { output: 'canvas', description: 'Escape-time fractal using floating-point arithmetic', badge: 'Graphics', tags: ['Graphics', 'Math', 'Algorithms'] },
         "Langton's Ant": { output: 'canvas', description: 'Rule-driven cellular path with animated frames', badge: 'Simulation', tags: ['Simulation', 'Animation', 'Graphics', 'Algorithms'] },
-        'Sorting Visualizer': { output: 'canvas', description: 'Animated bubble-sort passes rendered as bars', badge: 'Algorithms', tags: ['Algorithms', 'Animation', 'Graphics'] }
+        'Sorting Visualizer': { output: 'canvas', description: 'Animated bubble-sort passes rendered as bars', badge: 'Algorithms', tags: ['Algorithms', 'Animation', 'Graphics'] },
+        'Lissajous Curve': { output: 'canvas', description: 'Animated parametric sine curve with palette levels', badge: 'Math', tags: ['Math', 'Animation', 'Graphics'] },
+        'Fireworks': { output: 'canvas', description: 'A deterministic color particle explosion', badge: 'Animation', tags: ['Animation', 'Graphics', 'Math'] },
+        'Wave Interference': { output: 'canvas', description: 'Two animated sine waves painted as a color field', badge: 'Math', tags: ['Math', 'Animation', 'Graphics'] },
+        'Pathfinding Wave': { output: 'canvas', description: 'Animated breadth-first search over a generated maze', badge: 'Algorithms', tags: ['Algorithms', 'Animation', 'Simulation', 'Graphics'] }
         , 'HTTP Client GET': { output: 'console', description: 'GET JSON and display a response snippet', badge: 'Web' }
         , 'HTTP Client POST': { output: 'console', description: 'POST JSON with response and CORS error handling', badge: 'Web' }
         , 'HTTP Client Errors': { output: 'console', description: 'Handle a non-2xx HTTP response with text, err', badge: 'Web' }
@@ -426,7 +430,7 @@ Select an example from the sidebar to get started! 🚀</div>
         if (examplesLoadPromise) return examplesLoadPromise;
         examplesLoadPromise = new Promise((resolve, reject) => {
           const script = document.createElement('script');
-          script.src = 'examples.js?6';
+          script.src = 'examples.js?7';
           script.async = true;
           script.dataset.nanogoExamples = 'true';
           script.onload = () => {
@@ -435,7 +439,7 @@ Select an example from the sidebar to get started! 🚀</div>
           };
           script.onerror = () => {
             examplesLoadPromise = null;
-            reject(new Error('Failed to load examples.js?6'));
+            reject(new Error('Failed to load examples.js?7'));
           };
           document.body.appendChild(script);
         });
@@ -599,6 +603,22 @@ Select an example from the sidebar to get started! 🚀</div>
         , 'Sorting Visualizer': `
           <p><strong>Sorting Visualizer</strong></p>
           <p>Bubble sort updates an integer bar chart after each pass, connecting a classic algorithm with visible intermediate state.</p>
+        `
+        , 'Lissajous Curve': `
+          <p><strong>Lissajous Curve</strong></p>
+          <p>Two sine oscillators with a slowly changing phase create a smooth parametric curve. Palette levels make the curve's traversal visible.</p>
+        `
+        , 'Fireworks': `
+          <p><strong>Fireworks</strong></p>
+          <p>A deterministic burst uses simple integer velocity and gravity equations. Each particle receives one of the canvas palette levels.</p>
+        `
+        , 'Wave Interference': `
+          <p><strong>Wave Interference</strong></p>
+          <p>Two moving sine waves combine into a color field. It is a compact demonstration of superposition and palette-based rendering.</p>
+        `
+        , 'Pathfinding Wave': `
+          <p><strong>Pathfinding Wave</strong></p>
+          <p>Breadth-first search expands a distance wave through deterministic obstacles. Colors encode walls, frontier distance, start, and goal.</p>
         `
         , 'HTTP Client GET': `
           <p><strong>HTTP Client: GET</strong></p>
