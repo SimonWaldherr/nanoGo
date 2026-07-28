@@ -87,6 +87,23 @@ func zeroValue(typ string) any {
 	}
 }
 
+// coerceToType widens an untyped int literal's evaluated Go value to a
+// declared float64 type, mirroring Go's implicit conversion of an untyped
+// int constant to a float64 variable or struct field (e.g. `var x float64 =
+// 3` or `Rect{W: 3}` with `W float64`). nanoGo has no static type checker,
+// so without this a declared-float64 binding stays a plain Go int whenever
+// it is only ever initialized with integer-looking literals, silently
+// turning later arithmetic (and any /-division on it) back into int math.
+// Every other combination is returned unchanged.
+func coerceToType(val any, typ string) any {
+	if typ == "float64" {
+		if i, ok := val.(int); ok {
+			return float64(i)
+		}
+	}
+	return val
+}
+
 // --------------- Builtins -----------------------
 
 func (vm *Interpreter) builtinMake(typ string, args []any) (any, error) {

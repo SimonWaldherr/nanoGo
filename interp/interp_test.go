@@ -96,6 +96,48 @@ func main() {
 	}
 }
 
+// TestIntegerDivisionTruncates guards against a regression where the '/'
+// operator always performed float64 division regardless of operand types,
+// silently breaking any int arithmetic that divides (midpoints, averages,
+// pagination, ...) with no visible error — `7 / 2` printed "3.5" instead of
+// Go's "3". Division must match Go's int/int truncation-toward-zero, while
+// still promoting to float64 division when either operand is float64.
+func TestIntegerDivisionTruncates(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	a, b := 7, 2
+	fmt.Println(a / b)
+	fmt.Println(-7 / 2)
+	var x float64 = 7
+	fmt.Println(x / 2)
+	fmt.Println(7.0 / 2)
+}
+`)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	expected := []string{"3", "-3", "3.5", "3.5"}
+	for i, want := range expected {
+		if i >= len(lines) || strings.TrimSpace(lines[i]) != want {
+			t.Errorf("line %d: want %q, got %q", i, want, safeIndex(lines, i))
+		}
+	}
+}
+
+func TestIntegerDivisionByZero(t *testing.T) {
+	vm, _ := newTestVM()
+	err := vm.Run(`
+package main
+func main() {
+	a, b := 1, 0
+	_ = a / b
+}
+`)
+	if err == nil {
+		t.Fatal("expected an error for integer division by zero")
+	}
+}
+
 func TestIntegerBindingCanChangeToDynamicValue(t *testing.T) {
 	out := runAndCapture(t, `
 package main

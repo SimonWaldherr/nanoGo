@@ -1285,6 +1285,9 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 						if err != nil {
 							return controlFlow{}, err
 						}
+						if vs.Type != nil {
+							v = coerceToType(v, typeString(vs.Type))
+						}
 						val = v
 					} else {
 						val = zeroValue(typeString(vs.Type))
@@ -2003,10 +2006,16 @@ func (vm *Interpreter) applyBinaryOp(op token.Token, left, right any) (any, erro
 		}
 		return ToInt(left) * ToInt(right), nil
 	case token.QUO:
-		if ToFloat(right) == 0 {
-			return nil, NewRuntimeError("division by zero")
+		if _, ok := left.(float64); ok || isFloat(right) {
+			if ToFloat(right) == 0 {
+				return nil, NewRuntimeError("division by zero")
+			}
+			return ToFloat(left) / ToFloat(right), nil
 		}
-		return ToFloat(left) / ToFloat(right), nil
+		if ToInt(right) == 0 {
+			return nil, NewRuntimeError("integer divide by zero")
+		}
+		return ToInt(left) / ToInt(right), nil
 	case token.REM:
 		if ToInt(right) == 0 {
 			return nil, NewRuntimeError("integer divide by zero")
