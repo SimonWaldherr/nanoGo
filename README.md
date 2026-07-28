@@ -78,6 +78,132 @@ make build-cli
 make run-demo
 ```
 
+### Use nanoGo as a Go library in your own project
+
+nanoGo is a normal Go module (`simonwaldherr.de/go/nanogo`) — add it with `go
+get` and import the interpreter package directly, no separate service or
+build step required:
+
+```bash
+go get simonwaldherr.de/go/nanogo
+```
+
+```go
+import "simonwaldherr.de/go/nanogo/interp"
+```
+
+The shortest complete example — an interpreter, the two natives `fmt`
+needs, and one guest program — lives in
+[examples/quickstart](examples/quickstart):
+
+```bash
+go run ./examples/quickstart
+```
+
+For the single most common real-world embedding — running untrusted guest
+snippets inside a `net/http` handler, one isolated interpreter per request,
+with a request-scoped timeout and deterministic step/goroutine limits — see
+[examples/http_server](examples/http_server):
+
+```bash
+go run ./examples/http_server
+```
+
+The rest of this document covers progressively more advanced host
+integrations (host channels, request context, capabilities, VFS mounts,
+tracing); see the "🔌 Embedding nanoGo in Other Applications" section below
+for embedding the *browser playground* itself in another web page.
+
+## 🔌 Embedding nanoGo in Other Applications
+
+nanoGo is meant to be embedded, not just visited. Three integration paths
+are supported, from "drop an iframe into a blog post" to "build your own
+frontend from scratch":
+
+### 1. Embed the playground as an `<iframe>`
+
+The playground reads its initial state entirely from the URL, so embedding
+it needs no build step and no server-side code — just an `<iframe src="...">`:
+
+```html
+<iframe
+  src="https://simonwaldherr.github.io/nanoGo/?embed=1&autorun=1#code=BASE64_ENCODED_GO_SOURCE"
+  width="640" height="420" loading="lazy" title="nanoGo playground">
+</iframe>
+```
+
+Query-string options (combine freely):
+
+| Param | Effect |
+|---|---|
+| `embed=1` | Compact, iframe-friendly layout: sidebar, promo panel, and the advanced inspector are hidden; only the editor and one output panel remain. An "Open in nanoGo ↗" link appears so a visitor can pop out to the full playground with the same code. |
+| `autorun=1` | Runs the code automatically once WebAssembly finishes loading. |
+| `readonly=1` | Makes the editor read-only (`CodeMirror`'s `nocursor` mode) — useful for "here's the output" embeds where the visitor shouldn't edit the snippet. |
+| `example=Name` | Preloads a built-in example by its exact name (e.g. `example=FizzBuzz`) instead of a `#code=` payload. |
+| `theme=name` | Sets the initial color theme (`dark`, `light`, `solar`, `dracula`, `sepia`, `monokai`, `ocean`, `forest`, `midnight`, `pastel`, `high-contrast`). |
+| `#code=<base64>` | The editor's initial source, base64-encoded UTF-8 (`btoa(unescape(encodeURIComponent(source)))` in JS). Takes priority over `example=` when both are present. Lives in the hash, not the query string, so it never hits the server in a request log. |
+
+The playground's header has a **🔗 Embed** button that generates this
+`<iframe>` snippet (with `autorun`/`readonly` toggles) from whatever code is
+currently in the editor, plus a **📤 Share** button for a plain link.
+
+### 2. Control an embedded playground with `postMessage`
+
+A page hosting the playground in an `<iframe>` can drive it and observe its
+output without touching the iframe's DOM, via `window.postMessage`. No
+origin allowlist is enforced on either side — like other embeddable widgets
+(YouTube, CodeSandbox), the channel only ever affects the widget's own
+editor/run state, never host page data — so restricting it, if you need to,
+is left to your own `event.origin` check.
+
+Outgoing (playground → `window.parent`):
+
+| Message | When |
+|---|---|
+| `{type:'nanogo:ready'}` | WebAssembly finished loading; safe to send commands. |
+| `{type:'nanogo:output', text, kind}` | One per console line. `kind` is `output`, `warn`, `error`, or `system`. |
+| `{type:'nanogo:done', elapsed, stats}` | A run finished. `stats` mirrors the Inspector's `{elapsedMs, steps, ...}`. |
+
+Incoming (your page → the iframe's `contentWindow`):
+
+| Message | Effect |
+|---|---|
+| `{type:'nanogo:set-code', code}` | Replaces the editor's contents. |
+| `{type:'nanogo:run'}` | Starts a run, as if the Run button was clicked. |
+| `{type:'nanogo:stop'}` | Stops the running program. |
+
+```html
+<iframe id="ng" src="https://simonwaldherr.github.io/nanoGo/?embed=1" width="640" height="420"></iframe>
+<script>
+  const frame = document.getElementById('ng');
+  window.addEventListener('message', (event) => {
+    if (event.data?.type === 'nanogo:ready') {
+      frame.contentWindow.postMessage({ type: 'nanogo:set-code', code: 'package main\nimport "fmt"\nfunc main() { fmt.Println("hi from the host page") }' }, '*');
+      frame.contentWindow.postMessage({ type: 'nanogo:run' }, '*');
+    }
+    if (event.data?.type === 'nanogo:output') console.log('[nanogo]', event.data.text);
+  });
+</script>
+```
+
+### 3. Build your own frontend from scratch
+
+The production playground (`web/index.html`) is a full-featured, ~2000-line
+CodeMirror-based editor — more than most integrations need to read through
+just to learn the WASM worker's message protocol. [web/minimal.html](web/minimal.html)
+and [web/app.js](web/app.js) are a from-scratch, framework-free reference
+frontend (a plain `<textarea>`, a handful of buttons, no CDN dependency)
+that implements the same protocol in well under 300 lines — a copyable
+starting point for a custom UI. Build the WASM module once (`make
+build-wasm`), then serve `web/` and open `minimal.html`.
+
+The one non-obvious detail either reference implementation needs to get
+right: `wasm_worker.js` coalesces high-frequency messages (console lines,
+canvas updates) into `{type:'batch', items:[...]}` so a tight guest loop
+costs one `postMessage` instead of thousands. A frontend that only handles
+individual message types — without unwrapping `batch` first — will see
+almost no output from anything that logs or draws in a loop.
+
 ## 🤖 MCP Server for AI Coding Clients
 
 `nanogo-mcp` turns nanoGo into a **safe, temporary Go workspace for an MCP
@@ -189,16 +315,21 @@ proxy before exposing it beyond that.
 ```
 nanoGo/
 ├── cmd/
+│   ├── cli/        # Native CLI interpreter
 │   ├── mcp/        # MCP server for AI coding clients
-│   ├── wasm/       # WebAssembly build for browser
-│   └── repl/       # Interactive REPL
+│   ├── repl/       # Interactive REPL
+│   └── wasm/       # WebAssembly build for the browser
+├── examples/       # Runnable Go-embedding examples (quickstart, http_server, ...)
 ├── interp/         # Go interpreter implementation
 ├── runtime/        # Runtime support (browser APIs, stdlib)
 ├── samples/        # Example Go programs
 └── web/            # Web playground frontend
-    ├── index.html
-    ├── app.js
-    └── nanogo.wasm
+    ├── index.html      # Full-featured playground (CodeMirror, inspector, themes)
+    ├── minimal.html     # From-scratch reference frontend, paired with app.js
+    ├── app.js           # ...its ~300-line vanilla-JS controller
+    ├── examples.js      # Source for every built-in playground example
+    ├── wasm_worker.js   # Web Worker hosting the WASM interpreter
+    └── nanogo.wasm      # Built by `make build-wasm` (not checked in)
 ```
 
 ## 📖 Usage Examples

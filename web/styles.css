@@ -147,6 +147,46 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .theme-option .swatch { width: 24px; height: 24px; margin-right: 8px; border-radius: 6px; }
 .theme-option .label { font-size: 12px; }
 
+/* Share & Embed popup — reuses .theme-popup's positioning/box but needs a
+   column layout instead of the theme grid. */
+.embed-popup { display: none; width: min(360px, calc(100vw - 28px)); }
+.embed-popup[aria-hidden="false"] { display: block; }
+.embed-popup-title { margin: 2px 2px 2px; font-size: 13px; font-weight: 700; }
+.embed-popup-sub { margin: 0 2px 10px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.embed-options { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 2px 10px; }
+.embed-option { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 12px; cursor: pointer; }
+.embed-snippet { width: 100%; margin-bottom: 8px; padding: 8px 9px; border: 1px solid var(--border); border-radius: 8px; resize: vertical; background: var(--code-bg); color: var(--text-muted); font-family: var(--mono); font-size: 11px; line-height: 1.5; }
+.embed-popup-actions { display: flex; gap: 8px; margin-bottom: 10px; }
+.embed-popup-hint { margin: 0 2px; color: var(--text-dim); font-size: 10.5px; line-height: 1.5; }
+.embed-popup-hint code { padding: 1px 4px; border-radius: 4px; background: var(--code-bg); color: var(--accent-hover); font-family: var(--mono); }
+.embed-popout-link { display: none; }
+
+/* Embed mode (?embed=1): a compact, iframe-friendly layout — sidebar,
+   promo panel, and the advanced inspector go away; only the editor and a
+   single output panel remain, stacked in one column so it stays readable
+   at typical embed widths (a few hundred px tall in a blog post). */
+body.mode-embed .sidebar,
+body.mode-embed .practice-panel,
+body.mode-embed .header-link:not(.embed-popout-link),
+body.mode-embed #shareBtn,
+body.mode-embed #embedBtn,
+body.mode-embed #downloadBtn,
+body.mode-embed .upload-control,
+body.mode-embed #vetBtn,
+body.mode-embed #inspectBtn,
+body.mode-embed .output-tab[data-output="inspector"],
+body.mode-embed .brand-subtitle {
+  display: none;
+}
+body.mode-embed .embed-popout-link { display: inline-flex; }
+body.mode-embed .main { grid-template-columns: 1fr; padding: 12px; gap: 10px; }
+body.mode-embed .header-content { min-height: 48px; padding: 8px 12px; }
+body.mode-embed .output-section { grid-column: auto; }
+body.mode-embed .editor-container, body.mode-embed .CodeMirror, body.mode-embed .CodeMirror-scroll, body.mode-embed #src { min-height: 260px; height: 260px; }
+body.mode-embed .output-panel.active { min-height: 180px; }
+body.mode-embed #log { height: min(40vh, 260px); }
+body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; }
+
 .main {
   display: grid;
   grid-template-columns: minmax(240px, 292px) minmax(480px, 1fr) minmax(280px, 360px);
@@ -211,6 +251,11 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .tag-btn.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 20%, var(--surface-raised)); color: var(--accent-hover); }
 
 .examples-list { max-height: min(58vh, 570px); overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; border-top: 1px solid var(--border); }
+/* Category headers shown when browsing the full unfiltered list (see
+   showGroups in fillExamples) — sticky so the current category stays
+   visible while scrolling a list of 50+ demos. */
+.example-group-header { position: sticky; top: 0; z-index: 1; padding: 7px 13px 6px; background: color-mix(in srgb, var(--surface-raised) 96%, transparent); backdrop-filter: blur(6px); color: var(--text-dim); font-size: 10.5px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent); }
+.example-group-header:first-child { border-top: 0; }
 .example-item { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 8px; padding: 11px 13px; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent); border-radius: 0; background: transparent; text-align: left; }
 .example-item:hover { background: var(--surface-raised); }
 .example-item.active { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 24%, var(--surface)), var(--surface-raised)); box-shadow: inset 3px 0 var(--accent), inset 0 1px color-mix(in srgb, var(--accent) 14%, transparent); }

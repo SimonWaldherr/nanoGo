@@ -1371,4 +1371,176 @@ func main() {
   for result := range results { total += result }
   fmt.Println("result total:", total)
 }
+`,"Select Statement": `package main
+
+import (
+  "fmt"
+  "time"
+)
+
+func worker(id int, delayMs int, out chan string) {
+  time.Sleep(delayMs)
+  out <- fmt.Sprintf("worker %d finished", id)
+}
+
+func main() {
+  fmt.Println("select demo: multiplexing channels with a timeout")
+  a := make(chan string, 1)
+  b := make(chan string, 1)
+  go worker(1, 30, a)
+  go worker(2, 400, b)
+
+  for i := 0; i < 2; i++ {
+    timeout := time.NewTimer(150)
+    select {
+    case msg := <-a:
+      fmt.Println("a:", msg)
+      timeout.Stop()
+    case msg := <-b:
+      fmt.Println("b:", msg)
+      timeout.Stop()
+    case <-timeout.C:
+      fmt.Println("timeout: no worker replied in time")
+    }
+  }
+
+  select {
+  case msg := <-a:
+    fmt.Println("late a:", msg)
+  default:
+    fmt.Println("a has nothing buffered right now")
+  }
+}
+`,"Interfaces & Polymorphism": `package main
+
+import "fmt"
+
+type Shape interface {
+  Area() float64
+  Name() string
+}
+
+type Circle struct{ Radius float64 }
+func (c Circle) Area() float64 { return 3.14159 * c.Radius * c.Radius }
+func (c Circle) Name() string  { return "circle" }
+
+type Rectangle struct{ Width, Height float64 }
+func (r Rectangle) Area() float64 { return r.Width * r.Height }
+func (r Rectangle) Name() string  { return "rectangle" }
+
+func describe(s Shape) {
+  fmt.Printf("%s has area %.2f\\n", s.Name(), s.Area())
+}
+
+func main() {
+  fmt.Println("Interfaces & polymorphism demo")
+  shapes := []Shape{
+    Circle{Radius: 2.0},
+    Rectangle{Width: 3.0, Height: 4.0},
+    Circle{Radius: 0.5},
+  }
+
+  total := 0.0
+  for _, s := range shapes {
+    describe(s)
+    total += s.Area()
+  }
+  fmt.Printf("total area: %.2f\\n", total)
+}
+`,"Custom Errors": `package main
+
+import "fmt"
+
+type ValidationError struct {
+  Field string
+  Msg   string
+}
+
+func (e *ValidationError) Error() string {
+  return "validation failed on " + e.Field + ": " + e.Msg
+}
+
+func validateAge(age int) error {
+  if age < 0 {
+    return &ValidationError{Field: "age", Msg: "must not be negative"}
+  }
+  if age > 150 {
+    return &ValidationError{Field: "age", Msg: "unrealistically large"}
+  }
+  return nil
+}
+
+func main() {
+  fmt.Println("Custom error type demo")
+  for _, age := range []int{30, -5, 200, 65} {
+    err := validateAge(age)
+    if err != nil {
+      fmt.Println("rejected", age, "-", err.Error())
+      continue
+    }
+    fmt.Println("accepted", age)
+  }
+}
+`,"Stack (LIFO)": `package main
+
+import "fmt"
+
+func push(stack []int, v int) []int { return append(stack, v) }
+
+func main() {
+  fmt.Println("Stack demo (LIFO)")
+  var stack []int
+  for i := 1; i <= 5; i++ {
+    stack = push(stack, i*i)
+    fmt.Println("pushed", i*i, "- size:", len(stack))
+  }
+
+  fmt.Println("popping all values:")
+  for len(stack) > 0 {
+    top := stack[len(stack)-1]
+    stack = stack[:len(stack)-1]
+    fmt.Println("popped:", top, "- remaining:", len(stack))
+  }
+}
+`,"Binary Search": `package main
+
+import "fmt"
+
+// binarySearch returns the index of target in a sorted slice, or -1.
+// The midpoint uses a bit shift instead of /2 to keep the computation exact.
+func binarySearch(sorted []int, target int) int {
+  lo, hi := 0, len(sorted)-1
+  steps := 0
+  for lo <= hi {
+    steps++
+    mid := (lo + hi) >> 1
+    switch {
+    case sorted[mid] == target:
+      fmt.Println("  found after", steps, "step(s)")
+      return mid
+    case sorted[mid] < target:
+      lo = mid + 1
+    default:
+      hi = mid - 1
+    }
+  }
+  fmt.Println("  exhausted search after", steps, "step(s)")
+  return -1
+}
+
+func main() {
+  fmt.Println("Binary search demo")
+  nums := []int{1, 3, 5, 7, 9, 11, 13, 17, 21, 33, 40, 55}
+  fmt.Println("sorted input:", len(nums), "elements")
+
+  for _, target := range []int{7, 55, 4, 21} {
+    fmt.Println("searching for", target)
+    idx := binarySearch(nums, target)
+    if idx >= 0 {
+      fmt.Println("  ->", target, "is at index", idx)
+    } else {
+      fmt.Println("  ->", target, "is not in the slice")
+    }
+  }
+}
 `};

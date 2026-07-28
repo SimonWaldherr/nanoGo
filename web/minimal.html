@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>nanoGo — minimal embedding reference</title>
+<!--
+  A from-scratch minimal frontend for nanoGo's WASM build, paired with
+  app.js. It reuses this directory's already-built nanogo.wasm,
+  wasm_exec.js and wasm_worker.js (run `make build-wasm` first, or just
+  open this alongside index.html once that's been built) — no separate
+  build step, no CodeMirror/CDN dependency, no framework.
+
+  This is NOT the production playground (see index.html for that); it is
+  the shortest working reference for a third party who wants to build
+  their own frontend against the same WASM worker. See the README's
+  "Embedding" section and app.js's comments for the full protocol.
+-->
+<style>
+  body { margin: 0; padding: 24px; background: #0b0f17; color: #e6edf7; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 18px; color: #98a7bd; font-size: 12px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  button, select, input { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid #33445f; background: #172131; color: #e6edf7; }
+  button { cursor: pointer; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  textarea { width: 100%; height: 260px; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #243247; background: #0b111b; color: #e6edf7; font: 13px/1.5 ui-monospace, Consolas, monospace; }
+  #log { height: 160px; overflow: auto; padding: 8px 10px; border-radius: 8px; border: 1px solid #243247; background: #0b111b; white-space: pre-wrap; font: 12px/1.5 ui-monospace, Consolas, monospace; }
+  .status { display: inline-block; padding: 3px 9px; border-radius: 999px; border: 1px solid #33445f; font-size: 12px; }
+  .status.ready { color: #46d7a0; } .status.loading { color: #f8be5d; } .status.error { color: #ff7785; }
+  canvas { image-rendering: pixelated; border: 1px solid #243247; border-radius: 6px; background: #080d13; }
+</style>
+</head>
+<body>
+  <h1>nanoGo — minimal embedding reference</h1>
+  <p class="sub">Plain HTML/JS, no framework, no CodeMirror — see app.js for the whole implementation.</p>
+
+  <div class="row">
+    <span id="status" class="status loading">loading…</span>
+    <select id="exampleSelect"></select>
+    <button id="runBtn" disabled>Run</button>
+    <button id="stopBtn">Stop</button>
+    <button id="formatBtn">Format</button>
+    <button id="vetBtn">Vet</button>
+    <button id="clearBtn">Clear</button>
+    <button id="shareBtn">Copy share link</button>
+    <label>scale <input id="scale" type="number" value="8" min="1" max="20" style="width:52px"></label>
+  </div>
+
+  <textarea id="src" spellcheck="false"></textarea>
+
+  <div class="row" style="margin-top:14px">
+    <div>
+      <div class="sub">console</div>
+      <div id="log"></div>
+    </div>
+    <div>
+      <div class="sub">canvas</div>
+      <canvas id="life" width="80" height="80"></canvas>
+    </div>
+  </div>
+  <div id="output"></div>
+
+  <script src="wasm_exec.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

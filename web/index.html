@@ -71,6 +71,21 @@
           </div>
         </div>
         <button id="shareBtn" title="Share code">📤 <span class="btn-label">Share</span></button>
+        <button id="embedBtn" title="Embed this playground in another site">🔗 <span class="btn-label">Embed</span></button>
+        <div id="embedPopup" class="theme-popup embed-popup" aria-hidden="true">
+          <p class="embed-popup-title">Embed in another page</p>
+          <p class="embed-popup-sub">Pastes as a self-contained &lt;iframe&gt; showing the code currently in the editor.</p>
+          <div class="embed-options">
+            <label class="embed-option"><input type="checkbox" id="embedAutorun"> Run automatically</label>
+            <label class="embed-option"><input type="checkbox" id="embedReadonly"> Read-only editor</label>
+          </div>
+          <textarea id="embedSnippet" class="embed-snippet" readonly rows="4" aria-label="Embed HTML snippet"></textarea>
+          <div class="embed-popup-actions">
+            <button id="embedCopyBtn" class="mini-btn">Copy snippet</button>
+            <button id="embedCopyLinkBtn" class="mini-btn">Copy link only</button>
+          </div>
+          <p class="embed-popup-hint">Third-party pages can also control the embed via <code>window.postMessage</code> — see the README's "Embedding" section.</p>
+        </div>
         <button id="downloadBtn" title="Download code">💾 <span class="btn-label">Download</span></button>
         <label class="upload-control" title="Upload a .go file">
           📂 <span class="btn-label">Upload</span>
@@ -78,6 +93,9 @@
         </label>
         <a class="header-link" href="https://github.com/SimonWaldherr/nanogo" target="_blank" rel="noreferrer">
           📚 <span class="btn-label">GitHub</span>
+        </a>
+        <a id="embedPopoutLink" class="header-link embed-popout-link" href="#" target="_blank" rel="noreferrer" hidden>
+          ↗ <span class="btn-label">Open in nanoGo</span>
         </a>
       </div>
     </div>
@@ -317,6 +335,21 @@ Select an example from the sidebar to get started! 🚀</div>
     (function() {
       'use strict';
 
+      // ---------------- Embedding: query-string options ----------------
+      // A third party embedding this page in an <iframe> (see the Embed
+      // popup below, and the README's "Embedding" section) configures it
+      // entirely through query params — no build step, no separate embed
+      // page to maintain. `#code=` (see loadCodeFromURL) is parsed
+      // separately since it lives in the hash, not the query string. This
+      // runs before initEditor() so the read-only option applies from the
+      // very first paint, not as a visible flash-then-lock.
+      const urlParams = new URLSearchParams(location.search);
+      const isEmbedMode = urlParams.get('embed') === '1';
+      const wantAutorun = urlParams.get('autorun') === '1';
+      const wantReadonly = urlParams.get('readonly') === '1';
+      const queryExample = urlParams.get('example');
+      if (isEmbedMode) document.body.classList.add('mode-embed');
+
       // Example categorization with output types and descriptions
       const EXAMPLE_CONFIG = {
         'Basics': {
@@ -418,6 +451,11 @@ Select an example from the sidebar to get started! 🚀</div>
         , 'Test: Table-driven': { output: 'console', description: 'testing.T, table cases and named subtests', badge: 'Testing' }
         , 'Benchmark: Checksum': { output: 'console', description: 'testing.B with explicit, repeatable iteration count', badge: 'Benchmarks' }
         , 'Worker Pool': { output: 'console', description: 'A small concurrent worker pool with channels and WaitGroup', badge: 'Concurrency' }
+        , 'Select Statement': { output: 'console', description: 'Multiplex channels with select, a timer timeout, and a default case', badge: 'Concurrency', tags: ['Concurrency'] }
+        , 'Interfaces & Polymorphism': { output: 'console', description: 'A Shape interface with Circle/Rectangle implementations and polymorphic dispatch', badge: 'Types', tags: ['Types'] }
+        , 'Custom Errors': { output: 'console', description: 'A struct-based error type implementing the error interface', badge: 'Error Handling', tags: ['Error Handling'] }
+        , 'Stack (LIFO)': { output: 'console', description: 'Push/pop a last-in-first-out stack built from a plain slice', badge: 'Data Structures', tags: ['Data Structures', 'Algorithms'] }
+        , 'Binary Search': { output: 'console', description: 'Classic O(log n) search over a sorted slice, step-counted', badge: 'Algorithms', tags: ['Algorithms'] }
       };
 
       const EXAMPLE_NAMES = Object.keys(EXAMPLE_CONFIG).filter(name => name !== 'Empty');
@@ -750,6 +788,51 @@ Select an example from the sidebar to get started! 🚀</div>
             <li>Results are collected after orderly shutdown</li>
             <li>Edit the worker/job counts and observe the behavior</li>
           </ul>
+        `,
+        'Select Statement': `
+          <p><strong>Channel multiplexing with select</strong></p>
+          <p>Waits on whichever of several channels is ready first, with a <code>time.NewTimer</code> as a timeout branch and a <code>default</code> case for a non-blocking check.</p>
+          <ul>
+            <li><code>select { case &lt;-a: ... case &lt;-b: ... }</code> races two channels</li>
+            <li>A timer's <code>.C</code> channel acts as a timeout branch</li>
+            <li><code>default</code> makes a select non-blocking</li>
+          </ul>
+        `,
+        'Interfaces & Polymorphism': `
+          <p><strong>Interfaces & polymorphism</strong></p>
+          <p>A <code>Shape</code> interface with two concrete implementations (<code>Circle</code>, <code>Rectangle</code>) shows dynamic dispatch: the same <code>describe(s Shape)</code> call runs different code depending on the concrete type stored in <code>s</code>.</p>
+          <ul>
+            <li>Method sets satisfy an interface implicitly, like real Go</li>
+            <li>A <code>[]Shape</code> slice holds mixed concrete types</li>
+            <li>Add a new shape and it works with the existing <code>describe</code> function unchanged</li>
+          </ul>
+        `,
+        'Custom Errors': `
+          <p><strong>Custom error types</strong></p>
+          <p>A <code>*ValidationError</code> struct implements <code>Error() string</code> so it satisfies Go's built-in <code>error</code> interface, carrying structured detail (<code>Field</code>, <code>Msg</code>) beyond a plain string.</p>
+          <ul>
+            <li><code>func (e *ValidationError) Error() string</code> satisfies <code>error</code></li>
+            <li>Returning <code>nil</code> signals success, matching idiomatic Go</li>
+            <li>Call <code>err.Error()</code> explicitly to format the message</li>
+          </ul>
+        `,
+        'Stack (LIFO)': `
+          <p><strong>Stack (LIFO)</strong></p>
+          <p>A last-in-first-out stack built from a plain <code>[]int</code> slice: <code>push</code> appends and returns the new slice, while pop reads and reslices the last element directly.</p>
+          <ul>
+            <li><code>append(stack, v)</code> grows the stack</li>
+            <li><code>stack[len(stack)-1]</code> then reslicing pops the top</li>
+            <li>Values come back out in reverse push order</li>
+          </ul>
+        `,
+        'Binary Search': `
+          <p><strong>Binary search</strong></p>
+          <p>Repeatedly halves a sorted slice to find a target in O(log n) steps instead of scanning linearly; the step count printed for each search shows how few comparisons it needs even for larger inputs.</p>
+          <ul>
+            <li>Requires the input to already be sorted</li>
+            <li>The midpoint uses a bit shift (<code>&gt;&gt;1</code>) rather than division</li>
+            <li>A tagless <code>switch</code> reads like a compact if/else-if chain</li>
+          </ul>
         `
       };
 
@@ -763,6 +846,14 @@ Select an example from the sidebar to get started! 🚀</div>
       const modeSelect = document.getElementById("modeSelect");
       const shareBtn = document.getElementById("shareBtn");
       const downloadBtn = document.getElementById("downloadBtn");
+      const embedBtn = document.getElementById("embedBtn");
+      const embedPopup = document.getElementById("embedPopup");
+      const embedAutorunEl = document.getElementById("embedAutorun");
+      const embedReadonlyEl = document.getElementById("embedReadonly");
+      const embedSnippetEl = document.getElementById("embedSnippet");
+      const embedCopyBtn = document.getElementById("embedCopyBtn");
+      const embedCopyLinkBtn = document.getElementById("embedCopyLinkBtn");
+      const embedPopoutLink = document.getElementById("embedPopoutLink");
       const themeBtn = document.getElementById("themeBtn");
       const themePopup = document.getElementById("themePopup");
       const tagFilters = document.getElementById("tagFilters");
@@ -830,7 +921,8 @@ Select an example from the sidebar to get started! 🚀</div>
             indentUnit: 2,
             tabSize: 2,
             lineWrapping: true,
-            viewportMargin: 12
+            viewportMargin: 12,
+            readOnly: wantReadonly ? 'nocursor' : false
           });
           editor.setSize('100%', '100%');
           if (fontSizeSelect) applyFontSize(fontSizeSelect.value);
@@ -867,7 +959,7 @@ Select an example from the sidebar to get started! 🚀</div>
       let worker = null;
       let currentExample = null;
       let selectedTag = null;
-      let theme = (localStorage.getItem("nanogo_theme") || "dark");
+      let theme = (urlParams.get('theme') || localStorage.getItem("nanogo_theme") || "dark");
 
       function setTheme(t) {
         theme = t || 'dark';
@@ -912,6 +1004,7 @@ Select an example from the sidebar to get started! 🚀</div>
       }
       if (themeBtn) themeBtn.onclick = (e) => {
         if (!themePopup) return;
+        if (embedPopup) embedPopup.setAttribute('aria-hidden', 'true');
         const hidden = themePopup.getAttribute('aria-hidden') !== 'false';
         if (hidden) openThemePopup(); else closeThemePopup();
       };
@@ -1019,6 +1112,7 @@ Select an example from the sidebar to get started! 🚀</div>
         pendingLogLines.push({ message: String(message), type: type || 'output', loc: loc || null });
         scheduleLogFlush();
         if (loc) highlightErrorLine(loc.line);
+        postToHost({ type: 'nanogo:output', text: String(message), kind: type || 'output' });
       }
 
       // requestAnimationFrame is throttled or fully paused while the document
@@ -1316,7 +1410,11 @@ Select an example from the sidebar to get started! 🚀</div>
               if (heatmapToggle && wasmCapabilities.hasProfile === false) heatmapToggle.disabled = true;
               logMessage('🎉 WebAssembly loaded and ready!', 'system');
               fillExamples();
-              loadCodeFromURL();
+              loadCodeFromURL().then(() => {
+                setupEmbedPopout();
+                postToHost({ type: 'nanogo:ready' });
+                if (wantAutorun) runCode();
+              });
               break;
             case 'log':
               logMessage(String(m.text), 'output');
@@ -1449,6 +1547,7 @@ Select an example from the sidebar to get started! 🚀</div>
               if (stats && stats.trace) renderTrace(stats.trace, stats.traceCap);
               if (stats && stats.profile) applyHeatmap(stats.profile);
               setStatus('Ready', 'ready');
+              postToHost({ type: 'nanogo:done', elapsed, stats });
               break;
             }
             default:
@@ -2196,20 +2295,19 @@ Select an example from the sidebar to get started! 🚀</div>
         });
       }
 
-      if (stopBtn) {
-        stopBtn.onclick = () => {
-          if (!worker) { logMessage('No worker running', 'warn'); return; }
-          try {
-            worker.terminate();
-          } catch (e) {}
-          worker = null;
-          if (execTimeEl) execTimeEl.textContent = '';
-          setStatus('Stopped', 'error');
-          logMessage('⛔ Execution terminated by user', 'system');
-          // Reinitialize the worker so user can run again quickly
-          setTimeout(() => startWasmWorker(), 300);
-        };
+      function stopExecution() {
+        if (!worker) { logMessage('No worker running', 'warn'); return; }
+        try {
+          worker.terminate();
+        } catch (e) {}
+        worker = null;
+        if (execTimeEl) execTimeEl.textContent = '';
+        setStatus('Stopped', 'error');
+        logMessage('⛔ Execution terminated by user', 'system');
+        // Reinitialize the worker so user can run again quickly
+        setTimeout(() => startWasmWorker(), 300);
       }
+      if (stopBtn) stopBtn.onclick = stopExecution;
 
       function fillExamples() {
         function tagsFor(config) {
@@ -2243,20 +2341,22 @@ Select an example from the sidebar to get started! 🚀</div>
         examplesList.innerHTML = "";
         renderTagFilters();
         const filter = exampleSearch && exampleSearch.value ? exampleSearch.value.trim().toLowerCase() : "";
+        // With 50+ demos, a flat list makes browsing tedious. When nothing
+        // is filtered or tag-selected, group by each example's primary
+        // (first) tag instead — but any active search or tag filter is
+        // already an implicit single grouping, so keep those flat.
+        const showGroups = !filter && !selectedTag;
 
-        EXAMPLE_NAMES.forEach(name => {
-          if (name === 'Empty') return; // Skip empty example
-          const config = EXAMPLE_CONFIG[name] || { output: 'console', description: 'Go programming example', badge: 'Demo' };
-          const exampleTags = tagsFor(config);
-
-          // Filter by name, description, or any tag.
+        function matchesFilters(name, config, exampleTags) {
           if (filter) {
             const hay = (name + ' ' + (config.description || '') + ' ' + exampleTags.join(' ')).toLowerCase();
-            if (!hay.includes(filter)) return;
+            if (!hay.includes(filter)) return false;
           }
-          // Filter by selected tag
-          if (selectedTag && !exampleTags.includes(selectedTag)) return;
+          if (selectedTag && !exampleTags.includes(selectedTag)) return false;
+          return true;
+        }
 
+        function renderExampleItem(name, config, exampleTags) {
           const item = document.createElement('div');
           item.className = 'example-item';
           item.tabIndex = 0;
@@ -2308,7 +2408,36 @@ Select an example from the sidebar to get started! 🚀</div>
           item.appendChild(rightCol);
 
           examplesList.appendChild(item);
-        });
+        }
+
+        if (showGroups) {
+          // Bucket by primary tag, preserving first-seen tag order and each
+          // example's original order within its bucket.
+          const buckets = new Map();
+          EXAMPLE_NAMES.forEach(name => {
+            if (name === 'Empty') return;
+            const config = EXAMPLE_CONFIG[name] || { output: 'console', description: 'Go programming example', badge: 'Demo' };
+            const exampleTags = tagsFor(config);
+            const primary = exampleTags[0] || 'Demo';
+            if (!buckets.has(primary)) buckets.set(primary, []);
+            buckets.get(primary).push({ name, config, exampleTags });
+          });
+          buckets.forEach((items, tag) => {
+            const header = document.createElement('div');
+            header.className = 'example-group-header';
+            header.textContent = tag;
+            examplesList.appendChild(header);
+            items.forEach(({ name, config, exampleTags }) => renderExampleItem(name, config, exampleTags));
+          });
+        } else {
+          EXAMPLE_NAMES.forEach(name => {
+            if (name === 'Empty') return; // Skip empty example
+            const config = EXAMPLE_CONFIG[name] || { output: 'console', description: 'Go programming example', badge: 'Demo' };
+            const exampleTags = tagsFor(config);
+            if (!matchesFilters(name, config, exampleTags)) return;
+            renderExampleItem(name, config, exampleTags);
+          });
+        }
 
         // Initialize enhanced logging (only once on first fill)
         if (!logLines || logLines.length === 0) initializeEnhancedLogging();
@@ -2378,11 +2507,16 @@ Select an example from the sidebar to get started! 🚀</div>
         logMessage(`📖 Loaded: ${name}`, 'system');
       }
 
+      // Encode/decode the editor's current code as a URL-safe base64 blob
+      // for the `#code=` hash — shared by the Share button, the Embed
+      // popup, and the outgoing postMessage API below.
+      function encodeCodeForURL(code) { return btoa(unescape(encodeURIComponent(code))); }
+      function decodeCodeFromURL(b64) { return decodeURIComponent(atob(b64)); }
+      function buildShareURL() { return location.origin + location.pathname + "#code=" + encodeCodeForURL(getSource()); }
+
       // Share functionality
       shareBtn.onclick = () => {
-        const b64 = btoa(unescape(encodeURIComponent(getSource())));
-        const url = location.origin + location.pathname + "#code=" + b64;
-        navigator.clipboard.writeText(url).then(() => {
+        navigator.clipboard.writeText(buildShareURL()).then(() => {
           setStatus("Share URL copied!", "ready");
           logMessage("📤 Share URL copied to clipboard", 'system');
           shareBtn.textContent = '✅ Copied!';
@@ -2391,6 +2525,51 @@ Select an example from the sidebar to get started! 🚀</div>
           logMessage("❌ Share copy failed: " + err, 'error');
         });
       };
+
+      // ---------------- Embed popup: generate an <iframe> snippet ----------------
+      function closeEmbedPopup() { if (embedPopup) embedPopup.setAttribute('aria-hidden', 'true'); }
+      function buildEmbedSrc() {
+        const params = new URLSearchParams();
+        params.set('embed', '1');
+        if (embedAutorunEl && embedAutorunEl.checked) params.set('autorun', '1');
+        if (embedReadonlyEl && embedReadonlyEl.checked) params.set('readonly', '1');
+        return location.origin + location.pathname + '?' + params.toString() + '#code=' + encodeCodeForURL(getSource());
+      }
+      function refreshEmbedSnippet() {
+        if (!embedSnippetEl) return;
+        const src = buildEmbedSrc();
+        embedSnippetEl.value = `<iframe src="${src}"\n  width="640" height="420" style="border:1px solid #d9e2ef;border-radius:10px"\n  title="nanoGo playground" loading="lazy"></iframe>`;
+      }
+      if (embedBtn && embedPopup) {
+        embedBtn.onclick = () => {
+          if (themePopup) closeThemePopup();
+          const hidden = embedPopup.getAttribute('aria-hidden') !== 'false';
+          if (hidden) { refreshEmbedSnippet(); embedPopup.setAttribute('aria-hidden', 'false'); }
+          else closeEmbedPopup();
+        };
+        [embedAutorunEl, embedReadonlyEl].forEach(el => { if (el) el.addEventListener('change', refreshEmbedSnippet); });
+        if (embedCopyBtn) embedCopyBtn.onclick = () => {
+          navigator.clipboard.writeText(embedSnippetEl.value).then(() => {
+            logMessage('🔗 Embed snippet copied to clipboard', 'system');
+            embedCopyBtn.textContent = '✅ Copied!';
+            setTimeout(() => embedCopyBtn.textContent = 'Copy snippet', 1600);
+          }, err => logMessage('❌ Embed copy failed: ' + err, 'error'));
+        };
+        if (embedCopyLinkBtn) embedCopyLinkBtn.onclick = () => {
+          navigator.clipboard.writeText(buildEmbedSrc()).then(() => {
+            logMessage('🔗 Embed link copied to clipboard', 'system');
+            embedCopyLinkBtn.textContent = '✅ Copied!';
+            setTimeout(() => embedCopyLinkBtn.textContent = 'Copy link only', 1600);
+          }, err => logMessage('❌ Embed copy failed: ' + err, 'error'));
+        };
+        document.addEventListener('click', (ev) => {
+          if (embedPopup.getAttribute('aria-hidden') === 'false') {
+            const path = ev.composedPath ? ev.composedPath() : (ev.path || []);
+            if (!path.includes(embedPopup) && !path.includes(embedBtn)) closeEmbedPopup();
+          }
+        });
+        document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeEmbedPopup(); });
+      }
 
       // Download functionality
       downloadBtn.onclick = () => {
@@ -2403,25 +2582,95 @@ Select an example from the sidebar to get started! 🚀</div>
         logMessage("💾 Code downloaded", 'system');
       };
 
-      function loadCodeFromURL() {
+      // Priority for the code shown on load: an explicit `#code=` share link,
+      // then a `?example=Name` query param (see the query-string options
+      // near the top of this script), then the last locally-saved session.
+      // Returns true once source code actually ended up in the editor, so
+      // callers (the 'ready' handler) know whether it's safe to autorun.
+      async function loadCodeFromURL() {
         const hash = location.hash.startsWith("#code=") ? location.hash.slice(6) : "";
         if (hash) {
           try {
-            setSource(atob(decodeURIComponent(hash)));
+            setSource(decodeCodeFromURL(hash));
             logMessage("📥 Code loaded from URL", 'system');
             showOutputPanel('console'); // Default to console for shared code
+            return true;
           } catch (e) {
             logMessage("❌ Failed to load code from URL", 'error');
-          }
-        } else {
-          const saved = localStorage.getItem("nanogo_last");
-          if (saved && saved.trim().length > 0) {
-            setSource(saved);
-            logMessage("💾 Restored previous session", 'system');
-            showOutputPanel('console');
+            return false;
           }
         }
+        if (queryExample) {
+          try {
+            await ensureExamplesLoaded();
+            if (getExampleSource(queryExample)) {
+              await selectExample(queryExample);
+              return true;
+            }
+            logMessage('⚠️ Unknown example in URL: ' + queryExample, 'warn');
+          } catch (e) {
+            logMessage('❌ Failed to load example from URL: ' + e.message, 'error');
+          }
+        }
+        const saved = localStorage.getItem("nanogo_last");
+        if (saved && saved.trim().length > 0) {
+          setSource(saved);
+          logMessage("💾 Restored previous session", 'system');
+          showOutputPanel('console');
+        }
+        return false;
       }
+
+      // In embed mode, give the visitor a way out of the compact iframe view
+      // — a link back to the full playground with the same code preloaded,
+      // matching the "Edit on ..." affordance of similar embeddable widgets.
+      function setupEmbedPopout() {
+        if (!isEmbedMode || !embedPopoutLink) return;
+        embedPopoutLink.href = location.origin + location.pathname + "#code=" + encodeCodeForURL(getSource());
+        embedPopoutLink.hidden = false;
+      }
+
+      // ---------------- postMessage integration API ----------------
+      // Lets a page hosting this playground in an <iframe> control it and
+      // observe its output without reaching into the iframe's DOM. See the
+      // README's "Embedding" section for the full, documented contract.
+      //
+      // Outgoing (this window -> window.parent):
+      //   {type:'nanogo:ready'}                          — WASM loaded, ready to run
+      //   {type:'nanogo:output', text, kind}             — one per console line (kind: output|warn|error|system)
+      //   {type:'nanogo:done', elapsed, stats}            — a run finished
+      //
+      // Incoming (window.parent -> this window, via iframe.contentWindow.postMessage):
+      //   {type:'nanogo:set-code', code}                 — replace the editor contents
+      //   {type:'nanogo:run'}                             — trigger a run, as if Run was clicked
+      //   {type:'nanogo:stop'}                            — stop the running program
+      //
+      // No origin allowlist is enforced on either side: like other
+      // embeddable widgets (YouTube, CodeSandbox), this only ever affects
+      // the widget's own editor/run state, not host page data, so accepting
+      // messages from any ancestor frame is an intentional, low-risk
+      // default. An integrator who needs to restrict this can still check
+      // `event.origin` on their own side of the channel.
+      function postToHost(msg) {
+        if (window.parent && window.parent !== window) {
+          try { window.parent.postMessage(msg, '*'); } catch (e) { /* ignore */ }
+        }
+      }
+      window.addEventListener('message', (ev) => {
+        const data = ev.data;
+        if (!data || typeof data !== 'object') return;
+        switch (data.type) {
+          case 'nanogo:set-code':
+            if (typeof data.code === 'string') setSource(data.code);
+            break;
+          case 'nanogo:run':
+            runCode();
+            break;
+          case 'nanogo:stop':
+            stopExecution();
+            break;
+        }
+      });
 
       function registerServiceWorker() {
         if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
