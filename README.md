@@ -50,6 +50,39 @@ nanoGo is useful where executing a small, controlled Go-like program at runtime 
 - **🖥️ CLI Interpreter**: Run Go scripts from the command line
 - **📝 REPL Mode**: Interactive Read-Eval-Print-Loop for experimentation
 
+### 🧭 Go Execution Lab (web playground)
+
+The web playground includes an **Execution Lab** alongside Console, Canvas,
+HTML, and Inspector. It projects nanoGo's existing AST-backed static call
+graph into a clickable [Mermaid](https://mermaid.js.org/) flowchart:
+
+- **Visualize current code** asks the WASM worker for the current static call
+  graph; this is analysis, not a record of one particular runtime execution.
+- Selecting a function in the diagram jumps to its source line. The Lab can
+  also place a source-linked breakpoint marker in CodeMirror. Markers make
+  program points reviewable today; they are deliberately not presented as a
+  pausing debugger until the interpreter exposes a safe stepping protocol.
+- Mermaid loads on demand and is included in the service worker cache after
+  installation, so a previously opened playground can visualize code offline.
+
+### ✨ Opt-in AI assistant (web playground)
+
+The **AI** tab is a small browser-side client for an OpenAI-compatible
+`/chat/completions` endpoint, inspired by the local-first, explicit-context
+workflow of [liveCalc](https://github.com/SimonWaldherr/liveCalc). It does not
+add a nanoGo server or silently send code:
+
+- The endpoint, model, API key, and "include context" setting are kept in the
+  browser's `localStorage`; conversation messages are not persisted.
+- Nothing is sent until **Ask AI** is pressed. With context enabled, the
+  request contains the current Go source and the Lab's static graph summary.
+- Assistant-proposed Go is never applied automatically. A user must press
+  **Apply Go block to editor** after reviewing a fenced `go` block.
+
+Use a trusted endpoint and browser profile: `localStorage` is convenient for
+personal development, not a hardened secret vault. Direct browser requests
+also require the selected endpoint to allow the playground origin via CORS.
+
 ### Safety Features
 - **Capability-gated execution**: The interpreter denies its built-in filesystem and HTTP facades by default; a host must still securely implement every native it registers
 - **Controlled natives**: Host functions are explicit capabilities, not an automatic security boundary

@@ -211,6 +211,8 @@ func main() {
         <button class="output-tab active" data-output="console" role="tab">📋 Console</button>
         <button class="output-tab" data-output="canvas" role="tab">🎨 Canvas</button>
         <button class="output-tab" data-output="dom" role="tab">🌐 HTML</button>
+        <button class="output-tab" data-output="lab" role="tab">🧭 Lab</button>
+        <button class="output-tab" data-output="ai" role="tab">✨ AI</button>
         <button class="output-tab" data-output="inspector" role="tab">🔬 Inspector</button>
       </div>
 
@@ -254,6 +256,54 @@ Select an example from the sidebar to get started! 🚀</div>
             <p style="color: var(--text-muted); font-style: italic;">
               HTML template outputs will appear here when running template demos.
             </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Go Execution Lab: Mermaid is rendered by web/lab.js from the
+           existing static call-graph result. Its nodes are source-linked and
+           can carry future interpreter breakpoint program points. -->
+      <div class="output-panel" id="labPanel">
+        <div class="output-header">
+          <span>🧭 Go Execution Lab</span>
+          <span class="example-badge">Mermaid</span>
+        </div>
+        <div class="output-content lab-content">
+          <div class="lab-toolbar">
+            <button id="labAnalyzeBtn" class="mini-btn">Visualize current code</button>
+            <span id="labStatus" class="inspector-note">Static graph · click a function to navigate</span>
+          </div>
+          <div id="labGraph" class="lab-graph" aria-live="polite">
+            <p class="inspector-note">Analyze the current code to build its Mermaid call graph.</p>
+          </div>
+          <div id="labDetails" class="lab-details" hidden></div>
+        </div>
+      </div>
+
+      <!-- Local, OpenAI-compatible assistant. Configuration and conversation
+           stay in the browser; code is sent only after the user presses Ask. -->
+      <div class="output-panel" id="aiPanel">
+        <div class="output-header">
+          <span>✨ nanoGo AI</span>
+          <span class="example-badge">Local config</span>
+        </div>
+        <div class="output-content ai-content">
+          <details class="ai-settings">
+            <summary>Connection &amp; privacy</summary>
+            <div class="ai-settings-grid">
+              <label>Endpoint <input id="aiEndpoint" type="url" value="https://api.openai.com/v1" spellcheck="false"></label>
+              <label>Model <input id="aiModel" type="text" value="gpt-4.1-mini" spellcheck="false"></label>
+              <label>API key <input id="aiApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="stored only in this browser"></label>
+            </div>
+            <label class="ai-context-toggle"><input id="aiIncludeGraph" type="checkbox" checked> Include the current code and execution-graph summary</label>
+            <p class="inspector-note">nanoGo sends nothing until you ask. This browser calls the configured OpenAI-compatible endpoint directly; normal CORS rules apply.</p>
+          </details>
+          <div id="aiMessages" class="ai-messages" aria-live="polite">
+            <p class="inspector-note">Ask for an explanation, a test, a refactor, or a focused patch. Code blocks can be applied to the editor after review.</p>
+          </div>
+          <div class="ai-composer">
+            <textarea id="aiPrompt" rows="3" placeholder="Explain this code, add a test, or suggest a small patch…"></textarea>
+            <button id="aiAskBtn" class="primary">Ask AI</button>
           </div>
         </div>
       </div>
@@ -945,6 +995,7 @@ Select an example from the sidebar to get started! 🚀</div>
           editor = CodeMirror.fromTextArea(srcEl, {
             mode: 'text/x-go',
             lineNumbers: true,
+            gutters: ['CodeMirror-linenumbers', 'nanogo-breakpoints'],
             indentUnit: 2,
             tabSize: 2,
             lineWrapping: true,
@@ -956,7 +1007,13 @@ Select an example from the sidebar to get started! 🚀</div>
           // Editing invalidates any error highlight left over from the last
           // run — the line numbers it was anchored to may no longer mean
           // the same thing once the user starts changing the code.
-          editor.on('change', () => { clearErrorHighlight(); clearHeatmap(); });
+          editor.on('change', () => {
+            clearErrorHighlight(); clearHeatmap();
+            document.dispatchEvent(new CustomEvent('nanogo:source-change'));
+          });
+          editor.on('gutterClick', (cm, line, gutter) => {
+            if (gutter === 'nanogo-breakpoints') toggleBreakpoint(line + 1);
+          });
           // CodeMirror creates its own hidden input for capturing keystrokes;
           // it does not inherit these attributes from the original textarea,
           // so mobile keyboards (iOS) would otherwise autocorrect/autocapitalize
@@ -975,6 +1032,30 @@ Select an example from the sidebar to get started! 🚀</div>
 
       function getSource() { return (editor && typeof editor.getValue === 'function') ? editor.getValue() : (srcEl ? srcEl.value : ''); }
       function setSource(v) { if (editor && typeof editor.setValue === 'function') editor.setValue(v); if (srcEl) srcEl.value = v; }
+
+      // Breakpoints are source-linked program points. The Execution Lab uses
+      // these markers today; the upcoming cooperative pause engine consumes
+      // the same line set, so users do not lose their debugging intent.
+      const breakpointLines = new Set();
+      function breakpointMarker() {
+        const marker = document.createElement('span');
+        marker.className = 'nanogo-breakpoint-marker';
+        marker.title = 'Breakpoint';
+        marker.setAttribute('aria-label', 'Breakpoint');
+        return marker;
+      }
+      function toggleBreakpoint(line) {
+        if (!editor || !line) return false;
+        if (breakpointLines.has(line)) {
+          breakpointLines.delete(line);
+          editor.setGutterMarker(line - 1, 'nanogo-breakpoints', null);
+        } else {
+          breakpointLines.add(line);
+          editor.setGutterMarker(line - 1, 'nanogo-breakpoints', breakpointMarker());
+        }
+        document.dispatchEvent(new CustomEvent('nanogo:breakpoints-change', { detail: { lines: Array.from(breakpointLines).sort((a, b) => a - b) } }));
+        return breakpointLines.has(line);
+      }
 
       // Output panels
       const canvasPanel = document.getElementById("canvasPanel");
@@ -1278,7 +1359,9 @@ Select an example from the sidebar to get started! 🚀</div>
       }, 1000);
       clearBtn.onclick = clearLog;
 
-      const OUTPUT_PANELS = { canvas: canvasPanel, dom: domPanel, inspector: inspectorPanel, console: consolePanel };
+      const labPanel = document.getElementById("labPanel");
+      const aiPanel = document.getElementById("aiPanel");
+      const OUTPUT_PANELS = { canvas: canvasPanel, dom: domPanel, lab: labPanel, ai: aiPanel, inspector: inspectorPanel, console: consolePanel };
 
       function showOutputPanel(type) {
         const key = OUTPUT_PANELS[type] ? type : 'console';
@@ -1565,6 +1648,7 @@ Select an example from the sidebar to get started! 🚀</div>
                 logMessage('📞 Function analysis error: ' + m.error, 'error');
               } else if (m.result) {
                 renderCallGraph(m.result);
+                document.dispatchEvent(new CustomEvent('nanogo:callgraph', { detail: m.result }));
               }
               break;
             case 'bench-result':
@@ -2743,10 +2827,21 @@ Select an example from the sidebar to get started! 🚀</div>
       });
 
       // Initialize
+      window.nanoGoPlayground = {
+        getSource,
+        setSource,
+        analyzeCallGraph: requestCallGraph,
+        jumpToSource,
+        toggleBreakpoint,
+        getBreakpoints: () => Array.from(breakpointLines).sort((a, b) => a - b),
+        showPanel: showOutputPanel
+      };
       setStatus('Loading WebAssembly...', 'loading');
       registerServiceWorker();
       startWasmWorker();
     })();
   </script>
+  <script src="lab.js?1"></script>
+  <script src="ai.js?1"></script>
 </body>
 </html>

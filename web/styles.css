@@ -485,6 +485,47 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .cg-swatch-func { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .cg-swatch-external { border-style: dashed; border-color: var(--border-light); background: var(--surface); }
 
+/* Execution Lab: AST-backed Mermaid graph, linked back into the editor. */
+.nanogo-breakpoints { width: 16px; }
+.nanogo-breakpoint-marker { display: block; width: 10px; height: 10px; margin: 4px auto 0; border: 1px solid color-mix(in srgb, var(--error) 78%, #fff); border-radius: 50%; background: var(--error); box-shadow: 0 0 0 2px color-mix(in srgb, var(--error) 16%, transparent); }
+.lab-content, .ai-content { display: grid; gap: 12px; }
+.lab-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.lab-graph { min-height: 230px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--code-bg); }
+.lab-graph svg { display: block; min-width: max-content; max-width: none; margin: 0 auto; }
+.lab-graph .node { cursor: pointer; outline: none; }
+.lab-graph .node:hover rect, .lab-graph .node:focus rect { stroke-width: 3px; }
+.lab-details { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); border-radius: 9px; background: color-mix(in srgb, var(--accent) 7%, var(--surface-raised)); }
+.lab-detail-title { color: var(--text); font-family: var(--mono); font-size: 13px; font-weight: 750; }
+.lab-detail-meta { margin-top: 3px; color: var(--text-muted); font-size: 11px; }
+.lab-detail-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 9px; }
+
+/* The assistant is deliberately a small local client: a readable transcript,
+   an explicit connection disclosure, and no automatic editor mutation. */
+.ai-settings { padding: 9px 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--code-bg); }
+.ai-settings > summary { cursor: pointer; color: var(--text-muted); font-size: 12px; font-weight: 700; }
+.ai-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.ai-settings label { display: grid; gap: 4px; color: var(--text-muted); font-size: 11px; }
+.ai-settings input, .ai-composer textarea { min-width: 0; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); font: inherit; }
+.ai-settings input { min-height: 31px; padding: 5px 7px; }
+.ai-context-toggle { display: flex !important; grid-template-columns: auto 1fr; align-items: center; gap: 7px !important; margin-top: 10px; }
+.ai-context-toggle input { min-height: 0; }
+.ai-messages { display: grid; gap: 9px; min-height: 180px; max-height: 420px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 2px; }
+.ai-message { padding: 10px 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--code-bg); }
+.ai-message-user { border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); background: color-mix(in srgb, var(--accent) 8%, var(--surface-raised)); }
+.ai-message-label { margin-bottom: 5px; color: var(--text-dim); font-size: 10px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
+.ai-message-body { color: var(--text); font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.ai-message pre { margin: 8px 0 0; padding: 9px; overflow: auto; border-radius: 7px; background: var(--code-bg); color: var(--text); font-family: var(--mono); font-size: 11px; line-height: 1.45; white-space: pre; }
+.ai-message-actions { display: flex; gap: 8px; margin-top: 9px; }
+.ai-composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; align-items: end; }
+.ai-composer textarea { min-height: 72px; padding: 9px 10px; resize: vertical; line-height: 1.45; }
+
+@media (max-width: 640px) {
+  .ai-settings-grid { grid-template-columns: 1fr; }
+  .ai-composer { grid-template-columns: 1fr; }
+  .ai-composer .primary { width: 100%; }
+  .lab-graph { min-height: 190px; }
+}
+
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 9px; background: var(--border-light); background-clip: padding-box; }

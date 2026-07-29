@@ -4,7 +4,7 @@
 // and returning visitors never keep stale assets. When served without that
 // substitution (local dev), the literal token is a valid, stable name — bump
 // the "uiN" suffix if you need to force a fresh local cache.
-const CACHE_NAME = 'nanogo-playground-ui1-__BUILD_ID__';
+const CACHE_NAME = 'nanogo-playground-ui2-__BUILD_ID__';
 const PRECACHE_URLS = [
   './',
   './index.html',
@@ -12,9 +12,12 @@ const PRECACHE_URLS = [
   './wasm_exec.js',
   './wasm_worker.js',
   './examples.js',
+  './lab.js',
+  './ai.js',
   './nanogo.wasm',
   './manifest.webmanifest',
   './assets/logo.svg',
+  'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css',
   'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js'
@@ -23,6 +26,11 @@ const PRECACHE_URLS = [
 function isCodeMirrorAsset(url) {
   return url.origin === 'https://cdnjs.cloudflare.com' &&
     url.pathname.includes('/ajax/libs/codemirror/5.65.13/');
+}
+
+function isMermaidAsset(url) {
+  return url.origin === 'https://cdn.jsdelivr.net' &&
+    url.pathname === '/npm/mermaid@11/dist/mermaid.min.js';
 }
 
 function isLocalAsset(url) {
@@ -34,6 +42,8 @@ function isLocalAsset(url) {
     url.pathname.endsWith('/wasm_exec.js') ||
     url.pathname.endsWith('/wasm_worker.js') ||
     url.pathname.endsWith('/examples.js') ||
+    url.pathname.endsWith('/lab.js') ||
+    url.pathname.endsWith('/ai.js') ||
     url.pathname.endsWith('/nanogo.wasm') ||
     url.pathname.endsWith('/manifest.webmanifest') ||
     url.pathname.endsWith('/assets/logo.svg')
@@ -70,7 +80,7 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
   const url = new URL(event.request.url);
-  const shouldHandle = event.request.mode === 'navigate' || isLocalAsset(url) || isCodeMirrorAsset(url);
+  const shouldHandle = event.request.mode === 'navigate' || isLocalAsset(url) || isCodeMirrorAsset(url) || isMermaidAsset(url);
   if (!shouldHandle) return;
 
   event.respondWith((async () => {
