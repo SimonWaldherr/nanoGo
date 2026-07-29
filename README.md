@@ -797,9 +797,13 @@ multi-package module straight from its VFS:
   function directly against data-driven cases (useful for exercise grading).
   `RunPackageTests`/`RunPackageBenchmarks` run `TestXxx(t *testing.T)` and
   `BenchmarkXxx(b *testing.B)` functions from `_test.go` files when they use
-  nanoGo's supported `testing` subset (`T.Errorf`, `T.Fatalf`, `T.Run`,
-  `T.Helper`, and `B.N`/timer controls). Those test files can use the normal
-  Go `testing` package unchanged under real `go test` as well.
+  nanoGo's supported `testing` subset (`T.Error`, `T.Errorf`, `T.Fatal`,
+  `T.Fatalf`, `T.Skip`, `T.Skipf`, `T.Run`, `T.Helper`, and `B.N`/timer
+  controls). Both internal `package foo` tests and Go-style external
+  `package foo_test` API tests are supported; test-only variables and `init()`
+  functions, as well as packages imported only by `_test.go`, load lazily with
+  the test overlay and never with the production program. Those test files can
+  use the normal Go `testing` package unchanged under real `go test` as well.
   `ReplaceFunction` hot-swaps one function's implementation without
   reloading the rest of the program.
 - **`interp/index`**: pure `go/parser`/`go/ast` static analysis (no
@@ -977,8 +981,10 @@ python3 -m http.server 8080 --directory web
 
 The playground's **Test** button runs `TestXxx(t *testing.T)` functions from
 the current editor document through the same nanoGo `testing` subset as the
-module loader. For a true multi-file project, use MCP `test_module` or the CLI
-command `nanogo-cli test <module-dir> [package-name]`.
+module loader. The adjacent optional filter accepts a `go test -run`-style Go
+regular expression; test names and assertion messages are shown in the output.
+For a true multi-file project, use MCP `test_module` or the CLI command
+`nanogo-cli test <module-dir> [package-name]`.
 
 ### Testing
 

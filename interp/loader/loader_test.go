@@ -165,6 +165,7 @@ import (
 func TestHelper(t *testing.T) {
 	if helper.Value() != 42 { t.Fatalf("helper import failed") }
 }
+
 `)
 
 	prog, err := LoadModule(vfs, "/proj", Options{})
@@ -176,11 +177,92 @@ func TestHelper(t *testing.T) {
 	}
 	vm, _ := newLoaderTestVM()
 	vm.VFS = vfs
+	if err := RunProgram(context.Background(), vm, prog, "main"); err != nil {
+		t.Fatalf("RunProgram: %v", err)
+	}
+	if _, built := prog.built["/proj/helper"]; built {
+		t.Fatal("test-only helper was initialized during production RunProgram")
+	}
 	results, err := RunPackageTests(context.Background(), vm, prog, "main")
 	if err != nil {
 		t.Fatalf("RunPackageTests: %v", err)
 	}
 	if len(results) != 1 || !results[0].Pass {
 		t.Fatalf("test-only import results = %+v", results)
+	}
+	if _, built := prog.built["/proj/helper"]; !built {
+		t.Fatal("test-only helper was not initialized for RunPackageTests")
+	}
+}
+
+func TestLoadModuleRunsInternalAndExternalTestsWithSeparateInitialization(t *testing.T) {
+	vfs := interp.NewVFS()
+	writeLoaderFile(t, vfs, "/calc/go.mod", "module example.com/calc\n")
+	writeLoaderFile(t, vfs, "/calc/calc.go", `package calc
+
+var testInitLeak = 0
+
+func Double(n int) int { return n * 2 }
+
+func InitLeakValue() int { return testInitLeak }
+`)
+	writeLoaderFile(t, vfs, "/calc/calc_test.go", `package calc
+
+import "testing"
+
+var internalReady = 1
+
+func init() { internalReady = 2; testInitLeak = 2 }
+
+func TestInternal(t *testing.T) {
+	if internalReady != 2 { t.Error("internal test init was not run") }
+}
+`)
+	writeLoaderFile(t, vfs, "/calc/external_test.go", `package calc_test
+
+import (
+	"testing"
+	"example.com/calc"
+)
+
+var externalReady = 1
+
+func init() { externalReady = 2 }
+
+func TestPublicAPI(t *testing.T) {
+	if calc.Double(3) != 6 { t.Error("unexpected public result") }
+	if externalReady != 2 { t.Error("external test init was not run") }
+}
+
+func BenchmarkPublicAPI(b *testing.B) {
+	for i := 0; i < b.N; i++ { calc.Double(i) }
+}
+`)
+
+	prog, err := LoadModule(vfs, "/calc", Options{})
+	if err != nil {
+		t.Fatalf("LoadModule: %v", err)
+	}
+	pp := prog.Packages["/calc"]
+	if pp == nil || len(pp.TestFiles) != 1 || len(pp.ExternalTestFiles) != 1 || pp.ExternalTestName != "calc_test" {
+		t.Fatalf("test package split = %+v", pp)
+	}
+
+	vm, _ := newLoaderTestVM()
+	vm.VFS = vfs
+	before, err := RunFunctionTest(context.Background(), vm, prog, "calc.InitLeakValue", []TestCase{{Want: 0}})
+	if err != nil || len(before) != 1 || !before[0].Pass {
+		t.Fatalf("test-only init leaked into production build: results=%+v err=%v", before, err)
+	}
+	results, err := RunPackageTests(context.Background(), vm, prog, "calc")
+	if err != nil {
+		t.Fatalf("RunPackageTests: %v", err)
+	}
+	if len(results) != 2 || !results[0].Pass || !results[1].Pass || results[0].Name != "TestInternal" || results[1].Name != "TestPublicAPI" {
+		t.Fatalf("test results = %+v, want internal and external pass", results)
+	}
+	benches, err := RunPackageBenchmarks(context.Background(), vm, prog, "calc", BenchOptions{MinIterations: 3})
+	if err != nil || len(benches) != 1 || benches[0].Iterations != 3 {
+		t.Fatalf("external benchmark results = %+v, err=%v", benches, err)
 	}
 }

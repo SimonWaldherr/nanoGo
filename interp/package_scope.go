@@ -214,7 +214,9 @@ func (ps *PackageScope) EvalDecls(ctx context.Context, file *ast.File) error {
 // RunInit executes every func init() collected across every file this
 // package's CollectDecls has processed, in declaration order.
 func (ps *PackageScope) RunInit(ctx context.Context) error {
-	for _, fn := range ps.inits {
+	inits := ps.inits
+	ps.inits = nil
+	for _, fn := range inits {
 		if err := ps.vm.executionError(); err != nil {
 			return err
 		}

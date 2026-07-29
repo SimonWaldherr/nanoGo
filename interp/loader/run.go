@@ -25,49 +25,45 @@ func ensureBuilt(ctx context.Context, vm *interp.Interpreter, prog *Program) err
 	if prog.built != nil {
 		return nil
 	}
+	built := map[string]*interp.PackageScope{}
+	if err := buildPackageScopes(ctx, vm, prog, prog.Order, built); err != nil {
+		return err
+	}
+	prog.built = built
+	return nil
+}
+
+// ensureTestDependencies adds packages referenced only from _test.go files to
+// an already-built production graph. It is deliberately lazy: RunProgram and
+// RunFunctionTest never initialize a test helper package merely because a
+// test happens to import it.
+func ensureTestDependencies(ctx context.Context, vm *interp.Interpreter, prog *Program) error {
+	if err := ensureBuilt(ctx, vm, prog); err != nil {
+		return err
+	}
+	return buildPackageScopes(ctx, vm, prog, prog.TestOrder, prog.built)
+}
+
+func buildPackageScopes(ctx context.Context, vm *interp.Interpreter, prog *Program, order []string, built map[string]*interp.PackageScope) error {
 	entryPkg, ok := prog.Packages[prog.Entry]
 	if !ok {
 		return fmt.Errorf("nanogo/loader: entry package %s not found", prog.Entry)
 	}
-
-	built := map[string]*interp.PackageScope{}
-	err := vm.WithExecution(ctx, entryPkg.FSet, func() error {
-		for _, dir := range prog.Order {
+	return vm.WithExecution(ctx, entryPkg.FSet, func() error {
+		for _, dir := range order {
+			if _, exists := built[dir]; exists {
+				continue
+			}
 			pp := prog.Packages[dir]
 			ps := vm.NewPackageScope(pp.Name)
 
-			for _, imp := range pp.Imports {
-				var pkg *interp.Package
-				if imp.Builtin {
-					p, ok := vm.Package(imp.Path)
-					if !ok {
-						return fmt.Errorf("nanogo/loader: builtin package %q is not registered on this Interpreter (call interp.RegisterBuiltinPackages first)", imp.Path)
-					}
-					pkg = p
-				} else {
-					depScope, ok := built[imp.Dir]
-					if !ok {
-						return fmt.Errorf("nanogo/loader: internal error: dependency %s not built before %s", imp.Dir, dir)
-					}
-					pkg = depScope.Exports()
-				}
-				ps.Import(imp.Alias, pkg)
+			if err := bindImports(vm, ps, pp.Imports, built, dir); err != nil {
+				return err
 			}
 
 			for _, f := range pp.Files {
 				if err := ps.CollectDecls(f, pp.FSet); err != nil {
 					return fmt.Errorf("nanogo/loader: %s: %w", dir, err)
-				}
-			}
-			// _test.go files are collected as an overlay onto the same
-			// scope, so test functions see the package's own private
-			// symbols exactly like real Go — but only their decls; their
-			// var initializers/init() are not part of the package's own
-			// startup (RunPackageTests evaluates them lazily, once, the
-			// first time that package's tests run).
-			for _, f := range pp.TestFiles {
-				if err := ps.CollectDecls(f, pp.FSet); err != nil {
-					return fmt.Errorf("nanogo/loader: %s (test): %w", dir, err)
 				}
 			}
 			for _, f := range pp.Files {
@@ -83,11 +79,111 @@ func ensureBuilt(ctx context.Context, vm *interp.Interpreter, prog *Program) err
 		}
 		return nil
 	})
-	if err != nil {
-		return err
+}
+
+// bindImports wires one package scope to its already-built local dependencies
+// and its registered curated packages. It is shared by normal and external
+// test packages, which deliberately have distinct import environments.
+func bindImports(vm *interp.Interpreter, ps *interp.PackageScope, imports []ImportEdge, built map[string]*interp.PackageScope, dir string) error {
+	for _, imp := range imports {
+		var pkg *interp.Package
+		if imp.Builtin {
+			p, ok := vm.Package(imp.Path)
+			if !ok {
+				return fmt.Errorf("nanogo/loader: builtin package %q is not registered on this Interpreter (call interp.RegisterBuiltinPackages first)", imp.Path)
+			}
+			pkg = p
+		} else {
+			depScope, ok := built[imp.Dir]
+			if !ok {
+				return fmt.Errorf("nanogo/loader: internal error: dependency %s not built before %s", imp.Dir, dir)
+			}
+			pkg = depScope.Exports()
+		}
+		ps.Import(imp.Alias, pkg)
 	}
-	prog.built = built
 	return nil
+}
+
+// ensureInternalTests initializes the package foo test overlay lazily. The
+// production package is always built first; only a test run evaluates its
+// test-only variables or invokes test-only init functions.
+func ensureInternalTests(ctx context.Context, vm *interp.Interpreter, prog *Program, dir string) (*interp.PackageScope, error) {
+	if err := ensureTestDependencies(ctx, vm, prog); err != nil {
+		return nil, err
+	}
+	if prog.testsBuilt != nil && prog.testsBuilt[dir] {
+		return prog.built[dir], nil
+	}
+	pp := prog.Packages[dir]
+	ps := prog.built[dir]
+	err := vm.WithExecution(ctx, pp.FSet, func() error {
+		if err := bindImports(vm, ps, pp.TestImports, prog.built, dir); err != nil {
+			return err
+		}
+		for _, f := range pp.TestFiles {
+			if err := ps.CollectDecls(f, pp.FSet); err != nil {
+				return fmt.Errorf("nanogo/loader: %s (test): %w", dir, err)
+			}
+		}
+		for _, f := range pp.TestFiles {
+			if err := ps.EvalDecls(ctx, f); err != nil {
+				return fmt.Errorf("nanogo/loader: %s (test): %w", dir, err)
+			}
+		}
+		return ps.RunInit(ctx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if prog.testsBuilt == nil {
+		prog.testsBuilt = map[string]bool{}
+	}
+	prog.testsBuilt[dir] = true
+	return ps, nil
+}
+
+// ensureExternalTests initializes package foo_test as a distinct scope. It
+// sees foo only through its exported package object, matching a real external
+// Go test and preventing accidental use of unexported production symbols.
+func ensureExternalTests(ctx context.Context, vm *interp.Interpreter, prog *Program, dir string) (*interp.PackageScope, error) {
+	if err := ensureTestDependencies(ctx, vm, prog); err != nil {
+		return nil, err
+	}
+	pp := prog.Packages[dir]
+	if len(pp.ExternalTestFiles) == 0 {
+		return nil, nil
+	}
+	if prog.externalTestScopes != nil {
+		if ps := prog.externalTestScopes[dir]; ps != nil {
+			return ps, nil
+		}
+	}
+	ps := vm.NewPackageScope(pp.ExternalTestName)
+	err := vm.WithExecution(ctx, pp.FSet, func() error {
+		if err := bindImports(vm, ps, pp.ExternalTestImports, prog.built, dir); err != nil {
+			return err
+		}
+		for _, f := range pp.ExternalTestFiles {
+			if err := ps.CollectDecls(f, pp.FSet); err != nil {
+				return fmt.Errorf("nanogo/loader: %s (external test): %w", dir, err)
+			}
+		}
+		for _, f := range pp.ExternalTestFiles {
+			if err := ps.EvalDecls(ctx, f); err != nil {
+				return fmt.Errorf("nanogo/loader: %s (external test): %w", dir, err)
+			}
+		}
+		return ps.RunInit(ctx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if prog.externalTestScopes == nil {
+		prog.externalTestScopes = map[string]*interp.PackageScope{}
+	}
+	prog.externalTestScopes[dir] = ps
+	return ps, nil
 }
 
 // RunProgram builds every package in prog (see ensureBuilt) and calls the

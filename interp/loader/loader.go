@@ -5,7 +5,6 @@ import (
 	"go/ast"
 	"go/token"
 	"path"
-	"sort"
 	"strings"
 
 	"simonwaldherr.de/go/nanogo/interp"
@@ -93,12 +92,16 @@ type ImportEdge struct {
 // ParsedPackage is one discovered, parsed package directory: every .go file
 // (split into normal and _test.go files) plus its resolved import edges.
 type ParsedPackage struct {
-	Dir       string
-	Name      string
-	Files     []*ast.File
-	TestFiles []*ast.File
-	FSet      *token.FileSet
-	Imports   []ImportEdge
+	Dir                 string
+	Name                string
+	Files               []*ast.File
+	TestFiles           []*ast.File // package foo
+	ExternalTestFiles   []*ast.File // package foo_test
+	ExternalTestName    string
+	FSet                *token.FileSet
+	Imports             []ImportEdge // production imports
+	TestImports         []ImportEdge // package foo test imports
+	ExternalTestImports []ImportEdge
 }
 
 // Program is the result of LoadModule: every local package reachable from
@@ -108,13 +111,16 @@ type Program struct {
 	Root       string
 	Entry      string // Dir of the entry package
 	Packages   map[string]*ParsedPackage
-	Order      []string // dependency-first: a package's dependencies always precede it
+	Order      []string // production dependency-first order
+	TestOrder  []string // production + test-only dependency-first order
 
 	// built caches the PackageScopes produced by ensureBuilt (see run.go)
 	// against whichever *interp.Interpreter first executes this Program.
 	// Rebuilding against a second, different Interpreter is not supported —
 	// build a fresh Program (LoadModule again) per Interpreter instead.
-	built map[string]*interp.PackageScope
+	built              map[string]*interp.PackageScope
+	testsBuilt         map[string]bool
+	externalTestScopes map[string]*interp.PackageScope
 }
 
 // LoadModule discovers, parses, and import-resolves every local package
@@ -178,63 +184,92 @@ func LoadModule(vfs *interp.VFS, root string, opts Options) (*Program, error) {
 				return nil, fmt.Errorf("nanogo/loader: package directory %s has mixed package names %q and %q", dir, pkgName, f.Name.Name)
 			}
 		}
+		internalTests := make([]*ast.File, 0, len(testFiles))
+		externalTests := make([]*ast.File, 0)
+		externalName := ""
 		for _, f := range testFiles {
-			if f.Name.Name != pkgName {
-				return nil, fmt.Errorf("nanogo/loader: external test package %q in %s is not supported (want package %q)", f.Name.Name, dir, pkgName)
+			if f.Name.Name == pkgName {
+				internalTests = append(internalTests, f)
+				continue
 			}
+			want := pkgName + "_test"
+			if f.Name.Name != want {
+				return nil, fmt.Errorf("nanogo/loader: test package %q in %s must be %q or %q", f.Name.Name, dir, pkgName, want)
+			}
+			if externalName != "" && externalName != f.Name.Name {
+				return nil, fmt.Errorf("nanogo/loader: test directory %s has multiple external test packages", dir)
+			}
+			externalName = f.Name.Name
+			externalTests = append(externalTests, f)
 		}
 
-		pp := &ParsedPackage{Dir: dir, Name: pkgName, Files: files, TestFiles: testFiles, FSet: fset}
+		pp := &ParsedPackage{
+			Dir: dir, Name: pkgName, Files: files, TestFiles: internalTests,
+			ExternalTestFiles: externalTests, ExternalTestName: externalName, FSet: fset,
+		}
 
-		seen := map[string]bool{}
 		// Test files can import helper packages that production code does not.
-		// Include them in discovery so RunPackageTests has the same dependency
-		// graph as an ordinary `go test` package build.
-		importFiles := make([]*ast.File, 0, len(files)+len(testFiles))
-		importFiles = append(importFiles, files...)
-		importFiles = append(importFiles, testFiles...)
-		for _, f := range importFiles {
-			for _, spec := range f.Imports {
-				importPath := strings.Trim(spec.Path.Value, `"`)
-				if seen[importPath] {
-					continue
-				}
-				seen[importPath] = true
+		// Resolve internal and external test imports separately: an external
+		// test is a distinct package and must not leak aliases into production.
+		collectImports := func(importFiles []*ast.File, destination *[]ImportEdge) error {
+			seen := map[string]bool{}
+			for _, f := range importFiles {
+				for _, spec := range f.Imports {
+					importPath := strings.Trim(spec.Path.Value, `"`)
+					if seen[importPath] {
+						continue
+					}
+					seen[importPath] = true
 
-				alias := ""
-				if spec.Name != nil {
-					alias = spec.Name.Name
-				} else {
-					segs := strings.Split(importPath, "/")
-					alias = segs[len(segs)-1]
-				}
+					alias := ""
+					if spec.Name != nil {
+						alias = spec.Name.Name
+					} else {
+						segs := strings.Split(importPath, "/")
+						alias = segs[len(segs)-1]
+					}
 
-				if interp.IsBuiltinImport(importPath) {
-					pp.Imports = append(pp.Imports, ImportEdge{Alias: alias, Path: importPath, Builtin: true})
-					continue
-				}
+					if interp.IsBuiltinImport(importPath) {
+						*destination = append(*destination, ImportEdge{Alias: alias, Path: importPath, Builtin: true})
+						continue
+					}
 
-				depDir, ok := resolver.resolve(importPath)
-				if !ok {
-					return nil, fmt.Errorf("nanogo/loader: import %q in package %s is neither a module-local package (module %q), a configured dependency, nor a recognized builtin", importPath, dir, modulePath)
-				}
-				pp.Imports = append(pp.Imports, ImportEdge{Alias: alias, Path: importPath, Dir: depDir})
-				if !queued[depDir] {
-					queued[depDir] = true
-					queue = append(queue, depDir)
+					depDir, ok := resolver.resolve(importPath)
+					if !ok {
+						return fmt.Errorf("nanogo/loader: import %q in package %s is neither a module-local package (module %q), a configured dependency, nor a recognized builtin", importPath, dir, modulePath)
+					}
+					*destination = append(*destination, ImportEdge{Alias: alias, Path: importPath, Dir: depDir})
+					if !queued[depDir] {
+						queued[depDir] = true
+						queue = append(queue, depDir)
+					}
 				}
 			}
+			return nil
+		}
+		if err := collectImports(files, &pp.Imports); err != nil {
+			return nil, err
+		}
+		if err := collectImports(internalTests, &pp.TestImports); err != nil {
+			return nil, err
+		}
+		if err := collectImports(externalTests, &pp.ExternalTestImports); err != nil {
+			return nil, err
 		}
 
 		packages[dir] = pp
 	}
 
-	order, err := topoSort(packages)
+	order, err := topoSort(packages, entryDir, false)
+	if err != nil {
+		return nil, err
+	}
+	testOrder, err := topoSort(packages, entryDir, true)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Program{ModulePath: modulePath, Root: root, Entry: entryDir, Packages: packages, Order: order}, nil
+	return &Program{ModulePath: modulePath, Root: root, Entry: entryDir, Packages: packages, Order: order, TestOrder: testOrder}, nil
 }
 
 func resolveReplacementRoot(moduleRoot, replacement string) string {
@@ -266,7 +301,7 @@ func configureModuleRoot(vfs *interp.VFS, resolver *moduleResolver, moduleRoot s
 // topoSort returns a dependency-first order over packages: every package's
 // local import dependencies appear before it. A cycle produces a clear
 // error naming the chain instead of recursing forever.
-func topoSort(packages map[string]*ParsedPackage) ([]string, error) {
+func topoSort(packages map[string]*ParsedPackage, entry string, includeTests bool) ([]string, error) {
 	const (
 		white = 0
 		gray  = 1
@@ -306,21 +341,34 @@ func topoSort(packages map[string]*ParsedPackage) ([]string, error) {
 				return err
 			}
 		}
+		if includeTests {
+			for _, imp := range pkg.TestImports {
+				if imp.Builtin {
+					continue
+				}
+				if err := visit(imp.Dir); err != nil {
+					return err
+				}
+			}
+			// External tests execute after their production package is built, so
+			// an external test importing its own package is valid, not a cycle.
+			for _, imp := range pkg.ExternalTestImports {
+				if imp.Builtin || imp.Dir == dir {
+					continue
+				}
+				if err := visit(imp.Dir); err != nil {
+					return err
+				}
+			}
+		}
 		stack = stack[:len(stack)-1]
 		color[dir] = black
 		order = append(order, dir)
 		return nil
 	}
 
-	var dirs []string
-	for d := range packages {
-		dirs = append(dirs, d)
-	}
-	sort.Strings(dirs)
-	for _, d := range dirs {
-		if err := visit(d); err != nil {
-			return nil, err
-		}
+	if err := visit(entry); err != nil {
+		return nil, err
 	}
 	return order, nil
 }

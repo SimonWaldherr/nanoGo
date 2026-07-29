@@ -153,18 +153,29 @@ func RunPackageTestsMatching(ctx context.Context, vm *interp.Interpreter, prog *
 			return nil, fmt.Errorf("nanogo/loader: invalid test filter %q: %w", match, err)
 		}
 	}
-	if err := ensureBuilt(ctx, vm, prog); err != nil {
-		return nil, err
-	}
 	dir, ok := findPackageDirByName(prog, pkgName)
 	if !ok {
 		return nil, fmt.Errorf("nanogo/loader: unknown package %q", pkgName)
 	}
 	pp := prog.Packages[dir]
-	scope := prog.built[dir]
+	internalScope, err := ensureInternalTests(ctx, vm, prog, dir)
+	if err != nil {
+		return nil, err
+	}
+	results := runTestsInFiles(ctx, vm, pp.FSet, internalScope, pp.TestFiles, re)
+	externalScope, err := ensureExternalTests(ctx, vm, prog, dir)
+	if err != nil {
+		return nil, err
+	}
+	if externalScope != nil {
+		results = append(results, runTestsInFiles(ctx, vm, pp.FSet, externalScope, pp.ExternalTestFiles, re)...)
+	}
+	return results, nil
+}
 
+func runTestsInFiles(ctx context.Context, vm *interp.Interpreter, fset *token.FileSet, scope *interp.PackageScope, files []*ast.File, re *regexp.Regexp) []TestResult {
 	var results []TestResult
-	for _, file := range pp.TestFiles {
+	for _, file := range files {
 		for _, decl := range file.Decls {
 			d, ok := decl.(*ast.FuncDecl)
 			if !ok || d.Recv != nil || !isTestName(d.Name.Name) || (re != nil && !re.MatchString(d.Name.Name)) {
@@ -178,15 +189,15 @@ func RunPackageTestsMatching(ctx context.Context, vm *interp.Interpreter, prog *
 			if !ok {
 				continue
 			}
-			pos := pp.FSet.Position(d.Pos())
+			pos := fset.Position(d.Pos())
 			t := vm.NewTestT()
-			_, err := vm.CallEntry(ctx, pp.FSet, fn, []any{t})
+			_, err := vm.CallEntry(ctx, fset, fn, []any{t})
 			result := classifyTestOutcome(t, err, pos.Line, pos.Column)
 			result.Name = d.Name.Name
 			results = append(results, result)
 		}
 	}
-	return results, nil
+	return results
 }
 
 // isTestName mirrors Go's convention: Test is a test only when followed by a
@@ -203,6 +214,11 @@ func isTestName(name string) bool {
 func classifyTestOutcome(t any, err error, line, col int) TestResult {
 	messages := interp.TestMessages(t)
 	if interp.IsTestSkipped(err) || interp.TestSkipped(t) {
+		// A prior Error/Errorf still makes a test fail even when it later calls
+		// Skip, matching the real testing package's result accounting.
+		if interp.TestFailed(t) {
+			return TestResult{Line: line, Column: col, Category: CategoryWrongValue, Messages: messages}
+		}
 		return TestResult{Pass: true, Skipped: true, Line: line, Column: col, Category: CategorySkip, Messages: messages}
 	}
 	if err != nil && !interp.IsTestFatal(err) {

@@ -92,6 +92,7 @@ func cloneProgram(template *Program) *Program {
 		Entry:      template.Entry,
 		Packages:   packages,
 		Order:      append([]string(nil), template.Order...),
+		TestOrder:  append([]string(nil), template.TestOrder...),
 	}
 }
 

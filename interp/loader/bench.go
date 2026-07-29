@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"go/ast"
+	"go/token"
 	"strings"
 	"time"
 
@@ -86,23 +87,42 @@ func RunFunctionBench(ctx context.Context, vm *interp.Interpreter, prog *Program
 // `for i := 0; i < b.N; i++ { ... }` loop performs the repetition, exactly
 // like a real `go test -bench` run, just without wall-clock auto-scaling.
 func RunPackageBenchmarks(ctx context.Context, vm *interp.Interpreter, prog *Program, pkgName string, opts BenchOptions) ([]BenchResult, error) {
-	if err := ensureBuilt(ctx, vm, prog); err != nil {
-		return nil, err
-	}
 	dir, ok := findPackageDirByName(prog, pkgName)
 	if !ok {
 		return nil, fmt.Errorf("nanogo/loader: unknown package %q", pkgName)
 	}
 	pp := prog.Packages[dir]
-	scope := prog.built[dir]
+	scope, err := ensureInternalTests(ctx, vm, prog, dir)
+	if err != nil {
+		return nil, err
+	}
 
 	n := opts.MinIterations
 	if n <= 0 {
 		n = 1
 	}
 
+	results, err := runBenchmarksInFiles(ctx, vm, pp.FSet, scope, pp.TestFiles, n)
+	if err != nil {
+		return results, err
+	}
+	externalScope, err := ensureExternalTests(ctx, vm, prog, dir)
+	if err != nil {
+		return results, err
+	}
+	if externalScope != nil {
+		externalResults, err := runBenchmarksInFiles(ctx, vm, pp.FSet, externalScope, pp.ExternalTestFiles, n)
+		if err != nil {
+			return results, err
+		}
+		results = append(results, externalResults...)
+	}
+	return results, nil
+}
+
+func runBenchmarksInFiles(ctx context.Context, vm *interp.Interpreter, fset *token.FileSet, scope *interp.PackageScope, files []*ast.File, n int) ([]BenchResult, error) {
 	var results []BenchResult
-	for _, file := range pp.TestFiles {
+	for _, file := range files {
 		for _, decl := range file.Decls {
 			d, ok := decl.(*ast.FuncDecl)
 			if !ok || d.Recv != nil || !strings.HasPrefix(d.Name.Name, "Benchmark") {
@@ -119,7 +139,7 @@ func RunPackageBenchmarks(ctx context.Context, vm *interp.Interpreter, prog *Pro
 
 			bv := vm.NewTestB(n)
 			var steps uint64
-			err := vm.WithExecution(ctx, pp.FSet, func() error {
+			err := vm.WithExecution(ctx, fset, func() error {
 				if _, err := vm.Invoke(fn, []any{bv}); err != nil {
 					return err
 				}
