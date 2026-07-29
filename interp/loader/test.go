@@ -7,7 +7,10 @@ import (
 	"go/ast"
 	"go/token"
 	"reflect"
+	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"simonwaldherr.de/go/nanogo/interp"
 )
@@ -21,6 +24,7 @@ const (
 	CategoryPanic        = "panic"
 	CategoryTimeout      = "timeout"
 	CategoryCompileError = "compile-error"
+	CategorySkip         = "skip"
 )
 
 // TestCase is one data-driven invocation for RunFunctionTest: call the
@@ -40,13 +44,16 @@ type TestCase struct {
 // TraceEvent.Assertion for the structured, if position-less, assertion
 // event that IS available through a Tracer).
 type TestResult struct {
+	Name     string
 	Pass     bool
+	Skipped  bool
 	Got      any
 	Want     any
 	Panic    bool
 	Line     int
 	Column   int
 	Category string
+	Messages []string
 }
 
 // RunFunctionTest calls the exported function "Func" in package "pkg" (the
@@ -130,6 +137,22 @@ func runOneFunctionTest(ctx context.Context, vm *interp.Interpreter, fset *token
 // go test's per-test isolation). A test's own body is unmodified Go — the
 // same file runs unchanged through a real `go test` (see interp/testing_pkg.go).
 func RunPackageTests(ctx context.Context, vm *interp.Interpreter, prog *Program, pkgName string) ([]TestResult, error) {
+	return RunPackageTestsMatching(ctx, vm, prog, pkgName, "")
+}
+
+// RunPackageTestsMatching runs the package's TestXxx functions whose names
+// match match. An empty match selects every valid Go test name. The pattern
+// uses Go's regexp syntax and intentionally behaves like `go test -run`: a
+// partial match is sufficient.
+func RunPackageTestsMatching(ctx context.Context, vm *interp.Interpreter, prog *Program, pkgName, match string) ([]TestResult, error) {
+	var re *regexp.Regexp
+	var err error
+	if match != "" {
+		re, err = regexp.Compile(match)
+		if err != nil {
+			return nil, fmt.Errorf("nanogo/loader: invalid test filter %q: %w", match, err)
+		}
+	}
 	if err := ensureBuilt(ctx, vm, prog); err != nil {
 		return nil, err
 	}
@@ -144,7 +167,7 @@ func RunPackageTests(ctx context.Context, vm *interp.Interpreter, prog *Program,
 	for _, file := range pp.TestFiles {
 		for _, decl := range file.Decls {
 			d, ok := decl.(*ast.FuncDecl)
-			if !ok || d.Recv != nil || !strings.HasPrefix(d.Name.Name, "Test") {
+			if !ok || d.Recv != nil || !isTestName(d.Name.Name) || (re != nil && !re.MatchString(d.Name.Name)) {
 				continue
 			}
 			v, ok := scope.Lookup(d.Name.Name)
@@ -158,23 +181,40 @@ func RunPackageTests(ctx context.Context, vm *interp.Interpreter, prog *Program,
 			pos := pp.FSet.Position(d.Pos())
 			t := vm.NewTestT()
 			_, err := vm.CallEntry(ctx, pp.FSet, fn, []any{t})
-			results = append(results, classifyTestOutcome(t, err, pos.Line, pos.Column))
+			result := classifyTestOutcome(t, err, pos.Line, pos.Column)
+			result.Name = d.Name.Name
+			results = append(results, result)
 		}
 	}
 	return results, nil
 }
 
+// isTestName mirrors Go's convention: Test is a test only when followed by a
+// non-lowercase rune. This avoids accidentally executing helper functions
+// such as Testdata or Testhelper as tests.
+func isTestName(name string) bool {
+	if !strings.HasPrefix(name, "Test") || len(name) == len("Test") {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(name[len("Test"):])
+	return !unicode.IsLower(r)
+}
+
 func classifyTestOutcome(t any, err error, line, col int) TestResult {
+	messages := interp.TestMessages(t)
+	if interp.IsTestSkipped(err) || interp.TestSkipped(t) {
+		return TestResult{Pass: true, Skipped: true, Line: line, Column: col, Category: CategorySkip, Messages: messages}
+	}
 	if err != nil && !interp.IsTestFatal(err) {
 		if isTimeoutErr(err) {
-			return TestResult{Line: line, Column: col, Category: CategoryTimeout}
+			return TestResult{Line: line, Column: col, Category: CategoryTimeout, Messages: messages}
 		}
-		return TestResult{Panic: true, Line: line, Column: col, Category: CategoryPanic}
+		return TestResult{Panic: true, Line: line, Column: col, Category: CategoryPanic, Messages: messages}
 	}
 	if interp.TestFailed(t) {
-		return TestResult{Line: line, Column: col, Category: CategoryWrongValue}
+		return TestResult{Line: line, Column: col, Category: CategoryWrongValue, Messages: messages}
 	}
-	return TestResult{Pass: true, Line: line, Column: col, Category: CategoryPass}
+	return TestResult{Pass: true, Line: line, Column: col, Category: CategoryPass, Messages: messages}
 }
 
 // isTimeoutErr reports whether err reflects an execution stopped by a

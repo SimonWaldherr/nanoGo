@@ -786,11 +786,14 @@ multi-package module straight from its VFS:
   then evaluate var initializers), so forward references across files work
   regardless of file order.
 - **`interp/loader`**: `LoadModule` walks a VFS tree, resolves local imports
-  against a `go.mod` module path (only the `module` line is parsed — no
-  `go.sum`, no downloads) and nanoGo's curated builtin packages, detects
-  import cycles, and topologically orders packages so `init()`/package-level
-  `var` initialization runs dependency-first. `RunProgram` then builds and
-  runs the whole program. `RunFunctionTest`/`RunFunctionBench` call one
+  against the `go.mod` module path, local `replace` directives, explicitly
+  configured VFS dependency roots, and nanoGo's curated builtin packages. It
+  never downloads code or interprets `go.sum`: the embedding host decides
+  exactly which dependency snapshots enter the VFS. `ModuleCache` reuses a
+  parsed dependency graph until the VFS revision changes, then invalidates it
+  automatically. The loader detects import cycles and topologically orders
+  packages so `init()`/package-level `var` initialization runs dependency-first.
+  `RunProgram` then builds and runs the whole program. `RunFunctionTest`/`RunFunctionBench` call one
   function directly against data-driven cases (useful for exercise grading).
   `RunPackageTests`/`RunPackageBenchmarks` run `TestXxx(t *testing.T)` and
   `BenchmarkXxx(b *testing.B)` functions from `_test.go` files when they use
@@ -842,6 +845,23 @@ interp.RegisterBuiltinPackages(vm)
 prog, err := loader.LoadModule(vm.VFS, "/app", loader.Options{})
 if err != nil { /* handle the invalid module */ }
 if err := loader.RunProgram(ctx, vm, prog, "main"); err != nil { /* handle */ }
+```
+
+For dynamic, host-controlled dependency snapshots, point module paths at VFS
+roots. A local `replace example.com/lib => ./third_party/lib` in `go.mod`
+works too. Reuse a cache when an editor or MCP session repeatedly loads an
+unchanged multi-file module; every result remains safe to build with a
+different interpreter.
+
+```go
+cache := loader.NewModuleCache(vm.VFS)
+prog, err := cache.Load("/app", loader.Options{
+    DependencyRoots: map[string]string{
+        "example.com/shared": "/deps/shared",
+    },
+})
+if err != nil { /* handle the invalid module */ }
+// VFS writes invalidate this parsed graph automatically on the next Load.
 ```
 
 `RunFunctionTest` builds the program when needed and returns one classified
@@ -897,6 +917,9 @@ make size-report
 # Build CLI interpreter
 make build-cli
 
+# Run supported TestXxx functions from a multi-file module snapshot
+./build/nanogo-cli test ./my-module
+
 # Build REPL
 make build-repl
 
@@ -951,6 +974,11 @@ python3 -m http.server 8080 --directory web
 
 # Open http://localhost:8080 in your browser
 ```
+
+The playground's **Test** button runs `TestXxx(t *testing.T)` functions from
+the current editor document through the same nanoGo `testing` subset as the
+module loader. For a true multi-file project, use MCP `test_module` or the CLI
+command `nanogo-cli test <module-dir> [package-name]`.
 
 ### Testing
 

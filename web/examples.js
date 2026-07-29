@@ -246,7 +246,7 @@ func main() {
       }
       browser.CanvasFlush()
       grid = lifeStep(grid)
-      time.Sleep(20)
+      time.Sleep(30)
     }
     fmt.Println("round", round, "complete")
   }
@@ -454,10 +454,10 @@ import (
 )
 
 func main() {
-  fmt.Println("Scanner — a sweeping line with targets")
+  fmt.Println("Scanner — 144 sweeping frames with pulsing targets")
   w, h := 48, 24
   browser.CanvasSize(w, h)
-  for t := 0; t < 72; t++ {
+  for t := 0; t < 144; t++ {
     for y := 0; y < h; y++ {
       for x := 0; x < w; x++ { browser.CanvasSet(x, y, 0 == 1) }
     }
@@ -532,9 +532,9 @@ func main() {
   grid := make([][]int, h)
   for y := 0; y < h; y++ { grid[y] = make([]int, w) }
   x, y, dir := w/2, h/2, 0
-  fmt.Println("Langton's ant — 200 rule-driven steps")
+  fmt.Println("Langton's ant — 480 rule-driven steps")
   browser.CanvasSize(w, h)
-  for step := 0; step < 200; step++ {
+  for step := 0; step < 480; step++ {
     if grid[y][x] == 0 { dir = (dir + 1) % 4; grid[y][x] = 1 } else { dir = (dir + 3) % 4; grid[y][x] = 0 }
     if dir == 0 { x = (x + 1) % w }
     if dir == 1 { y = (y + 1) % h }
@@ -731,13 +731,18 @@ func main() {
     queue = visit(grid, queue, x, y, x-1, y)
     queue = visit(grid, queue, x, y, x, y+1)
     queue = visit(grid, queue, x, y, x, y-1)
-    if head%10 == 0 {
+    if head%6 == 0 {
       draw(grid, sx, sy, tx, ty)
-      time.Sleep(30)
+      time.Sleep(42)
     }
     if grid[ty][tx] >= 0 { break }
   }
   draw(grid, sx, sy, tx, ty)
+  for pulse := 0; pulse < 28; pulse++ {
+    browser.CanvasSetLevel(tx, ty, 2+pulse%6)
+    browser.CanvasFlush()
+    time.Sleep(42)
+  }
   if grid[ty][tx] >= 0 { fmt.Println("route found in", grid[ty][tx], "steps") } else { fmt.Println("no route found") }
 }
 `,
@@ -807,7 +812,7 @@ func main() {
       }
     }
     row = next
-    time.Sleep(34)
+    time.Sleep(58)
   }
   fmt.Println("done")
 }
@@ -884,8 +889,8 @@ import (
 func main() {
   w, h := 56, 32
   browser.CanvasSize(w, h)
-  fmt.Println("Metaballs — additive distance fields")
-  for frame := 0; frame < 48; frame++ {
+  fmt.Println("Metaballs — 96 additive distance-field frames")
+  for frame := 0; frame < 96; frame++ {
     ax, ay := 12+frame%24, 8+(frame*3)%14
     bx, by := 42-(frame*2)%24, 22-(frame*5)%14
     for y := 0; y < h; y++ {
@@ -902,6 +907,148 @@ func main() {
     }
     browser.CanvasFlush()
     time.Sleep(30)
+  }
+  fmt.Println("done")
+}
+`,
+  "Orbit Simulator": `package main
+
+import (
+  "browser"
+  "fmt"
+  "math"
+  "time"
+)
+
+func main() {
+  w, h := 56, 32
+  browser.CanvasSize(w, h)
+  fmt.Println("Orbit simulator — 144 harmonic orbit frames")
+  for frame := 0; frame < 144; frame++ {
+    for y := 0; y < h; y++ {
+      for x := 0; x < w; x++ { browser.CanvasSetLevel(x, y, 0) }
+    }
+    browser.CanvasSetLevel(w/2, h/2, 7)
+    for planet := 0; planet < 3; planet++ {
+      angle := float64(frame)*(0.08+float64(planet)*0.035) + float64(planet)*2.1
+      radius := 7 + planet*4
+      x := w/2 + int(math.Cos(angle)*float64(radius))
+      y := h/2 + int(math.Sin(angle)*float64(radius)/2)
+      browser.CanvasSetLevel(x, y, 3+planet*2)
+      browser.CanvasSetLevel((x+w/2)/2, (y+h/2)/2, 1+planet)
+    }
+    browser.CanvasFlush()
+    time.Sleep(28)
+  }
+  fmt.Println("done")
+}
+`,
+  "Sierpinski Triangle": `package main
+
+import (
+  "browser"
+  "fmt"
+)
+
+func visible(x int, y int) bool {
+  for x > 0 || y > 0 {
+    if x%2 == 1 && y%2 == 1 { return false }
+    x = x / 2
+    y = y / 2
+  }
+  return true
+}
+
+func main() {
+  w, h := 64, 40
+  browser.CanvasSize(w, h)
+  fmt.Println("Sierpinski triangle — Pascal's triangle modulo two")
+  for y := 0; y < h; y++ {
+    for x := 0; x < w; x++ {
+      localX := x - (w-h)/2
+      if localX >= 0 && localX <= y && visible(localX, y) {
+        browser.CanvasSetLevel(x, y, 2+y%6)
+      } else {
+        browser.CanvasSetLevel(x, y, 0)
+      }
+    }
+  }
+  browser.CanvasFlush()
+  fmt.Println("done")
+}
+`,
+  "Monte Carlo Pi": `package main
+
+import (
+  "browser"
+  "fmt"
+  "time"
+)
+
+func next(state int) int {
+  return (state*25173 + 13849) % 65536
+}
+
+func main() {
+  w, h := 40, 40
+  state, inside := 17, 0
+  browser.CanvasSize(w, h)
+  fmt.Println("Monte Carlo π — deterministic random samples")
+  for sample := 1; sample <= 1440; sample++ {
+    state = next(state)
+    x := state % w
+    state = next(state)
+    y := state % h
+    dx, dy := x-w/2, y-h/2
+    level := 1
+    if dx*dx+dy*dy < (w/2)*(w/2) {
+      inside++
+      level = 5
+    }
+    browser.CanvasSetLevel(x, y, level)
+    if sample%16 == 0 {
+      browser.CanvasFlush()
+      time.Sleep(24)
+    }
+  }
+  fmt.Println("π estimate:", float64(inside)*4/1440)
+}
+`,
+  "Turing Machine": `package main
+
+import (
+  "browser"
+  "fmt"
+  "time"
+)
+
+func drawTape(tape []int, head int, state int) {
+  for x := 0; x < len(tape); x++ {
+    level := 1
+    if tape[x] == 1 { level = 4 }
+    browser.CanvasSetLevel(x, 1, level)
+    browser.CanvasSetLevel(x, 2, level)
+  }
+  browser.CanvasSetLevel(head, 0, 7)
+  browser.CanvasSetLevel(head, 3, 2+state*3)
+  browser.CanvasFlush()
+}
+
+func main() {
+  tape := make([]int, 48)
+  head, state := 24, 0
+  browser.CanvasSize(48, 4)
+  fmt.Println("Turing machine — two states, a growing tape")
+  for step := 0; step < 144; step++ {
+    drawTape(tape, head, state)
+    if state == 0 {
+      if tape[head] == 0 { tape[head] = 1; head++; state = 1 } else { tape[head] = 0; head--; state = 1 }
+    } else {
+      if tape[head] == 0 { tape[head] = 1; head--; state = 0 } else { tape[head] = 1; head++; state = 0 }
+    }
+    if head < 2 { head = 2 }
+    if head > len(tape)-3 { head = len(tape)-3 }
+    time.Sleep(38)
   }
   fmt.Println("done")
 }

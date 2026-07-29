@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"simonwaldherr.de/go/nanogo/interp"
+	"simonwaldherr.de/go/nanogo/interp/loader"
 )
 
 func main() {
@@ -34,6 +35,19 @@ func main() {
 			os.Exit(1)
 		}
 		runVet(os.Args[2])
+	case "test":
+		if len(os.Args) < 3 || len(os.Args) > 4 {
+			fmt.Fprintln(os.Stderr, "usage: nanogo-cli test <module-dir> [package-name]")
+			os.Exit(1)
+		}
+		packageName := ""
+		if len(os.Args) == 4 {
+			packageName = os.Args[3]
+		}
+		if err := runModuleTests(os.Args[2], packageName); err != nil {
+			fmt.Fprintln(os.Stderr, "test error:", err)
+			os.Exit(1)
+		}
 	default:
 		// Original behaviour: nanogo-cli <file.go> [timeout-seconds]
 		runFile(os.Args[1], os.Args[2:])
@@ -44,6 +58,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: nanogo-cli <file.go> [timeout-seconds]")
 	fmt.Fprintln(os.Stderr, "       nanogo-cli fmt <file.go>")
 	fmt.Fprintln(os.Stderr, "       nanogo-cli vet <file.go>")
+	fmt.Fprintln(os.Stderr, "       nanogo-cli test <module-dir> [package-name]")
 }
 
 // runFmt prints the gofmt-formatted version of file to stdout.
@@ -79,6 +94,78 @@ func runVet(path string) {
 	if len(issues) > 0 {
 		os.Exit(1)
 	}
+}
+
+// runModuleTests snapshots a host module into a read-only VFS and runs the
+// loader's supported testing.T subset. This deliberately is not `go test`:
+// it never executes the host compiler, downloads modules, or grants guest
+// code direct host-disk access.
+func runModuleTests(moduleDir, packageName string) error {
+	vfs := interp.NewVFS()
+	if err := vfs.ImportDir("/module", moduleDir, interp.VFSImportOptions{ReadOnly: true}); err != nil {
+		return fmt.Errorf("import module: %w", err)
+	}
+	prog, err := loader.LoadModule(vfs, "/module", loader.Options{})
+	if err != nil {
+		return err
+	}
+
+	vm := interp.NewInterpreterWithVFS(vfs)
+	vm.Capabilities.FileSystem.Read = true
+	registerSafeNatives(vm)
+	interp.RegisterBuiltinPackages(vm)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	packages := prog.Order
+	if packageName != "" {
+		dir, ok := findPackageDir(prog, packageName)
+		if !ok {
+			return fmt.Errorf("package %q not found", packageName)
+		}
+		packages = []string{dir}
+	}
+
+	failed := 0
+	for _, dir := range packages {
+		name := prog.Packages[dir].Name
+		results, err := loader.RunPackageTests(ctx, vm, prog, name)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		if len(results) == 0 {
+			fmt.Printf("?\t%s\t[no nanoGo tests]\n", name)
+			continue
+		}
+		packageFailed := 0
+		for _, result := range results {
+			if !result.Pass {
+				packageFailed++
+				fmt.Printf("FAIL\t%s\t%s\t%d:%d %s\n", name, result.Name, result.Line, result.Column, result.Category)
+				for _, message := range result.Messages {
+					fmt.Printf("\t%s\n", message)
+				}
+			}
+		}
+		if packageFailed == 0 {
+			fmt.Printf("ok\t%s\t%d test(s)\n", name, len(results))
+		} else {
+			failed += packageFailed
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d test(s) failed", failed)
+	}
+	return nil
+}
+
+func findPackageDir(prog *loader.Program, packageName string) (string, bool) {
+	for _, dir := range prog.Order {
+		if prog.Packages[dir].Name == packageName {
+			return dir, true
+		}
+	}
+	return "", false
 }
 
 // runFile executes a Go source file in the interpreter (original behaviour).

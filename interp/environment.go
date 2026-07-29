@@ -17,9 +17,13 @@ import (
 // map allocation at all. This was previously the single largest allocation
 // source in the interpreter (see interp/bench_test.go's benchmarks).
 type Env struct {
-	Vars    map[string]any
-	intVars []intVar
-	Parent  *Env
+	Vars map[string]any
+	// A call or block scope frequently holds exactly one integer binding (a
+	// recursive parameter or a loop counter). Keeping that one binding here
+	// avoids a second allocation per frame. Further values use Vars, retaining
+	// Env's compact size instead of making every scope permanently larger.
+	inlineIntVar intVar
+	Parent       *Env
 	// shared marks a package scope that hosts may hot-swap while guest code is
 	// running. It is fixed when the scope is created, so callers can lock this
 	// one boundary without making short-lived function/block scopes pay locks.
@@ -28,7 +32,7 @@ type Env struct {
 	frame  *callFrame
 }
 
-// intVar is one binding in Env.intVars. A tiny linear-scanned slice beats a
+// intVar is one binding in Env's small integer table. A tiny linear scan beats a
 // map[string]int here: function-call and block scopes almost always hold
 // only a handful of int locals (loop counters, a couple of params), and for
 // that size a map's header-plus-bucket allocation and hashing cost more than
@@ -42,31 +46,31 @@ type intVar struct {
 	val  int
 }
 
-func lookupIntVar(vars []intVar, name string) (int, bool) {
-	for i := range vars {
-		if vars[i].name == name {
-			return vars[i].val, true
-		}
+func lookupIntVar(env *Env, name string) (int, bool) {
+	if env.inlineIntVar.name == name && name != "" {
+		return env.inlineIntVar.val, true
 	}
 	return 0, false
 }
 
 func setOrAppendIntVar(env *Env, name string, value int) {
-	for i := range env.intVars {
-		if env.intVars[i].name == name {
-			env.intVars[i].val = value
-			return
-		}
+	if env.inlineIntVar.name == name && name != "" {
+		env.inlineIntVar.val = value
+		return
 	}
-	env.intVars = append(env.intVars, intVar{name, value})
+	if env.inlineIntVar.name == "" {
+		env.inlineIntVar = intVar{name, value}
+		return
+	}
+	if env.Vars == nil {
+		env.Vars = make(map[string]any, 4)
+	}
+	env.Vars[name] = value
 }
 
 func removeIntVar(env *Env, name string) {
-	for i := range env.intVars {
-		if env.intVars[i].name == name {
-			env.intVars = append(env.intVars[:i], env.intVars[i+1:]...)
-			return
-		}
+	if env.inlineIntVar.name == name {
+		env.inlineIntVar = intVar{}
 	}
 }
 
@@ -295,11 +299,11 @@ func (vm *Interpreter) RegisterPackage(alias string, pkg *Package) {
 }
 
 // lookupValueInEnv reads name directly from env (not its ancestors),
-// checking the unboxed intVars table before the general Vars map. Callers
+// checking the unboxed inline integer slot before the general Vars map. Callers
 // hold whatever lock (or none, on the single-goroutine fast path) is
 // appropriate for env; this only touches the two maps.
 func lookupValueInEnv(env *Env, name string) (any, bool) {
-	if n, ok := lookupIntVar(env.intVars, name); ok {
+	if n, ok := lookupIntVar(env, name); ok {
 		return n, true
 	}
 	v, ok := env.Vars[name]
@@ -344,14 +348,14 @@ func (vm *Interpreter) getInt(name string, env *Env) (int, bool) {
 	for e := env; e != nil; e = e.Parent {
 		if e.shared || (exec != nil && exec.concurrent.Load()) {
 			e.mu.RLock()
-			n, ok := lookupIntVar(e.intVars, name)
+			n, ok := lookupIntVar(e, name)
 			e.mu.RUnlock()
 			if ok {
 				return n, true
 			}
 			continue
 		}
-		if n, ok := lookupIntVar(e.intVars, name); ok {
+		if n, ok := lookupIntVar(e, name); ok {
 			return n, true
 		}
 	}
@@ -367,12 +371,27 @@ func (vm *Interpreter) getLocal(name string, env *Env) (any, bool) {
 	return lookupValueInEnv(env, name)
 }
 
+// hasLocalBinding reports whether name belongs to this exact scope. Short
+// declarations use this rather than get(), because an outer binding is
+// deliberately shadowed by `x := ...` in an inner block.
+func (vm *Interpreter) hasLocalBinding(name string, env *Env) bool {
+	exec := vm.activeExecution
+	if env.shared || (exec != nil && exec.concurrent.Load()) {
+		env.mu.RLock()
+		intOK, valueOK := lookupOwnershipInEnv(env, name)
+		env.mu.RUnlock()
+		return intOK || valueOK
+	}
+	intOK, valueOK := lookupOwnershipInEnv(env, name)
+	return intOK || valueOK
+}
+
 // lookupOwnershipInEnv reports whether name is stored directly in env, in
 // either table, without reading the (possibly large, for Vars) value —
 // set uses this to find which ancestor owns a name before deciding how to
 // update it.
 func lookupOwnershipInEnv(env *Env, name string) (intOK, valueOK bool) {
-	_, intOK = lookupIntVar(env.intVars, name)
+	_, intOK = lookupIntVar(env, name)
 	if intOK {
 		return true, false
 	}
@@ -493,7 +512,7 @@ func (vm *Interpreter) setInt(name string, value int, env *Env) bool {
 	for e := env; e != nil; e = e.Parent {
 		if e.shared || (exec != nil && exec.concurrent.Load()) {
 			e.mu.RLock()
-			_, ok := lookupIntVar(e.intVars, name)
+			_, ok := lookupIntVar(e, name)
 			e.mu.RUnlock()
 			if !ok {
 				continue
@@ -503,7 +522,7 @@ func (vm *Interpreter) setInt(name string, value int, env *Env) bool {
 			e.mu.Unlock()
 			return true
 		}
-		if _, ok := lookupIntVar(e.intVars, name); ok {
+		if _, ok := lookupIntVar(e, name); ok {
 			setOrAppendIntVar(e, name, value)
 			return true
 		}
@@ -584,7 +603,7 @@ func (vm *Interpreter) collectLocalVars(env *Env) map[string]any {
 		if locked {
 			e.mu.RLock()
 		}
-		for _, iv := range e.intVars {
+		if iv := e.inlineIntVar; iv.name != "" {
 			if _, seen := out[iv.name]; !seen {
 				out[iv.name] = iv.val
 			}

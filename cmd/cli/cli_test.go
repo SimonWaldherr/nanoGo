@@ -159,6 +159,38 @@ func main() { fmt.Println("hello") }
 	}
 }
 
+func TestRunModuleTestsSnapshotsAndRunsPackageTests(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/cli-test\n"), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "add.go"), []byte(`package calc
+
+func Add(a, b int) int { return a + b }
+`), 0644); err != nil {
+		t.Fatalf("write add.go: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "add_test.go"), []byte(`package calc
+
+import "testing"
+
+func TestAdd(t *testing.T) {
+	if Add(2, 3) != 5 { t.Fatalf("Add failed") }
+}
+`), 0644); err != nil {
+		t.Fatalf("write add_test.go: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runModuleTests(dir, ""); err != nil {
+			t.Fatalf("runModuleTests: %v", err)
+		}
+	})
+	if !strings.Contains(out, "ok\tcalc\t1 test(s)") {
+		t.Fatalf("module test output = %q, want passing package summary", out)
+	}
+}
+
 func TestRunFileSubcommandRouting(t *testing.T) {
 	// Verify the runFile/RunSafe path works for valid code.
 	err := RunSafe("package main\nfunc main(){}\n", time.Second)

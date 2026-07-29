@@ -21,6 +21,65 @@ type Options struct {
 	// EntryDir is the VFS directory of the program's entry package. Empty
 	// defaults to root itself.
 	EntryDir string
+
+	// DependencyRoots maps external module paths to roots already present in
+	// the VFS, for example "example.com/metrics" -> "/deps/metrics". It is
+	// the dynamic, host-controlled alternative to network downloads: callers
+	// may mount or update a dependency snapshot, then load it immediately.
+	// The longest matching module path wins, so a nested module can override
+	// a broader mapping.
+	DependencyRoots map[string]string
+}
+
+// moduleResolver maps import-path module prefixes to VFS roots. It performs
+// longest-prefix matching just like Go's module resolver, but only against
+// source that the embedding host has explicitly placed in the VFS.
+type moduleResolver struct {
+	roots map[string]string
+}
+
+func newModuleResolver(modulePath, root string, dependencies map[string]string) *moduleResolver {
+	r := &moduleResolver{roots: make(map[string]string, len(dependencies)+1)}
+	r.add(modulePath, root)
+	for module, dir := range dependencies {
+		r.add(module, dir)
+	}
+	return r
+}
+
+func (r *moduleResolver) add(modulePath, root string) {
+	if modulePath == "" || root == "" {
+		return
+	}
+	r.roots[modulePath] = path.Clean(root)
+}
+
+func (r *moduleResolver) resolve(importPath string) (string, bool) {
+	bestModule, bestRoot := "", ""
+	for module, root := range r.roots {
+		if importPath != module && !strings.HasPrefix(importPath, module+"/") {
+			continue
+		}
+		if len(module) > len(bestModule) {
+			bestModule, bestRoot = module, root
+		}
+	}
+	if bestModule == "" {
+		return "", false
+	}
+	return path.Join(bestRoot, strings.TrimPrefix(strings.TrimPrefix(importPath, bestModule), "/")), true
+}
+
+func (r *moduleResolver) rootForDir(dir string) string {
+	best := ""
+	for _, root := range r.roots {
+		if dir == root || strings.HasPrefix(dir, root+"/") {
+			if len(root) > len(best) {
+				best = root
+			}
+		}
+	}
+	return best
 }
 
 // ImportEdge is one resolved import within a package.
@@ -68,15 +127,21 @@ type Program struct {
 func LoadModule(vfs *interp.VFS, root string, opts Options) (*Program, error) {
 	root = path.Clean(root)
 	modulePath := opts.ModulePath
+	var rootModule ModuleFile
 	if data, err := vfs.ReadFile(path.Join(root, "go.mod")); err == nil {
-		mp, perr := ParseModulePath(data)
+		parsed, perr := ParseModuleFile(data)
 		if perr != nil {
 			return nil, fmt.Errorf("nanogo/loader: %s/go.mod: %w", root, perr)
 		}
-		modulePath = mp
+		rootModule = parsed
+		modulePath = parsed.Path
 	}
 	if modulePath == "" {
 		return nil, fmt.Errorf("nanogo/loader: no module path: %s has no go.mod and Options.ModulePath is empty", root)
+	}
+	resolver := newModuleResolver(modulePath, root, opts.DependencyRoots)
+	for module, replacement := range rootModule.Replaces {
+		resolver.add(module, resolveReplacementRoot(root, replacement))
 	}
 
 	entryDir := opts.EntryDir
@@ -88,10 +153,17 @@ func LoadModule(vfs *interp.VFS, root string, opts Options) (*Program, error) {
 	packages := map[string]*ParsedPackage{}
 	queue := []string{entryDir}
 	queued := map[string]bool{entryDir: true}
+	configuredRoots := map[string]bool{root: true}
 
 	for len(queue) > 0 {
 		dir := queue[0]
 		queue = queue[1:]
+		if moduleRoot := resolver.rootForDir(dir); moduleRoot != "" && !configuredRoots[moduleRoot] {
+			if err := configureModuleRoot(vfs, resolver, moduleRoot); err != nil {
+				return nil, err
+			}
+			configuredRoots[moduleRoot] = true
+		}
 
 		files, testFiles, fset, err := interp.ParsePackageDirFull(vfs, dir)
 		if err != nil {
@@ -106,11 +178,22 @@ func LoadModule(vfs *interp.VFS, root string, opts Options) (*Program, error) {
 				return nil, fmt.Errorf("nanogo/loader: package directory %s has mixed package names %q and %q", dir, pkgName, f.Name.Name)
 			}
 		}
+		for _, f := range testFiles {
+			if f.Name.Name != pkgName {
+				return nil, fmt.Errorf("nanogo/loader: external test package %q in %s is not supported (want package %q)", f.Name.Name, dir, pkgName)
+			}
+		}
 
 		pp := &ParsedPackage{Dir: dir, Name: pkgName, Files: files, TestFiles: testFiles, FSet: fset}
 
 		seen := map[string]bool{}
-		for _, f := range files {
+		// Test files can import helper packages that production code does not.
+		// Include them in discovery so RunPackageTests has the same dependency
+		// graph as an ordinary `go test` package build.
+		importFiles := make([]*ast.File, 0, len(files)+len(testFiles))
+		importFiles = append(importFiles, files...)
+		importFiles = append(importFiles, testFiles...)
+		for _, f := range importFiles {
 			for _, spec := range f.Imports {
 				importPath := strings.Trim(spec.Path.Value, `"`)
 				if seen[importPath] {
@@ -131,9 +214,9 @@ func LoadModule(vfs *interp.VFS, root string, opts Options) (*Program, error) {
 					continue
 				}
 
-				depDir, ok := resolveLocalImport(modulePath, root, importPath)
+				depDir, ok := resolver.resolve(importPath)
 				if !ok {
-					return nil, fmt.Errorf("nanogo/loader: import %q in package %s is neither a module-local package (module %q) nor a recognized builtin", importPath, dir, modulePath)
+					return nil, fmt.Errorf("nanogo/loader: import %q in package %s is neither a module-local package (module %q), a configured dependency, nor a recognized builtin", importPath, dir, modulePath)
 				}
 				pp.Imports = append(pp.Imports, ImportEdge{Alias: alias, Path: importPath, Dir: depDir})
 				if !queued[depDir] {
@@ -154,16 +237,30 @@ func LoadModule(vfs *interp.VFS, root string, opts Options) (*Program, error) {
 	return &Program{ModulePath: modulePath, Root: root, Entry: entryDir, Packages: packages, Order: order}, nil
 }
 
-func resolveLocalImport(modulePath, root, importPath string) (string, bool) {
-	if importPath == modulePath {
-		return root, true
+func resolveReplacementRoot(moduleRoot, replacement string) string {
+	if path.IsAbs(replacement) {
+		return path.Clean(replacement)
 	}
-	prefix := modulePath + "/"
-	if !strings.HasPrefix(importPath, prefix) {
-		return "", false
+	return path.Join(moduleRoot, replacement)
+}
+
+// configureModuleRoot discovers replace directives in a dependency's own
+// go.mod. A missing go.mod is allowed for an explicitly configured source
+// snapshot; malformed present files fail early with their exact VFS path.
+func configureModuleRoot(vfs *interp.VFS, resolver *moduleResolver, moduleRoot string) error {
+	data, err := vfs.ReadFile(path.Join(moduleRoot, "go.mod"))
+	if err != nil {
+		return nil
 	}
-	rel := strings.TrimPrefix(importPath, prefix)
-	return path.Join(root, rel), true
+	mod, err := ParseModuleFile(data)
+	if err != nil {
+		return fmt.Errorf("nanogo/loader: %s/go.mod: %w", moduleRoot, err)
+	}
+	resolver.add(mod.Path, moduleRoot)
+	for module, replacement := range mod.Replaces {
+		resolver.add(module, resolveReplacementRoot(moduleRoot, replacement))
+	}
+	return nil
 }
 
 // topoSort returns a dependency-first order over packages: every package's

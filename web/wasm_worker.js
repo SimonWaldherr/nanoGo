@@ -209,6 +209,25 @@ self.onmessage = async function (ev) {
     }
     return;
   }
+  if (msg && msg.type === 'test') {
+    if (!goReady || typeof self.nanoGoTest !== 'function') {
+      self.postMessage({ type: 'test-result', error: 'tests not available in this WASM build' });
+      return;
+    }
+    try {
+      const result = parseStats(self.nanoGoTest(msg.source || '', String(msg.filter || '')));
+      if (!result) {
+        self.postMessage({ type: 'test-result', error: 'test runner returned no result' });
+      } else if (result.error) {
+        self.postMessage({ type: 'test-result', error: result.error });
+      } else {
+        self.postMessage({ type: 'test-result', result });
+      }
+    } catch (e) {
+      self.postMessage({ type: 'test-result', error: String(e) });
+    }
+    return;
+  }
   if (msg && msg.type === 'vet') {
     if (!goReady || typeof self.nanoGoVet !== 'function') {
       self.postMessage({ type: 'vet-result', error: 'vet not available in this WASM build' });
@@ -249,6 +268,7 @@ function getCapabilities() {
   return {
     hasFormat: typeof self.nanoGoFormat === 'function',
     hasVet: typeof self.nanoGoVet === 'function',
+    hasTests: typeof self.nanoGoTest === 'function',
     hasAst: typeof self.nanoGoAst === 'function',
     hasCallGraph: typeof self.nanoGoCallGraph === 'function',
     hasBench: typeof self.nanoGoBench === 'function'

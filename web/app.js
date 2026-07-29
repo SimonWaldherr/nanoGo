@@ -23,6 +23,8 @@
   const stopBtn = document.getElementById('stopBtn');
   const formatBtn = document.getElementById('formatBtn');
   const vetBtn = document.getElementById('vetBtn');
+  const testBtn = document.getElementById('testBtn');
+  const testFilterEl = document.getElementById('testFilter');
   const clearBtn = document.getElementById('clearBtn');
   const shareBtn = document.getElementById('shareBtn');
   const scaleEl = document.getElementById('scale');
@@ -196,6 +198,18 @@ func main() {
         else log('vet: ' + (m.issues && m.issues.length ? m.issues.length + ' issue(s) — see console' : 'no issues'));
         if (m.issues) m.issues.forEach(iss => console.log('vet:', iss.line + ':' + iss.column, iss.message));
         break;
+      case 'test-result':
+        if (m.error) log('test error: ' + m.error);
+        else if (!m.result || !m.result.total) log('no matching TestXxx functions found');
+        else if (m.result.passed) log('PASS: ' + m.result.total + ' test(s) passed' + ((m.result.results || []).some(test => test.skipped) ? ' (includes skipped tests)' : ''));
+        else {
+          log('FAIL: ' + m.result.failed + ' of ' + m.result.total + ' test(s) failed');
+          (m.result.results || []).filter(test => !test.passed).forEach(test => {
+            const detail = (test.messages || []).join('; ') || test.category;
+            log('  ' + (test.name || 'Test') + ': ' + detail);
+          });
+        }
+        break;
       // ast-result / callgraph-result / bench-result carry structured JSON
       // meant for a real inspector UI (see index.html's Inspector panel for
       // a full implementation) — this minimal example just surfaces that
@@ -241,6 +255,10 @@ func main() {
 
   if (vetBtn) vetBtn.onclick = () => {
     if (worker) worker.postMessage({ type: 'vet', source: srcEl.value });
+  };
+
+  if (testBtn) testBtn.onclick = () => {
+    if (worker) worker.postMessage({ type: 'test', source: srcEl.value, filter: testFilterEl ? testFilterEl.value.trim() : '' });
   };
 
   if (clearBtn) clearBtn.onclick = () => {

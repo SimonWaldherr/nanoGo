@@ -6,7 +6,52 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"simonwaldherr.de/go/nanogo/interp"
 )
+
+// BenchmarkModuleCacheLoad measures the warm multi-package loading path. The
+// first cache.Load parses and resolves the graph; timed calls must only clone
+// immutable metadata, leaving a caller-safe unbuilt Program for each VM.
+func BenchmarkModuleCacheLoad(b *testing.B) {
+	vfs := interp.NewVFS()
+	mustWrite := func(name, source string) {
+		if err := vfs.MkdirAll(pathDir(name), 0755); err != nil {
+			b.Fatal(err)
+		}
+		if err := vfs.WriteFile(name, []byte(source), 0644); err != nil {
+			b.Fatal(err)
+		}
+	}
+	mustWrite("/cachebench/go.mod", "module example.com/cachebench\n")
+	mustWrite("/cachebench/main.go", `package main
+import "example.com/cachebench/mid"
+func main() { mid.Value() }
+`)
+	mustWrite("/cachebench/mid/mid.go", `package mid
+import "example.com/cachebench/leaf"
+func Value() int { return leaf.Value() }
+`)
+	mustWrite("/cachebench/leaf/leaf.go", `package leaf
+func Value() int { return 1 }
+`)
+
+	cache := NewModuleCache(vfs)
+	if _, err := cache.Load("/cachebench", Options{}); err != nil {
+		b.Fatalf("warm cache: %v", err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		prog, err := cache.Load("/cachebench", Options{})
+		if err != nil {
+			b.Fatalf("cache.Load: %v", err)
+		}
+		if len(prog.Order) != 3 {
+			b.Fatalf("package count = %d, want 3", len(prog.Order))
+		}
+	}
+}
 
 func TestRunFunctionBenchIsDeterministic(t *testing.T) {
 	vm, _ := newLoaderTestVM()

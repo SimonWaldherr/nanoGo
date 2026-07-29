@@ -3,6 +3,7 @@ package interp
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,9 +17,16 @@ import (
 // guest defer cannot accidentally intercept it.
 var errTestFatal = errors.New("nanogo: testing.T.Fatalf")
 
+// errTestSkip mirrors testing.T.Skipf's Goexit behaviour. It is deliberately
+// distinct from a failure so a host test runner can report it as skipped.
+var errTestSkip = errors.New("nanogo: testing.T.Skipf")
+
 // IsTestFatal reports whether err was produced by testing.T.Fatalf, as
 // opposed to a genuine guest panic or another runtime error.
 func IsTestFatal(err error) bool { return errors.Is(err, errTestFatal) }
+
+// IsTestSkipped reports whether err was produced by testing.T.Skip/Skipf.
+func IsTestSkipped(err error) bool { return errors.Is(err, errTestSkip) }
 
 // testState is the native backing object for a *testing.T (or *testing.B)
 // StructVal, mirroring the nativeWaitGroup/nativeTimer pattern used
@@ -26,6 +34,7 @@ func IsTestFatal(err error) bool { return errors.Is(err, errTestFatal) }
 type testState struct {
 	mu       sync.Mutex
 	failed   bool
+	skipped  bool
 	messages []string
 }
 
@@ -46,6 +55,9 @@ func ensureTestState(v any) *testState {
 // TestFailed reports whether t (a *testing.T value from RegisterBuiltinPackages)
 // recorded a failure via Errorf or Fatalf.
 func TestFailed(t any) bool { return ensureTestState(t).failed }
+
+// TestSkipped reports whether t called Skip or Skipf.
+func TestSkipped(t any) bool { return ensureTestState(t).skipped }
 
 // TestMessages returns every message recorded via Errorf/Fatalf on t, in call order.
 func TestMessages(t any) []string {
@@ -78,6 +90,29 @@ func (vm *Interpreter) recordTestFailure(recv any, format string, args []any, fa
 		return nil, errTestFatal
 	}
 	return nil, nil
+}
+
+func testArgsMessage(args []any) string {
+	parts := make([]string, len(args))
+	for i, arg := range args {
+		parts[i] = ToString(arg)
+	}
+	return strings.Join(parts, " ")
+}
+
+func (vm *Interpreter) recordTestSkip(recv any, format string, args []any) (any, error) {
+	message := format
+	if sp, ok := vm.natives["__hostSprintf"]; ok {
+		if res, err := sp(append([]any{format}, args...)); err == nil {
+			message = ToString(res)
+		}
+	}
+	ts := ensureTestState(recv)
+	ts.mu.Lock()
+	ts.skipped = true
+	ts.messages = append(ts.messages, message)
+	ts.mu.Unlock()
+	return nil, errTestSkip
 }
 
 // benchState is the native backing object for a *testing.B StructVal. Steps
@@ -171,11 +206,32 @@ func registerTestingPackage(vm *Interpreter) {
 		}
 		return vm.recordTestFailure(args[0], ToString(args[1]), args[2:], false)
 	}}
+	tType.Methods["Error"] = &Function{Name: "Error", RecvType: "T", Params: []string{"args"}, IsVariadic: true, Native: func(args []any) (any, error) {
+		if len(args) < 2 {
+			return vm.recordTestFailure(args[0], "", nil, false)
+		}
+		return vm.recordTestFailure(args[0], "%s", []any{testArgsMessage(args[1:])}, false)
+	}}
 	tType.Methods["Fatalf"] = &Function{Name: "Fatalf", RecvType: "T", Params: []string{"format"}, IsVariadic: true, Native: func(args []any) (any, error) {
 		if len(args) < 2 {
 			return nil, nil
 		}
 		return vm.recordTestFailure(args[0], ToString(args[1]), args[2:], true)
+	}}
+	tType.Methods["Fatal"] = &Function{Name: "Fatal", RecvType: "T", Params: []string{"args"}, IsVariadic: true, Native: func(args []any) (any, error) {
+		if len(args) < 2 {
+			return vm.recordTestFailure(args[0], "", nil, true)
+		}
+		return vm.recordTestFailure(args[0], "%s", []any{testArgsMessage(args[1:])}, true)
+	}}
+	tType.Methods["Skipf"] = &Function{Name: "Skipf", RecvType: "T", Params: []string{"format"}, IsVariadic: true, Native: func(args []any) (any, error) {
+		if len(args) < 2 {
+			return vm.recordTestSkip(args[0], "", nil)
+		}
+		return vm.recordTestSkip(args[0], ToString(args[1]), args[2:])
+	}}
+	tType.Methods["Skip"] = &Function{Name: "Skip", RecvType: "T", Params: []string{"args"}, IsVariadic: true, Native: func(args []any) (any, error) {
+		return vm.recordTestSkip(args[0], "%s", []any{testArgsMessage(args[1:])})
 	}}
 	tType.Methods["Helper"] = &Function{Name: "Helper", RecvType: "T", Native: func(args []any) (any, error) {
 		return nil, nil
@@ -195,7 +251,7 @@ func registerTestingPackage(vm *Interpreter) {
 		// caller's own test. Any other error (a genuine panic, a step-limit
 		// error, ...) does propagate, matching a subtest crash taking down
 		// the run.
-		if err != nil && !IsTestFatal(err) {
+		if err != nil && !IsTestFatal(err) && !IsTestSkipped(err) {
 			return false, err
 		}
 		passed := !TestFailed(childT)

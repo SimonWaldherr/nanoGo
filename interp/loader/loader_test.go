@@ -128,6 +128,7 @@ import (
 func main() {
     fmt.Println(path.Base("/api/users.json"), utf8.RuneCountInString("Go✓"))
 }
+
 `)
 
 	prog, err := LoadModule(vfs, "/proj", Options{})
@@ -140,5 +141,46 @@ func main() {
 	}
 	if got, want := out.String(), "users.json 3\n"; got != want {
 		t.Fatalf("builtin package output = %q, want %q", got, want)
+	}
+}
+
+func TestLoadModuleDiscoversTestOnlyLocalImports(t *testing.T) {
+	vfs := interp.NewVFS()
+	writeLoaderFile(t, vfs, "/proj/go.mod", "module example.com/proj\n")
+	writeLoaderFile(t, vfs, "/proj/main.go", `package main
+
+func main() {}
+`)
+	writeLoaderFile(t, vfs, "/proj/helper/helper.go", `package helper
+
+func Value() int { return 42 }
+`)
+	writeLoaderFile(t, vfs, "/proj/main_test.go", `package main
+
+import (
+	"testing"
+	"example.com/proj/helper"
+)
+
+func TestHelper(t *testing.T) {
+	if helper.Value() != 42 { t.Fatalf("helper import failed") }
+}
+`)
+
+	prog, err := LoadModule(vfs, "/proj", Options{})
+	if err != nil {
+		t.Fatalf("LoadModule: %v", err)
+	}
+	if _, ok := prog.Packages["/proj/helper"]; !ok {
+		t.Fatalf("test-only dependency missing from %v", prog.Order)
+	}
+	vm, _ := newLoaderTestVM()
+	vm.VFS = vfs
+	results, err := RunPackageTests(context.Background(), vm, prog, "main")
+	if err != nil {
+		t.Fatalf("RunPackageTests: %v", err)
+	}
+	if len(results) != 1 || !results[0].Pass {
+		t.Fatalf("test-only import results = %+v", results)
 	}
 }

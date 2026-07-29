@@ -2,12 +2,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"sort"
 	"syscall/js"
 	"time"
 
 	"simonwaldherr.de/go/nanogo/interp"
+	"simonwaldherr.de/go/nanogo/interp/loader"
 	"simonwaldherr.de/go/nanogo/runtime"
 )
 
@@ -316,6 +318,68 @@ func jsNanoGoVet(this js.Value, args []js.Value) any {
 	return arr
 }
 
+type sourceTestResultJSON struct {
+	Passed  bool `json:"passed"`
+	Total   int  `json:"total"`
+	Failed  int  `json:"failed"`
+	Results []struct {
+		Name     string   `json:"name"`
+		Passed   bool     `json:"passed"`
+		Skipped  bool     `json:"skipped,omitempty"`
+		Line     int      `json:"line"`
+		Column   int      `json:"column"`
+		Category string   `json:"category"`
+		Messages []string `json:"messages,omitempty"`
+	} `json:"results"`
+}
+
+// jsNanoGoTest runs TestXxx functions found in one editor document. Its
+// optional second argument is a go test -run style regular-expression filter.
+// The loader splits the document into a temporary VFS module, so this follows
+// the same testing.T subset and result categories as multi-file MCP/CLI projects.
+func jsNanoGoTest(this js.Value, args []js.Value) any {
+	result := sourceTestResultJSON{}
+	if len(args) < 1 {
+		data, _ := json.Marshal(map[string]string{"error": "missing source"})
+		return string(data)
+	}
+	vm := newPlaygroundVM()
+	match := ""
+	if len(args) > 1 {
+		match = args[1].String()
+	}
+	results, err := loader.RunSourceTestsMatching(context.Background(), vm, args[0].String(), match)
+	if err != nil {
+		data, _ := json.Marshal(map[string]string{"error": err.Error()})
+		return string(data)
+	}
+	result.Total = len(results)
+	result.Results = make([]struct {
+		Name     string   `json:"name"`
+		Passed   bool     `json:"passed"`
+		Skipped  bool     `json:"skipped,omitempty"`
+		Line     int      `json:"line"`
+		Column   int      `json:"column"`
+		Category string   `json:"category"`
+		Messages []string `json:"messages,omitempty"`
+	}, len(results))
+	for i, testResult := range results {
+		result.Results[i].Name = testResult.Name
+		result.Results[i].Passed = testResult.Pass
+		result.Results[i].Skipped = testResult.Skipped
+		result.Results[i].Line = testResult.Line
+		result.Results[i].Column = testResult.Column
+		result.Results[i].Category = testResult.Category
+		result.Results[i].Messages = testResult.Messages
+		if !testResult.Pass {
+			result.Failed++
+		}
+	}
+	result.Passed = result.Failed == 0
+	data, _ := json.Marshal(result)
+	return string(data)
+}
+
 // jsNanoGoVersion returns a JSON object with version/capability information
 // so the playground UI can detect which features are available.
 func jsNanoGoVersion(this js.Value, args []js.Value) any {
@@ -323,6 +387,7 @@ func jsNanoGoVersion(this js.Value, args []js.Value) any {
 		"version":      "0.2.0",
 		"hasFormat":    true,
 		"hasVet":       true,
+		"hasTests":     true,
 		"hasOS":        true,
 		"hasAst":       true,
 		"hasBench":     true,
@@ -367,6 +432,7 @@ func main() {
 	js.Global().Set("nanoGoBench", js.FuncOf(jsNanoGoBench))
 	js.Global().Set("nanoGoFormat", js.FuncOf(jsNanoGoFormat))
 	js.Global().Set("nanoGoVet", js.FuncOf(jsNanoGoVet))
+	js.Global().Set("nanoGoTest", js.FuncOf(jsNanoGoTest))
 	js.Global().Set("nanoGoVersion", js.FuncOf(jsNanoGoVersion))
 	js.Global().Set("nanoGoSetCanvas", js.FuncOf(jsNanoGoSetCanvas))
 	js.Global().Set("nanoGoSetScale", js.FuncOf(jsNanoGoSetScale))

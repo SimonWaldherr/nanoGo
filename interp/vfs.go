@@ -28,6 +28,12 @@ type VFS struct {
 
 	env map[string]string
 	cwd string
+
+	// revision advances after every content or directory-tree mutation. It is
+	// intentionally separate from the process environment/cwd: consumers such
+	// as loader.ModuleCache only need to invalidate parsed source when the VFS
+	// tree itself changes.
+	revision uint64
 }
 
 type vfsNode struct {
@@ -135,6 +141,15 @@ func (fs *VFS) ResolvePath(p string) string {
 	return cleanPath(p, fs.cwd)
 }
 
+// Revision reports the current source-tree revision. It lets higher-level
+// consumers cache parsed VFS content safely without having to hash or re-read
+// every file on each operation.
+func (fs *VFS) Revision() uint64 {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	return fs.revision
+}
+
 // Chdir changes the current working directory.
 func (fs *VFS) Chdir(p string) error {
 	fs.mu.Lock()
@@ -195,6 +210,7 @@ func (fs *VFS) WriteFile(p string, data []byte, mode int) error {
 		mode:    mode,
 	}
 	fs.addChildLocked(abs)
+	fs.revision++
 	return nil
 }
 
@@ -219,6 +235,7 @@ func (fs *VFS) Mkdir(p string, mode int) error {
 	}
 	fs.nodes[abs] = &vfsNode{name: path.Base(abs), isDir: true, modTime: time.Now(), mode: mode}
 	fs.addChildLocked(abs)
+	fs.revision++
 	return nil
 }
 
@@ -235,6 +252,7 @@ func (fs *VFS) MkdirAll(p string, mode int) error {
 	}
 	parts := strings.Split(strings.TrimPrefix(abs, "/"), "/")
 	current := "/"
+	changed := false
 	for _, part := range parts {
 		if part == "" {
 			continue
@@ -243,7 +261,11 @@ func (fs *VFS) MkdirAll(p string, mode int) error {
 		if _, ok := fs.nodes[current]; !ok {
 			fs.nodes[current] = &vfsNode{name: part, isDir: true, modTime: time.Now(), mode: mode}
 			fs.addChildLocked(current)
+			changed = true
 		}
+	}
+	if changed {
+		fs.revision++
 	}
 	return nil
 }
@@ -265,6 +287,7 @@ func (fs *VFS) Remove(p string) error {
 	}
 	delete(fs.nodes, abs)
 	fs.removeChildLocked(abs)
+	fs.revision++
 	return nil
 }
 
@@ -281,6 +304,7 @@ func (fs *VFS) RemoveAll(p string) error {
 	}
 	fs.removeSubtreeLocked(abs)
 	fs.removeChildLocked(abs)
+	fs.revision++
 	return nil
 }
 

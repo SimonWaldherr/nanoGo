@@ -76,6 +76,7 @@ func TestRunPackageTestsMatchesRealGoTest(t *testing.T) {
 func Add(a, b int) int {
 	return a + b
 }
+
 `
 	const testSrc = `package roundtrip
 
@@ -140,6 +141,64 @@ func TestAdd(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Skipf("real `go test` unavailable/incompatible in this environment (%v); output:\n%s", err, out)
+	}
+}
+
+func TestRunPackageTestsSupportsCommonTestingMethodsAndFilter(t *testing.T) {
+	vm, _ := newLoaderTestVM()
+	vfs := vm.VFS
+	writeLoaderFile(t, vfs, "/methods/go.mod", "module example.com/methods\n")
+	writeLoaderFile(t, vfs, "/methods/main.go", "package methods\n")
+	writeLoaderFile(t, vfs, "/methods/main_test.go", `package methods
+
+import "testing"
+
+func TestPass(t *testing.T) {}
+
+func TestFailure(t *testing.T) {
+	t.Error("got", 2, "want", 3)
+}
+
+func TestSkipped(t *testing.T) {
+	t.Skipf("not available on %s", "this platform")
+}
+
+// Testhelper is intentionally not a Go test name.
+func Testhelper(t *testing.T) {
+	t.Fatal("must not run")
+}
+`)
+
+	prog, err := LoadModule(vfs, "/methods", Options{})
+	if err != nil {
+		t.Fatalf("LoadModule: %v", err)
+	}
+	results, err := RunPackageTestsMatching(context.Background(), vm, prog, "methods", "Pass|Skipped")
+	if err != nil {
+		t.Fatalf("RunPackageTestsMatching: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("filtered result count = %d, want 2: %+v", len(results), results)
+	}
+	if results[0].Name != "TestPass" || !results[0].Pass || results[0].Skipped {
+		t.Errorf("pass result = %+v", results[0])
+	}
+	if results[1].Name != "TestSkipped" || !results[1].Pass || !results[1].Skipped || results[1].Category != CategorySkip {
+		t.Errorf("skip result = %+v", results[1])
+	}
+
+	// A fresh *testing.T is supplied per call, so the same loaded module can
+	// be used to assert Error's human-readable diagnostics independently.
+	results, err = RunPackageTestsMatching(context.Background(), vm, prog, "methods", "^TestFailure$")
+	if err != nil {
+		t.Fatalf("RunPackageTests: %v", err)
+	}
+	if len(results) != 1 || results[0].Name != "TestFailure" || results[0].Pass || len(results[0].Messages) != 1 || results[0].Messages[0] != "got 2 want 3" {
+		t.Errorf("failure result = %+v", results)
+	}
+
+	if _, err := RunPackageTestsMatching(context.Background(), vm, prog, "methods", "["); err == nil {
+		t.Fatal("invalid regexp should fail before running tests")
 	}
 }
 

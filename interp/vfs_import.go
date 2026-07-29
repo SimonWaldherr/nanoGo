@@ -221,6 +221,7 @@ func (vfs *VFS) applyImport(prefix string, entries []vfsImportEntry, readOnly bo
 		vfs.nodes[target] = &vfsNode{name: path.Base(target), content: content, modTime: entry.modTime, mode: mode, readOnly: readOnly}
 		vfs.addChildLocked(target)
 	}
+	vfs.revision++
 	return nil
 }
 

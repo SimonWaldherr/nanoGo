@@ -74,3 +74,29 @@ func TestParseModulePath(t *testing.T) {
 		})
 	}
 }
+
+func TestParseModuleFileLocalReplaces(t *testing.T) {
+	mod, err := ParseModuleFile([]byte(`module example.com/app
+
+replace example.com/one v1.2.3 => ./third_party/one
+replace (
+  example.com/two => ../two // an inline comment is allowed
+  example.com/remote => example.com/mirror v1.0.0
+)
+`))
+	if err != nil {
+		t.Fatalf("ParseModuleFile: %v", err)
+	}
+	if got, want := mod.Path, "example.com/app"; got != want {
+		t.Fatalf("module path = %q, want %q", got, want)
+	}
+	if got, want := mod.Replaces["example.com/one"], "./third_party/one"; got != want {
+		t.Fatalf("single replace = %q, want %q", got, want)
+	}
+	if got, want := mod.Replaces["example.com/two"], "../two"; got != want {
+		t.Fatalf("block replace = %q, want %q", got, want)
+	}
+	if _, ok := mod.Replaces["example.com/remote"]; ok {
+		t.Fatal("remote replacement must not be treated as a VFS dependency")
+	}
+}

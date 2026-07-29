@@ -159,6 +159,11 @@
         <button id="stopBtn" title="Stop running program">⏹️ <span class="btn-label">Stop</span></button>
         <button id="formatBtn" title="Format code with gofmt">✨ <span class="btn-label">Format</span></button>
         <button id="vetBtn" title="Run static analysis">🔍 <span class="btn-label">Vet</span></button>
+        <button id="testBtn" title="Run TestXxx functions in the current document">🧪 <span class="btn-label">Test</span></button>
+        <div class="input-group">
+          <label for="testFilter">Tests:</label>
+          <input id="testFilter" type="text" placeholder="filter (regexp)" title="Optional go test -run style filter">
+        </div>
         <button id="inspectBtn" title="Open the execution inspector (AST, benchmark, trace)">🔬 <span class="btn-label">Inspect</span></button>
         <button id="clearBtn">🗑️ <span class="btn-label">Clear</span></button>
         <div class="input-group">
@@ -434,6 +439,10 @@ Select an example from the sidebar to get started! 🚀</div>
         'Rule 30': { output: 'canvas', description: 'An elementary cellular automaton growing row by row', badge: 'Simulation', tags: ['Simulation', 'Animation', 'Graphics', 'Algorithms'] },
         "Knight's Tour": { output: 'canvas', description: 'Warnsdorff-guided knight traversal of a chessboard', badge: 'Algorithms', tags: ['Algorithms', 'Animation', 'Graphics'] },
         'Metaballs': { output: 'canvas', description: 'Moving additive distance fields with palette shading', badge: 'Graphics', tags: ['Graphics', 'Animation', 'Math', 'Simulation'] }
+        , 'Orbit Simulator': { output: 'canvas', description: 'Three animated bodies moving on harmonic elliptical orbits', badge: 'Simulation', tags: ['Simulation', 'Animation', 'Graphics', 'Math'] }
+        , 'Sierpinski Triangle': { output: 'canvas', description: 'A Pascal-triangle fractal rendered with integer arithmetic', badge: 'Math', tags: ['Math', 'Graphics', 'Algorithms'] }
+        , 'Monte Carlo Pi': { output: 'canvas', description: 'A deterministic random-sampling estimate of π', badge: 'Math', tags: ['Math', 'Animation', 'Graphics', 'Simulation'] }
+        , 'Turing Machine': { output: 'canvas', description: 'A small two-state tape machine with a moving head', badge: 'Algorithms', tags: ['Algorithms', 'Animation', 'Simulation', 'Graphics'] }
         , 'HTTP Client GET': { output: 'console', description: 'GET JSON and display a response snippet', badge: 'Web' }
         , 'HTTP Client POST': { output: 'console', description: 'POST JSON with response and CORS error handling', badge: 'Web' }
         , 'HTTP Client Errors': { output: 'console', description: 'Handle a non-2xx HTTP response with text, err', badge: 'Web' }
@@ -472,7 +481,7 @@ Select an example from the sidebar to get started! 🚀</div>
         if (examplesLoadPromise) return examplesLoadPromise;
         examplesLoadPromise = new Promise((resolve, reject) => {
           const script = document.createElement('script');
-          script.src = 'examples.js?8';
+          script.src = 'examples.js?10';
           script.async = true;
           script.dataset.nanogoExamples = 'true';
           script.onload = () => {
@@ -481,7 +490,7 @@ Select an example from the sidebar to get started! 🚀</div>
           };
           script.onerror = () => {
             examplesLoadPromise = null;
-            reject(new Error('Failed to load examples.js?8'));
+            reject(new Error('Failed to load examples.js?10'));
           };
           document.body.appendChild(script);
         });
@@ -678,6 +687,22 @@ Select an example from the sidebar to get started! 🚀</div>
           <p><strong>Metaballs</strong></p>
           <p>Two moving points contribute squared-distance fields. Thresholds turn their sum into soft-looking, merging colored blobs without requiring pixel images.</p>
         `
+        , 'Orbit Simulator': `
+          <p><strong>Orbit Simulator</strong></p>
+          <p>Three bodies use sine and cosine to trace elliptical orbits around a shared center. It is a compact introduction to periodic motion and animation frames.</p>
+        `
+        , 'Sierpinski Triangle': `
+          <p><strong>Sierpinski Triangle</strong></p>
+          <p>Each pixel corresponds to a binomial coefficient in Pascal’s triangle. The integer test reveals the fractal structure without recursion or image assets.</p>
+        `
+        , 'Monte Carlo Pi': `
+          <p><strong>Monte Carlo Pi</strong></p>
+          <p>A deterministic pseudo-random generator drops points into a square. The ratio inside its central circle gives a progressively better estimate of π.</p>
+        `
+        , 'Turing Machine': `
+          <p><strong>Turing Machine</strong></p>
+          <p>The colored tape, read head, and two states make the fundamental read–write–move loop of a Turing machine visible step by step.</p>
+        `
         , 'HTTP Client GET': `
           <p><strong>HTTP Client: GET</strong></p>
           <p>Fetches a public JSON resource, checks <code>err</code>, then trims the response for console output. Browser requests require the target to permit CORS.</p>
@@ -864,6 +889,8 @@ Select an example from the sidebar to get started! 🚀</div>
       const stopBtn = document.getElementById("stopBtn");
       const formatBtn = document.getElementById("formatBtn");
       const vetBtn = document.getElementById("vetBtn");
+      const testBtn = document.getElementById("testBtn");
+      const testFilterEl = document.getElementById("testFilter");
       const inspectBtn = document.getElementById("inspectBtn");
       const copyLogBtn = document.getElementById("copyLogBtn");
       const fileInput = document.getElementById("fileInput");
@@ -1499,6 +1526,25 @@ Select an example from the sidebar to get started! 🚀</div>
               } else if (m.issues) {
                 logMessage('🔍 Vet found ' + m.issues.length + ' issue(s):', 'warn');
                 m.issues.forEach(iss => logMessage('  ' + iss.line + ':' + iss.column + ': ' + iss.message, 'warn'));
+              }
+              break;
+            case 'test-result':
+              if (m.error) {
+                logMessage('🧪 Test error: ' + m.error, 'error');
+              } else if (m.result) {
+                const result = m.result;
+                if (!result.total) {
+                  logMessage('🧪 No matching TestXxx functions found in the current document', 'warn');
+                } else if (result.passed) {
+                  const skipped = (result.results || []).filter(test => test.skipped).length;
+                  logMessage('🧪 PASS: ' + result.total + ' test(s)' + (skipped ? ', ' + skipped + ' skipped' : '') + ' ✅', 'system');
+                } else {
+                  logMessage('🧪 FAIL: ' + result.failed + ' of ' + result.total + ' test(s) failed', 'error');
+                  (result.results || []).filter(test => !test.passed).forEach(test => {
+                    logMessage('  ' + (test.name || 'Test') + ' at ' + test.line + ':' + test.column + ' — ' + test.category, 'error');
+                    (test.messages || []).forEach(message => logMessage('    ' + message, 'error'));
+                  });
+                }
               }
               break;
             case 'ast-result':
@@ -2253,6 +2299,13 @@ Select an example from the sidebar to get started! 🚀</div>
         vetBtn.onclick = () => {
           if (!worker) { logMessage('Worker not ready', 'warn'); return; }
           worker.postMessage({ type: 'vet', source: getSource() });
+        };
+      }
+
+      if (testBtn) {
+        testBtn.onclick = () => {
+          if (!worker) { logMessage('Worker not ready', 'warn'); return; }
+          worker.postMessage({ type: 'test', source: getSource(), filter: testFilterEl ? testFilterEl.value.trim() : '' });
         };
       }
 

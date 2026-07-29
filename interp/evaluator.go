@@ -1041,6 +1041,17 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		return controlFlow{}, ch.Send(vm.Context(), val)
 
 	case *ast.AssignStmt:
+		// Go's short declaration reuses names already present in the current
+		// scope, shadows names from outer scopes, and requires at least one new
+		// non-blank name. Validate before evaluating the RHS so an invalid
+		// declaration has the same no-side-effects behaviour as a Go compiler
+		// rejection.
+		if st.Tok == token.DEFINE {
+			if err := vm.validateShortDecl(st.Lhs, env); err != nil {
+				return controlFlow{}, err
+			}
+		}
+
 		// The common counter/accumulator shapes (i := 0, sum = sum+i, ...) can
 		// retain their result in Env.intVars all the way through the assignment.
 		// Do this before allocating the generic RHS []any used by the complete
@@ -1763,6 +1774,40 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 	default:
 		return controlFlow{}, NewRuntimeError(fmt.Sprintf("unsupported stmt: %T", s))
 	}
+}
+
+// validateShortDecl implements the scope-sensitive rules for :=. The parser
+// accepts constructs such as `x := 1; x := 2`; Go's type checker rejects the
+// second one because it introduces no new variable, so nanoGo must reject it
+// before the evaluator mutates any state.
+func (vm *Interpreter) validateShortDecl(lhs []ast.Expr, env *Env) error {
+	newName := false
+	var seen map[string]struct{}
+	if len(lhs) > 1 {
+		seen = make(map[string]struct{}, len(lhs))
+	}
+	for _, expr := range lhs {
+		id, ok := expr.(*ast.Ident)
+		if !ok {
+			return NewRuntimeError("invalid := lhs")
+		}
+		if id.Name == "_" {
+			continue
+		}
+		if _, duplicate := seen[id.Name]; duplicate {
+			return NewRuntimeError("duplicate variable in := declaration: " + id.Name)
+		}
+		if seen != nil {
+			seen[id.Name] = struct{}{}
+		}
+		if !vm.hasLocalBinding(id.Name, env) {
+			newName = true
+		}
+	}
+	if !newName {
+		return NewRuntimeError("no new variables on left side of :=")
+	}
+	return nil
 }
 
 func keysOfMap(m *MapVal) []string {

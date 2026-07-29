@@ -86,6 +86,7 @@ func main() {
 	fmt.Println(x * y)
 	fmt.Println(x % y)
 }
+
 `)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	expected := []string{"13", "7", "30", "1"}
@@ -93,6 +94,55 @@ func main() {
 		if i >= len(lines) || strings.TrimSpace(lines[i]) != want {
 			t.Errorf("line %d: want %q, got %q", i, want, safeIndex(lines, i))
 		}
+	}
+}
+
+func TestShortDeclarationReusesAndShadowsByScope(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	x := 1
+	x, y := 2, 3
+	{
+		x := 10
+		x, z := 11, 12
+		fmt.Println(x, z)
+	}
+	fmt.Println(x, y)
+}
+`)
+	if got, want := strings.TrimSpace(out), "11 12\n2 3"; got != want {
+		t.Fatalf("short declaration scope = %q, want %q", got, want)
+	}
+}
+
+func TestShortDeclarationRequiresNewName(t *testing.T) {
+	vm, _ := newTestVM()
+	err := vm.Run(`package main
+func main() {
+	x := 1
+	x := 2
+	_ = x
+}`)
+	if err == nil || !strings.Contains(err.Error(), "no new variables on left side of :=") {
+		t.Fatalf("second short declaration error = %v, want no-new-variable error", err)
+	}
+}
+
+func TestIntegerBindingsBeyondInlineSlot(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	a, b, c := 1, 2, 3
+	b++
+	c += 4
+	fmt.Println(a, b, c)
+}
+`)
+	if got, want := strings.TrimSpace(out), "1 3 7"; got != want {
+		t.Fatalf("integer bindings beyond inline slot = %q, want %q", got, want)
 	}
 }
 
