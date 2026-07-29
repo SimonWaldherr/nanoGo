@@ -40,7 +40,7 @@
        loads before styles.css so the playground theme rules win the cascade;
        the scripts intentionally load before the inline application script. -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css" crossorigin="anonymous">
-  <link rel="stylesheet" href="styles.css?6">
+  <link rel="stylesheet" href="styles.css?9">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js" crossorigin="anonymous" defer></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js" crossorigin="anonymous" defer></script>
 </head>
@@ -1029,6 +1029,30 @@ Select an example from the sidebar to get started! 🚀</div>
       }
       initEditor();
       if (!editor) document.addEventListener('DOMContentLoaded', initEditor, { once: true });
+
+      // Keep the sticky toolbar/tabs offsets in sync with the header's and
+      // editor-header's real (variable, wrapping-dependent) height, so the
+      // Run/Stop/Vet/Test/Inspect controls and the output tabs never drift
+      // out from under the sticky header no matter how the page scrolls.
+      (function setupStickyOffsets() {
+        const headerEl = document.querySelector('.header');
+        const editorHeaderEl = document.querySelector('.editor-header');
+        if (!headerEl) return;
+        function update() {
+          const headerH = headerEl.offsetHeight;
+          document.documentElement.style.setProperty('--header-h', headerH + 'px');
+          const editorHeaderH = editorHeaderEl ? editorHeaderEl.offsetHeight : 0;
+          document.documentElement.style.setProperty('--toolbar-h', (headerH + editorHeaderH) + 'px');
+        }
+        update();
+        window.addEventListener('resize', update);
+        window.addEventListener('orientationchange', update);
+        if (typeof ResizeObserver !== 'undefined') {
+          const ro = new ResizeObserver(update);
+          ro.observe(headerEl);
+          if (editorHeaderEl) ro.observe(editorHeaderEl);
+        }
+      })();
 
       function getSource() { return (editor && typeof editor.getValue === 'function') ? editor.getValue() : (srcEl ? srcEl.value : ''); }
       function setSource(v) { if (editor && typeof editor.setValue === 'function') editor.setValue(v); if (srcEl) srcEl.value = v; }

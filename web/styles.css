@@ -282,8 +282,22 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .practice-points li { display: flex; align-items: center; gap: 8px; }
 .practice-points span { display: inline-grid; width: 22px; height: 22px; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border)); border-radius: 6px; background: color-mix(in srgb, var(--accent) 10%, var(--code-bg)); color: var(--accent-hover); font-family: var(--mono); font-size: 9px; font-weight: 700; }
 
-.editor-section { display: grid; gap: 12px; }
-.editor-header { position: relative; display: flex; align-items: center; justify-content: space-between; min-height: 76px; padding: 14px 16px; gap: 16px; }
+/* Stretched (not align-items:start like its siblings) so its box is always
+   at least as tall as the tallest column. position:sticky's containing
+   block is this element, not the viewport — if it stayed short, the sticky
+   toolbar inside would run out of room to stick to and vanish partway down
+   a long page (e.g. a long Examples list making the sidebar the tallest
+   column). See setupStickyOffsets() in index.html for the matching --header-h
+   / --toolbar-h vars. */
+.editor-section { display: grid; align-self: stretch; align-content: start; gap: 12px; }
+.output-section { align-self: stretch; align-content: start; }
+.editor-header {
+  position: sticky;
+  top: var(--header-h, 68px);
+  z-index: 15;
+  display: flex; align-items: center; justify-content: space-between; min-height: 76px; padding: 14px 16px; gap: 16px;
+  background: var(--surface);
+}
 .editor-header::before { position: absolute; top: 0; left: 0; width: 46px; height: 2px; border-radius: 0 0 3px 0; background: linear-gradient(90deg, var(--success), var(--accent)); content: ""; }
 .section-title { margin: 0; font-size: 17px; letter-spacing: -.01em; }
 .editor-meta { display: flex; align-items: center; gap: 6px; margin: 3px 0 0; color: var(--text-muted); font-size: 11px; }
@@ -296,7 +310,21 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .status.error { color: var(--error); } .status.error .status-indicator { background: var(--error); }
 @keyframes pulse { 50% { opacity: .4; transform: scale(.8); } }
 
-.controls { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+/* Sticky so Run/Stop/Vet/Test/Inspect and the other controls stay reachable
+   no matter how far the page (or a long code sample / output panel) is
+   scrolled — see setStickyOffsets(), which keeps --header-h/--toolbar-h in
+   sync with the actual (variable-height) header and editor-header above it. */
+.controls {
+  position: sticky;
+  top: var(--toolbar-h, 144px);
+  z-index: 14;
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
 .controls > button { padding: 7px 10px; font-size: 12px; }
 .controls .primary { border-color: var(--accent-strong); background: var(--accent-strong); color: white; font-weight: 700; }
 .controls .primary:hover { border-color: var(--accent); background: var(--accent); transform: translateY(-1px); box-shadow: 0 7px 16px rgba(52, 120, 221, .25); }
@@ -389,7 +417,16 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
    on a phone four wrapped pill buttons would eat two lines of height for
    little benefit, while a horizontally-scrollable "segmented control" row
    is a familiar iOS pattern and costs one line regardless of width. */
-.output-tabs { display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.output-tabs {
+  position: sticky;
+  top: var(--header-h, 68px);
+  z-index: 14;
+  display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+  padding: 6px 6px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
 .output-tabs::-webkit-scrollbar { display: none; }
 .output-tab { flex: 0 0 auto; min-height: 32px; padding: 5px 11px; border-radius: 999px; color: var(--text-muted); font-size: 12px; font-weight: 650; white-space: nowrap; }
 .output-tab.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--surface-raised)); color: var(--accent-hover); }
