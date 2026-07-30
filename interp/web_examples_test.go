@@ -29,6 +29,10 @@ func webExamples(t *testing.T) map[string]string {
 
 func newWebExampleVM() (*Interpreter, *strings.Builder) {
 	vm, output := newTestVM()
+	// Keep this harness aligned with cmd/wasm's explicit playground budget.
+	// The default is intentionally lower for generic embedding hosts, while
+	// the shipped visual demos render many cells across long animations.
+	vm.Limits.MaxSteps = 50_000_000
 	storage := map[string]string{}
 
 	for _, native := range []string{"SetInnerHTML", "CanvasSize", "CanvasSet", "CanvasSetLevel", "CanvasFlush"} {

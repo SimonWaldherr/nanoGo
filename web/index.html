@@ -123,41 +123,12 @@
         </div>
       </div>
     </div>
-
-    <div class="info-panel">
-      <h4 class="info-title">💡 Current Demo Info</h4>
-      <div class="info-content" id="demoInfo">
-        <p>Select an example to see detailed information about what it demonstrates.</p>
-      </div>
-    </div>
-
-    <section class="practice-panel" aria-labelledby="practice-title">
-      <p class="practice-kicker">Why nanoGo</p>
-      <h2 id="practice-title">Learn by changing working Go code.</h2>
-      <p>Move from a small example to a real pattern—then immediately see its output, concurrency, browser effect or test result.</p>
-      <ul class="practice-points">
-        <li><span>01</span> Explore Go without a local toolchain</li>
-        <li><span>02</span> Turn patterns into editable experiments</li>
-        <li><span>03</span> Practice tests and benchmarks in context</li>
-      </ul>
-    </section>
   </aside>
 
   <!-- Main Content -->
   <main class="main">
     <!-- Editor Section -->
     <section class="editor-section">
-      <div class="editor-header">
-        <div>
-          <h2 class="section-title">Code editor</h2>
-          <p class="editor-meta"><span></span> Go · syntax highlighting · line numbers</p>
-        </div>
-        <div id="status" class="status loading">
-          <div class="status-indicator"></div>
-          Loading WebAssembly...
-        </div>
-      </div>
-
       <div class="controls">
         <button id="runBtn" class="primary" disabled>
           ▶️ Run<span class="shortcut-hint"> (Ctrl/⌘+Enter)</span>
@@ -192,6 +163,10 @@
             <option value="16">16px</option>
             <option value="18">18px</option>
           </select>
+        </div>
+        <div id="status" class="status loading">
+          <div class="status-indicator"></div>
+          Loading WebAssembly...
         </div>
       </div>
 
@@ -559,370 +534,6 @@ Select an example from the sidebar to get started! 🚀</div>
         return examplesLoadPromise;
       }
 
-      // Demo information content
-      const DEMO_INFO = {
-        'Basics': `
-          <p><strong>Hello World Demo</strong></p>
-          <p>Demonstrates basic Go program structure and the fmt package for output.</p>
-          <ul>
-            <li>Package declaration</li>
-            <li>Import statements</li>
-            <li>Main function</li>
-            <li>Print statements</li>
-          </ul>
-        `,
-        'Canvas': `
-          <p><strong>Canvas Graphics Demo</strong></p>
-          <p>Shows how to draw pixels on a canvas using browser-specific functions.</p>
-          <ul>
-            <li><code>browser.CanvasSize(w, h)</code> - Set canvas dimensions</li>
-            <li><code>browser.CanvasSet(x, y, on)</code> - Set binary pixel state</li>
-            <li><code>browser.CanvasSetLevel(x, y, level)</code> - Set palette level (0–7)</li>
-            <li><code>browser.CanvasFlush()</code> - Update display</li>
-          </ul>
-        `,
-        'Channels': `
-          <p><strong>Go Channels Demo</strong></p>
-          <p>Demonstrates concurrent programming with channels for communication between goroutines.</p>
-          <ul>
-            <li>Channel creation with <code>make(chan type)</code></li>
-            <li>Goroutine communication</li>
-            <li>Channel closing and range loops</li>
-          </ul>
-        `,
-        'WaitGroup': `
-          <p><strong>Concurrency Synchronization</strong></p>
-          <p>Uses sync.WaitGroup to coordinate multiple goroutines.</p>
-          <ul>
-            <li><code>wg.Add(1)</code> - Add goroutine to wait group</li>
-            <li><code>wg.Done()</code> - Signal completion</li>
-            <li><code>wg.Wait()</code> - Wait for all to finish</li>
-          </ul>
-        `,
-        'Regexp + JSON': `
-          <p><strong>Data Processing Demo</strong></p>
-          <p>Combines regular expressions and JSON encoding/decoding.</p>
-          <ul>
-            <li>Regex pattern matching</li>
-            <li>JSON marshalling</li>
-            <li>String manipulation</li>
-          </ul>
-        `,
-        'Strings/Sort': `
-          <p><strong>String and Sorting Utilities</strong></p>
-          <p>Demonstrates nanoGo's supported string operations and sorting helpers.</p>
-          <ul>
-            <li><code>strings.Split()</code> and <code>strings.Join()</code></li>
-            <li><code>sort.Ints()</code> for integer sorting</li>
-            <li>Slice manipulation</li>
-          </ul>
-        `,
-        'Path + UTF-8': `
-          <p><strong>Paths and UTF-8</strong></p>
-          <p>Uses the supported <code>path</code> and <code>unicode/utf8</code> subsets. These operations are lexical and do not access the filesystem.</p>
-          <ul>
-            <li><code>path.Join</code>, <code>Base</code>, and <code>Ext</code> normalize slash-separated paths</li>
-            <li><code>utf8.RuneCountInString</code> counts Unicode code points</li>
-            <li><code>utf8.ValidString</code> validates UTF-8 text</li>
-          </ul>
-        `,
-        'Template + DOM': `
-          <p><strong>HTML Template Rendering</strong></p>
-          <p>Expands a <code>text/template</code> template and writes the resulting HTML to the playground output. The helper does not provide <code>html/template</code> escaping, so do not pass untrusted text to <code>browser.SetHTML</code>.</p>
-          <ul>
-            <li><code>template.RenderString()</code> - Render templates</li>
-            <li><code>browser.SetHTML()</code> - Update DOM elements</li>
-            <li>Data binding with maps and slices</li>
-          </ul>
-        `,
-        'Random': `
-          <p><strong>Random Number Generation</strong></p>
-          <p>Demonstrates pseudorandom number generation with seeding.</p>
-          <ul>
-            <li><code>rand.Seed()</code> - Initialize generator</li>
-            <li><code>rand.Intn()</code> - Generate random integers</li>
-            <li>Reproducible randomness</li>
-          </ul>
-        `,
-        'Sleep': `
-          <p><strong>Time and Delays</strong></p>
-          <p>Shows how to add delays and work with time in Go programs.</p>
-          <ul>
-            <li><code>time.Sleep()</code> - Add delays</li>
-            <li>Cancellation-aware waiting when the host runs with a context</li>
-            <li>Time-based coordination</li>
-          </ul>
-        `,
-        'Life': `
-          <p><strong>Game of Life Simulation</strong></p>
-          <p>Conway's Game of Life — 100 animated generations, then a freshly seeded second round.</p>
-          <ul>
-            <li>2D grid simulation</li>
-            <li>Animation loops</li>
-            <li>Cellular automaton rules</li>
-            <li>Real-time canvas updates</li>
-          </ul>
-        `,
-        'HTTP Client + Storage': `
-          <p><strong>Web APIs Integration</strong></p>
-          <p>Uses <code>text, err := http.GetText(...)</code> with nanoGo's browser HTTP and worker-session storage facades. Requests remain subject to CORS; storage is reset when the worker is restarted.</p>
-          <ul>
-            <li><code>http.GetText()</code> - Fetch text content</li>
-            <li><code>storage.SetItem()</code> - Save through nanoGo storage</li>
-            <li>CORS and same-origin policies</li>
-          </ul>
-        `
-        ,
-        'FizzBuzz': `
-          <p><strong>FizzBuzz</strong></p>
-          <p>Classic programming warm-up that prints Fizz/Buzz for multiples of 3/5.</p>
-        `,
-        'Fibonacci': `
-          <p><strong>Fibonacci</strong></p>
-          <p>Recursive Fibonacci series calculation (small n to keep runtime reasonable).</p>
-        `,
-        'Prime Sieve': `
-          <p><strong>Prime Sieve</strong></p>
-          <p>Compute primes using the Sieve of Eratosthenes.</p>
-        `,
-        'Checkerboard': `
-          <p><strong>Checkerboard</strong></p>
-          <p>Draws a simple checkerboard pattern on the canvas using <code>browser.CanvasSet</code>.</p>
-        `,
-        'Bouncing Ball': `
-          <p><strong>Bouncing Ball</strong></p>
-          <p>Simple animated bouncing pixel to demonstrate frame updates & timing.</p>
-        `,
-        'Plasma Waves': `
-          <p><strong>Plasma Waves</strong></p>
-          <p>A full-frame integer pattern that demonstrates efficient batched canvas updates.</p>
-        `,
-        'Starfield': `
-          <p><strong>Starfield</strong></p>
-          <p>Deterministic particles redraw as a moving star field.</p>
-        `,
-        'Scanner': `
-          <p><strong>Scanner</strong></p>
-          <p>A sweeping scan line reveals pulsing targets across the grid.</p>
-        `
-        , 'Mandelbrot Set': `
-          <p><strong>Mandelbrot Set</strong></p>
-          <p>An 80×48 escape-time fractal sampled with floating-point arithmetic. Palette levels reveal its escape bands while the set itself stays deep blue-black.</p>
-        `
-        , "Langton's Ant": `
-          <p><strong>Langton's Ant</strong></p>
-          <p>A tiny two-rule automaton turns and flips each visited cell. Its apparently simple rules generate a long, structured path.</p>
-        `
-        , 'Sorting Visualizer': `
-          <p><strong>Sorting Visualizer</strong></p>
-          <p>Bubble sort updates an integer bar chart after each pass, connecting a classic algorithm with visible intermediate state.</p>
-        `
-        , 'Lissajous Curve': `
-          <p><strong>Lissajous Curve</strong></p>
-          <p>Two sine oscillators with a slowly changing phase create a smooth parametric curve. Palette levels make the curve's traversal visible.</p>
-        `
-        , 'Fireworks': `
-          <p><strong>Fireworks</strong></p>
-          <p>A deterministic burst uses simple integer velocity and gravity equations. Each particle receives one of the canvas palette levels.</p>
-        `
-        , 'Wave Interference': `
-          <p><strong>Wave Interference</strong></p>
-          <p>Two moving sine waves combine into a color field. It is a compact demonstration of superposition and palette-based rendering.</p>
-        `
-        , 'Pathfinding Wave': `
-          <p><strong>Pathfinding Wave</strong></p>
-          <p>Breadth-first search expands a distance wave through deterministic obstacles. Colors encode walls, frontier distance, start, and goal.</p>
-        `
-        , 'Julia Set': `
-          <p><strong>Julia Set</strong></p>
-          <p>The same escape-time technique as Mandelbrot, but each pixel starts as <code>z</code> while the complex constant stays fixed. The result is a distinctly different bitmap fractal.</p>
-        `
-        , 'Rule 30': `
-          <p><strong>Rule 30</strong></p>
-          <p>Each new row is determined solely by three cells above it. This compact cellular automaton produces a surprisingly asymmetric, chaotic pattern from a single seed.</p>
-        `
-        , "Knight's Tour": `
-          <p><strong>Knight's Tour</strong></p>
-          <p>Warnsdorff’s heuristic chooses the next square with the fewest onward moves. The board gradually fills to make a classic graph-traversal problem visible.</p>
-        `
-        , 'Metaballs': `
-          <p><strong>Metaballs</strong></p>
-          <p>Two moving points contribute squared-distance fields. Thresholds turn their sum into soft-looking, merging colored blobs without requiring pixel images.</p>
-        `
-        , 'Orbit Simulator': `
-          <p><strong>Orbit Simulator</strong></p>
-          <p>Three bodies use sine and cosine to trace elliptical orbits around a shared center. It is a compact introduction to periodic motion and animation frames.</p>
-        `
-        , 'Sierpinski Triangle': `
-          <p><strong>Sierpinski Triangle</strong></p>
-          <p>Each pixel corresponds to a binomial coefficient in Pascal’s triangle. The integer test reveals the fractal structure without recursion or image assets.</p>
-        `
-        , 'Monte Carlo Pi': `
-          <p><strong>Monte Carlo Pi</strong></p>
-          <p>A deterministic pseudo-random generator drops points into a square. The ratio inside its central circle gives a progressively better estimate of π.</p>
-        `
-        , 'Turing Machine': `
-          <p><strong>Turing Machine</strong></p>
-          <p>The colored tape, read head, and two states make the fundamental read–write–move loop of a Turing machine visible step by step.</p>
-        `
-        , 'HTTP Client GET': `
-          <p><strong>HTTP Client: GET</strong></p>
-          <p>Fetches a public JSON resource, checks <code>err</code>, then trims the response for console output. Browser requests require the target to permit CORS.</p>
-        `,
-        'HTTP Client POST': `
-          <p><strong>HTTP Client: JSON POST</strong></p>
-          <p>Sends a JSON request through <code>http.PostText()</code> and shows a compact response. The default content type is <code>application/json</code>; CORS still applies.</p>
-        `,
-        'HTTP Client Errors': `
-          <p><strong>HTTP Client: Errors</strong></p>
-          <p>Uses a deliberately missing route to demonstrate the idiomatic <code>body, err := ...</code> pattern for non-2xx responses.</p>
-        `,
-        'HTTP Server Router (simulated)': `
-          <p><strong>HTTP Server Router (simulation)</strong></p>
-          <p>GitHub Pages serves static files, so browser WASM cannot bind a listening HTTP port. This example models a server handler with GET, POST and 404 routing decisions entirely in nanoGo.</p>
-        `,
-        'Pipeline': `
-          <p><strong>Pipeline</strong></p>
-          <p>Shows a simple pipeline with producer and squarer goroutines communicating over channels.</p>
-        `,
-        'Structs & Methods': `
-          <p><strong>Structs & Methods</strong></p>
-          <p>Demonstrates defining structs, String() method and pointer receivers.</p>
-        `,
-        'Maps & Ranges': `
-          <p><strong>Maps & Ranges</strong></p>
-          <p>Illustrates map creation, length and iterating with range.</p>
-        `,
-        'Timer Ticker': `
-          <p><strong>Timer & Ticker</strong></p>
-          <p>Demonstrates <code>time.NewTimer</code> and <code>time.NewTicker</code> usage for timed events.</p>
-        `,
-        'JSON Roundtrip': `
-          <p><strong>JSON Roundtrip</strong></p>
-          <p>Marshal a Go value to JSON and decode it with nanoGo's JSON facade. Its <code>Unmarshal</code> returns a value instead of filling a pointer, unlike Go's <code>encoding/json</code>.</p>
-        `,
-        'Virtual FS (os)': `
-          <p><strong>Virtual Filesystem (os package)</strong></p>
-          <p>Demonstrates nanoGo’s in-memory VFS through its supported <code>os</code> subset; it is not the browser or host filesystem.</p>
-          <ul>
-            <li><code>os.WriteFile(path, content, perm)</code> — create/overwrite file</li>
-            <li><code>os.ReadFile(path)</code> — read file contents</li>
-            <li><code>os.ReadDir(path)</code> — list directory entries</li>
-            <li><code>os.Getenv("HOME")</code> — environment variables</li>
-          </ul>
-        `,
-        'Closures': `
-          <p><strong>Closures & Higher-Order Functions</strong></p>
-          <p>Shows how Go functions can close over local variables and be passed/returned as values.</p>
-          <ul>
-            <li>Counter closure with private state</li>
-            <li>Parameterized adder factory</li>
-            <li>Accumulator closure</li>
-          </ul>
-        `,
-        'Error Handling': `
-          <p><strong>Error Handling Patterns</strong></p>
-          <p>Demonstrates idiomatic Go multi-return error handling using strconv.</p>
-          <ul>
-            <li>Multiple return values <code>(result, errMsg)</code></li>
-            <li><code>strconv.Atoi</code> with <code>val, err :=</code> pattern</li>
-            <li>Checking and logging errors</li>
-          </ul>
-        `,
-        'Math': `
-          <p><strong>Math Package</strong></p>
-          <p>Covers selected constants and functions from nanoGo’s <code>math</code> subset.</p>
-          <ul>
-            <li>Constants: <code>math.Pi</code>, <code>math.E</code></li>
-            <li>Rounding: <code>Floor</code>, <code>Ceil</code>, <code>Round</code></li>
-            <li>Trigonometry: <code>Sin</code>, <code>Cos</code></li>
-            <li>Exponential: <code>Pow</code>, <code>Sqrt</code>, <code>Log</code></li>
-          </ul>
-        `,
-        'Strconv': `
-          <p><strong>Strconv Package</strong></p>
-          <p>Supported string/number conversion functions from <code>strconv</code>.</p>
-          <ul>
-            <li><code>Itoa</code> / <code>Atoi</code> — int ↔ string</li>
-            <li><code>FormatFloat</code> — float → string with precision</li>
-            <li><code>FormatBool</code> / <code>ParseBool</code> — bool ↔ string</li>
-            <li><code>FormatInt(n, base)</code> — hex, binary representations</li>
-          </ul>
-        `,
-        'Test: Table-driven': `
-          <p><strong>Table-driven tests & subtests</strong></p>
-          <p>This uses nanoGo's supported <code>testing.T</code> subset: <code>Errorf</code>, <code>Fatalf</code>, <code>Run</code>, and <code>Helper</code>. In a package, nanoGo discovers supported <code>TestXxx(t *testing.T)</code> functions automatically; here <code>main</code> invokes it so you can edit and run it in one file.</p>
-          <ul>
-            <li>Named test cases make failures readable</li>
-            <li><code>t.Run</code> isolates each subtest</li>
-            <li>Change an expected value to inspect an assertion failure</li>
-          </ul>
-        `,
-        'Benchmark: Checksum': `
-          <p><strong>Repeatable benchmark shape</strong></p>
-          <p>Uses nanoGo's supported <code>testing.B</code> subset. The browser example fixes <code>b.N</code> so it remains quick; the package loader additionally reports deterministic interpreter steps per operation.</p>
-          <ul>
-            <li><code>b.ResetTimer()</code> excludes setup work</li>
-            <li><code>b.N</code> controls the measured loop</li>
-            <li>Wall time is illustrative; steps/op is stable across machines</li>
-          </ul>
-        `,
-        'Worker Pool': `
-          <p><strong>Practical concurrency</strong></p>
-          <p>A compact worker pool combines directional channels, a <code>WaitGroup</code> and <code>defer wg.Done()</code>—a pattern useful for fan-out work without sharing mutable state.</p>
-          <ul>
-            <li>Jobs fan out to independent workers</li>
-            <li>Results are collected after orderly shutdown</li>
-            <li>Edit the worker/job counts and observe the behavior</li>
-          </ul>
-        `,
-        'Select Statement': `
-          <p><strong>Channel multiplexing with select</strong></p>
-          <p>Waits on whichever of several channels is ready first, with a <code>time.NewTimer</code> as a timeout branch and a <code>default</code> case for a non-blocking check.</p>
-          <ul>
-            <li><code>select { case &lt;-a: ... case &lt;-b: ... }</code> races two channels</li>
-            <li>A timer's <code>.C</code> channel acts as a timeout branch</li>
-            <li><code>default</code> makes a select non-blocking</li>
-          </ul>
-        `,
-        'Interfaces & Polymorphism': `
-          <p><strong>Interfaces & polymorphism</strong></p>
-          <p>A <code>Shape</code> interface with two concrete implementations (<code>Circle</code>, <code>Rectangle</code>) shows dynamic dispatch: the same <code>describe(s Shape)</code> call runs different code depending on the concrete type stored in <code>s</code>.</p>
-          <ul>
-            <li>Method sets satisfy an interface implicitly, like real Go</li>
-            <li>A <code>[]Shape</code> slice holds mixed concrete types</li>
-            <li>Add a new shape and it works with the existing <code>describe</code> function unchanged</li>
-          </ul>
-        `,
-        'Custom Errors': `
-          <p><strong>Custom error types</strong></p>
-          <p>A <code>*ValidationError</code> struct implements <code>Error() string</code> so it satisfies Go's built-in <code>error</code> interface, carrying structured detail (<code>Field</code>, <code>Msg</code>) beyond a plain string.</p>
-          <ul>
-            <li><code>func (e *ValidationError) Error() string</code> satisfies <code>error</code></li>
-            <li>Returning <code>nil</code> signals success, matching idiomatic Go</li>
-            <li>Call <code>err.Error()</code> explicitly to format the message</li>
-          </ul>
-        `,
-        'Stack (LIFO)': `
-          <p><strong>Stack (LIFO)</strong></p>
-          <p>A last-in-first-out stack built from a plain <code>[]int</code> slice: <code>push</code> appends and returns the new slice, while pop reads and reslices the last element directly.</p>
-          <ul>
-            <li><code>append(stack, v)</code> grows the stack</li>
-            <li><code>stack[len(stack)-1]</code> then reslicing pops the top</li>
-            <li>Values come back out in reverse push order</li>
-          </ul>
-        `,
-        'Binary Search': `
-          <p><strong>Binary search</strong></p>
-          <p>Repeatedly halves a sorted slice to find a target in O(log n) steps instead of scanning linearly; the step count printed for each search shows how few comparisons it needs even for larger inputs.</p>
-          <ul>
-            <li>Requires the input to already be sorted</li>
-            <li>The midpoint uses a bit shift (<code>&gt;&gt;1</code>) rather than division</li>
-            <li>A tagless <code>switch</code> reads like a compact if/else-if chain</li>
-          </ul>
-        `
-      };
-
       // DOM elements
       const statusEl = document.getElementById("status");
       const logEl = document.getElementById("log");
@@ -950,7 +561,6 @@ Select an example from the sidebar to get started! 🚀</div>
       const tagFilters = document.getElementById("tagFilters");
       const examplesList = document.getElementById("examplesList");
       const exampleSearch = document.getElementById("exampleSearch");
-      const demoInfo = document.getElementById("demoInfo");
 
       const stopBtn = document.getElementById("stopBtn");
       const formatBtn = document.getElementById("formatBtn");
@@ -1046,28 +656,20 @@ Select an example from the sidebar to get started! 🚀</div>
       initEditor();
       if (!editor) document.addEventListener('DOMContentLoaded', initEditor, { once: true });
 
-      // Keep the sticky toolbar/tabs offsets in sync with the header's and
-      // editor-header's real (variable, wrapping-dependent) height, so the
-      // Run/Stop/Vet/Test/Inspect controls and the output tabs never drift
-      // out from under the sticky header no matter how the page scrolls.
+      // Keep the sticky toolbar/tabs offset in sync with the header's real
+      // (variable, wrapping-dependent) height, so the Run/Stop/Vet/Test/
+      // Inspect controls and the output tabs never drift out from under the
+      // sticky header no matter how the page scrolls.
       (function setupStickyOffsets() {
         const headerEl = document.querySelector('.header');
-        const editorHeaderEl = document.querySelector('.editor-header');
         if (!headerEl) return;
         function update() {
-          const headerH = headerEl.offsetHeight;
-          document.documentElement.style.setProperty('--header-h', headerH + 'px');
-          const editorHeaderH = editorHeaderEl ? editorHeaderEl.offsetHeight : 0;
-          document.documentElement.style.setProperty('--toolbar-h', (headerH + editorHeaderH) + 'px');
+          document.documentElement.style.setProperty('--header-h', headerEl.offsetHeight + 'px');
         }
         update();
         window.addEventListener('resize', update);
         window.addEventListener('orientationchange', update);
-        if (typeof ResizeObserver !== 'undefined') {
-          const ro = new ResizeObserver(update);
-          ro.observe(headerEl);
-          if (editorHeaderEl) ro.observe(editorHeaderEl);
-        }
+        if (typeof ResizeObserver !== 'undefined') new ResizeObserver(update).observe(headerEl);
       })();
 
       function getSource() { return (editor && typeof editor.getValue === 'function') ? editor.getValue() : (srcEl ? srcEl.value : ''); }
@@ -2704,9 +2306,6 @@ Select an example from the sidebar to get started! 🚀</div>
         
         const activeItem = document.querySelector('.example-item[data-example="' + CSS.escape(name) + '"]');
         if (activeItem) activeItem.classList.add('active');
-
-        // Update demo info
-        demoInfo.innerHTML = DEMO_INFO[name] || '<p>No additional information available.</p>';
 
         // Show appropriate output panel
         const config = EXAMPLE_CONFIG[name] || { output: 'console' };

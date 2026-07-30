@@ -24,6 +24,11 @@ nanoGo is useful where executing a small, controlled Go-like program at runtime 
 - **Host-controlled access:** filesystem and HTTP operations are denied by default in a newly created interpreter and must be granted through `Capabilities` and host natives. The browser playground deliberately enables its private VFS and browser-mediated HTTP; CORS still applies.
 - **Resource controls:** hosts can set execution deadlines, step limits, container-size limits, and goroutine limits. These controls are cooperative and do not make arbitrary host natives safe.
 
+The browser playground deliberately raises only its per-run deterministic step
+budget to 50 million checkpoints so its long-running visual demos can finish;
+the interpreter default for generic embedded hosts remains 10 million. The
+playground still creates one interpreter per run and exposes **Stop**.
+
 ### 💡 **Unique Use Cases**
 - **Interactive Tutorials**: Create Go learning platforms that run entirely in the browser
 - **Browser-Based IDEs**: Build web-based development environments without server-side execution

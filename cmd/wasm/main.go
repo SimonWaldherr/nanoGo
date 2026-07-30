@@ -21,6 +21,12 @@ var activeCanvas runtime.CanvasBinding
 // browser CORS), and all curated packages registered.
 func newPlaygroundVM() *interp.Interpreter {
 	vm := interp.NewInterpreter()
+	// Visual simulations intentionally render many small cells across dozens
+	// or hundreds of frames. Keep the interpreter's conservative default for
+	// embedded hosts, but give this explicit, user-operated playground a
+	// larger deterministic budget so its shipped demos can finish. The worker
+	// still has Stop and each run gets an isolated interpreter.
+	vm.Limits.MaxSteps = 50_000_000
 	// Browser requests remain subject to same-origin/CORS rules. The guest gets
 	// a private, in-memory VFS only — never the browser host's filesystem — so
 	// read/write access is safe and lets the Virtual FS demo work as advertised.
