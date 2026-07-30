@@ -328,6 +328,15 @@ func main() {
 	if len(helper.CalledBy) != 1 || helper.CalledBy[0] != "main" {
 		t.Errorf("helper CalledBy = %v, want [main]", helper.CalledBy)
 	}
+	if helper.Complexity != 1 {
+		t.Errorf("helper.Complexity = %d, want 1 (no branches)", helper.Complexity)
+	}
+	if helper.Recursive {
+		t.Error("helper.Recursive = true, want false")
+	}
+	if helper.LOC != 3 {
+		t.Errorf("helper.LOC = %d, want 3", helper.LOC)
+	}
 
 	main := byName["main"]
 	var mainCallNames []string
@@ -390,5 +399,11 @@ func main() {
 	}
 	if !selfCalled {
 		t.Errorf("fib.CalledBy = %v, want to include fib (self-recursion)", fib.CalledBy)
+	}
+	if !fib.Recursive {
+		t.Errorf("fib.Recursive = false, want true (fib calls itself)")
+	}
+	if fib.Complexity != 2 {
+		t.Errorf("fib.Complexity = %d, want 2 (base 1 + one if)", fib.Complexity)
 	}
 }

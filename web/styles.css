@@ -4,9 +4,6 @@
   --surface: #101722;
   --surface-raised: #172131;
   --surface-hover: #1d2a3d;
-  --panel: var(--surface);
-  --panel-light: var(--surface-raised);
-  --panel-elevated: var(--surface-hover);
   --text: #e6edf7;
   --text-muted: #98a7bd;
   --text-dim: #65758e;
@@ -24,7 +21,17 @@
   --shadow-lg: 0 24px 64px rgba(0, 0, 0, .34);
   --gradient-bg: linear-gradient(112deg, #101a2b, #0b101b 60%, #0a1622);
   --radius: 14px;
+  /* Two smaller radii that recur throughout the panel/card and pill/badge
+     components (introduced as tokens rather than restating the literal
+     value at each of their many call sites). */
+  --radius-card: 9px;
+  --radius-pill: 999px;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  /* Single source of truth for the editor's height. Overridden per
+     breakpoint (see the media queries below) instead of restating the same
+     four-selector list (.editor-container, .CodeMirror, .CodeMirror-scroll,
+     #src) at every width. */
+  --editor-min-h: 620px;
   /* iOS safe-area insets (notch / home indicator). Zero on every other
      platform; only non-zero here when the viewport meta has viewport-fit=cover. */
   --safe-top: env(safe-area-inset-top, 0px);
@@ -71,7 +78,7 @@ button, input, select { font: inherit; }
 button, select, .upload-control {
   min-height: 36px;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--radius-card);
   background: var(--surface-raised);
   color: var(--text);
   cursor: pointer;
@@ -144,6 +151,9 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .theme-popup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
 .theme-option { display: flex; align-items: center; min-height: 38px; padding: 6px 8px; text-align: left; }
 .theme-option[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+/* Brief highlight flash (added, then removed ~400ms later by JS) so a
+   reopened popup draws the eye straight to the already-selected theme. */
+.theme-option.focused { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 55%, transparent); }
 .theme-option .swatch { width: 24px; height: 24px; margin-right: 8px; border-radius: 6px; }
 .theme-option .label { font-size: 12px; }
 
@@ -166,7 +176,8 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
    single output panel remain, stacked in one column so it stays readable
    at typical embed widths (a few hundred px tall in a blog post). */
 body.mode-embed .sidebar,
-body.mode-embed .practice-panel,
+body.mode-embed .sidebar-backdrop,
+body.mode-embed .sidebar-toggle-btn,
 body.mode-embed .header-link:not(.embed-popout-link),
 body.mode-embed #shareBtn,
 body.mode-embed #embedBtn,
@@ -179,26 +190,72 @@ body.mode-embed .brand-subtitle {
   display: none;
 }
 body.mode-embed .embed-popout-link { display: inline-flex; }
-body.mode-embed .main { grid-template-columns: 1fr; padding: 12px; gap: 10px; }
+body.mode-embed .main { grid-template-areas: "editor" "output"; grid-template-columns: 1fr; padding: 12px; gap: 10px; }
 body.mode-embed .header-content { min-height: 48px; padding: 8px 12px; }
-body.mode-embed .output-section { grid-column: auto; }
-body.mode-embed .editor-container, body.mode-embed .CodeMirror, body.mode-embed .CodeMirror-scroll, body.mode-embed #src { min-height: 260px; height: 260px; }
+body.mode-embed { --editor-min-h: 260px; }
 body.mode-embed .output-panel.active { min-height: 180px; }
 body.mode-embed #log { height: min(40vh, 260px); }
 body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; }
 
+/* The sidebar is a drawer overlay (below), not a grid column, so .main only
+   ever has to lay out two things — editor and output — instead of the old
+   three-column-plus-collapsing-sidebar arrangement. */
 .main {
   display: grid;
-  grid-template-columns: minmax(240px, 292px) minmax(480px, 1fr) minmax(280px, 360px);
+  grid-template-areas: "editor output";
+  grid-template-columns: minmax(520px, 1fr) minmax(340px, 460px);
   align-items: start;
   width: min(1720px, 100%);
   margin: 0 auto;
   padding: clamp(16px, 2.5vw, 36px) clamp(16px, 3vw, 42px) 48px;
   gap: clamp(16px, 2vw, 28px);
 }
+.editor-section { grid-area: editor; }
+.output-section { grid-area: output; }
+.editor-section, .output-section { min-width: 0; }
 
-.sidebar, .editor-section, .output-section { min-width: 0; }
-.sidebar { display: grid; gap: 16px; }
+/* Sidebar drawer: fixed overlay below the sticky header, sliding in from the
+   left. Deliberately an overlay rather than a grid column that pushes
+   content — opening it never reflows the editor/CodeMirror underneath, and
+   it works identically at every viewport width instead of needing its own
+   responsive column-count logic the way the old always-present sidebar did. */
+.sidebar {
+  position: fixed;
+  top: var(--header-h, 68px);
+  left: 0;
+  bottom: 0;
+  z-index: 25;
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  width: min(360px, 88vw);
+  padding: 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  transform: translateX(-100%);
+  transition: transform .22s ease;
+}
+.sidebar.open { transform: translateX(0); }
+.sidebar-drawer-head { display: flex; justify-content: flex-end; }
+.sidebar-toggle-btn { margin-right: 2px; font-size: 15px; }
+
+.sidebar-backdrop {
+  position: fixed;
+  top: var(--header-h, 68px);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 24;
+  background: rgba(3, 6, 12, .5);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .22s ease;
+}
+.sidebar-backdrop.open { opacity: 1; pointer-events: auto; }
 
 .examples-panel, .info-panel, .editor-header, .output-panel {
   overflow: hidden;
@@ -247,7 +304,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .example-search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
 
 .tag-filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 10px; }
-.tag-btn { min-height: 26px; padding: 3px 8px; border-radius: 999px; color: var(--text-muted); font-size: 11px; }
+.tag-btn { min-height: 26px; padding: 3px 8px; border-radius: var(--radius-pill); color: var(--text-muted); font-size: 11px; }
 .tag-btn.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 20%, var(--surface-raised)); color: var(--accent-hover); }
 
 .examples-list { max-height: min(58vh, 570px); overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; border-top: 1px solid var(--border); }
@@ -290,7 +347,6 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
    column). See setupStickyOffsets() in index.html for the matching --header-h
    / --toolbar-h vars. */
 .editor-section { display: grid; align-self: stretch; align-content: start; gap: 12px; }
-.output-section { align-self: stretch; align-content: start; }
 .editor-header {
   position: sticky;
   top: var(--header-h, 68px);
@@ -303,7 +359,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .editor-meta { display: flex; align-items: center; gap: 6px; margin: 3px 0 0; color: var(--text-muted); font-size: 11px; }
 .editor-meta span { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 15%, transparent); }
 
-.status { display: inline-flex; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); font-size: 12px; white-space: nowrap; }
+.status { display: inline-flex; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid var(--border); border-radius: var(--radius-pill); color: var(--text-muted); font-size: 12px; white-space: nowrap; }
 .status-indicator { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
 .status.loading { color: var(--warning); } .status.loading .status-indicator { background: var(--warning); animation: pulse 1.35s ease-in-out infinite; }
 .status.ready { color: var(--success); } .status.ready .status-indicator { background: var(--success); }
@@ -331,13 +387,13 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .input-group { display: inline-flex; align-items: center; gap: 5px; margin-left: 3px; color: var(--text-muted); font-size: 11px; }
 .input-group select, .input-group input { min-height: 32px; max-width: 92px; padding: 4px 7px; font-size: 12px; }
 
-.editor-container { min-height: 620px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--code-bg); box-shadow: var(--shadow-lg), 0 0 0 1px color-mix(in srgb, var(--accent) 5%, transparent); }
-#src { width: 100%; min-height: 620px; padding: 16px; resize: vertical; border: 0; outline: 0; background: var(--code-bg); color: var(--text); font-family: var(--mono); line-height: 1.6; }
+.editor-container { min-height: var(--editor-min-h); overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--code-bg); box-shadow: var(--shadow-lg), 0 0 0 1px color-mix(in srgb, var(--accent) 5%, transparent); }
+#src { width: 100%; min-height: var(--editor-min-h); padding: 16px; resize: vertical; border: 0; outline: 0; background: var(--code-bg); color: var(--text); font-family: var(--mono); line-height: 1.6; }
 
 /* CodeMirror: Go mode supplies the token classes; these rules make syntax
    highlighting and the numbered gutter visible in every playground theme. */
-.CodeMirror { height: 620px; background: var(--code-bg); color: var(--text); font-family: var(--mono); line-height: 1.6; }
-.CodeMirror-scroll { min-height: 620px; }
+.CodeMirror { height: var(--editor-min-h); background: var(--code-bg); color: var(--text); font-family: var(--mono); line-height: 1.6; }
+.CodeMirror-scroll { min-height: var(--editor-min-h); }
 .CodeMirror-gutters { border-right: 1px solid var(--border); background: var(--code-gutter); }
 .CodeMirror-linenumber { min-width: 34px; padding: 0 8px 0 6px; color: var(--text-dim); font-family: var(--mono); font-size: .9em; }
 .CodeMirror-cursor { border-left-color: var(--accent-hover); }
@@ -391,16 +447,19 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .cm-builtin, .cm-tag { color: #6ee7c0; }
 .cm-meta { color: #f5a3d7; }
 
-.output-section { display: grid; gap: 12px; }
+.output-section { display: grid; align-self: stretch; align-content: start; gap: 12px; }
 .output-panel { display: none; min-height: 300px; }
 .output-panel.active { display: flex; flex-direction: column; }
 .output-header { font-size: 12px; }
 .output-actions { display: flex; align-items: center; gap: 7px; }
 #execTime { min-width: 32px; color: var(--text-dim); font-family: var(--mono); font-size: 11px; text-align: right; }
 .output-content { flex: 1; min-height: 0; padding: 12px; }
-.canvas-container { display: grid; min-height: 260px; place-items: center; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; border: 1px solid var(--border); border-radius: 9px; background: #080d13; }
+.canvas-container { display: grid; min-height: 260px; place-items: center; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; border: 1px solid var(--border); border-radius: var(--radius-card); background: #080d13; }
 #life { max-width: 100%; image-rendering: pixelated; }
-#log { height: min(59vh, 650px); overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 2px 1px; color: var(--text); font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre-wrap; }
+#log { height: min(59vh, 650px); overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 2px 1px; border: 1px solid transparent; border-radius: 8px; color: var(--text); font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre-wrap; }
+/* While the console has keyboard focus, log-line fading is paused (see the
+   focus/blur handlers) — this border makes that "reading mode" state visible. */
+#log.focused { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .log-line { padding: 2px 5px; border-radius: 4px; word-break: break-word; transition: opacity .3s ease; }
 .log-line.log-error { color: var(--error); background: color-mix(in srgb, var(--error) 8%, transparent); }
 .log-line.log-warn { color: var(--warning); }
@@ -410,7 +469,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
    the fading logic reassigns className wholesale and would drop a class. */
 .log-line[data-line] { cursor: pointer; text-decoration: underline dotted color-mix(in srgb, var(--error) 55%, transparent); text-underline-offset: 2px; }
 .log-line[data-line]:hover { background: color-mix(in srgb, var(--error) 16%, transparent); }
-#output { min-height: 260px; overflow: auto; padding: 14px; border: 1px solid var(--border); border-radius: 9px; background: #fff; color: #172033; }
+#output { min-height: 260px; overflow: auto; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-card); background: #fff; color: #172033; }
 #output :first-child { margin-top: 0; }
 
 /* Output panel tabs. Always a single scrollable row rather than wrapping:
@@ -428,17 +487,17 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
   box-shadow: var(--shadow);
 }
 .output-tabs::-webkit-scrollbar { display: none; }
-.output-tab { flex: 0 0 auto; min-height: 32px; padding: 5px 11px; border-radius: 999px; color: var(--text-muted); font-size: 12px; font-weight: 650; white-space: nowrap; }
+.output-tab { flex: 0 0 auto; min-height: 32px; padding: 5px 11px; border-radius: var(--radius-pill); color: var(--text-muted); font-size: 12px; font-weight: 650; white-space: nowrap; }
 .output-tab.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--surface-raised)); color: var(--accent-hover); }
 
 /* Execution inspector */
 .inspector-content { display: grid; gap: 12px; align-content: start; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; max-height: min(72vh, 760px); }
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; }
-.stat-chip { display: grid; gap: 2px; padding: 9px 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--code-bg); }
+.stat-chip { display: grid; gap: 2px; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--code-bg); }
 .stat-chip .stat-value { color: var(--accent-hover); font-family: var(--mono); font-size: 14px; font-weight: 700; }
 .stat-chip .stat-label { color: var(--text-dim); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
 
-.inspector-section { border: 1px solid var(--border); border-radius: 9px; background: color-mix(in srgb, var(--surface-raised) 55%, transparent); }
+.inspector-section { border: 1px solid var(--border); border-radius: var(--radius-card); background: color-mix(in srgb, var(--surface-raised) 55%, transparent); }
 .inspector-section > summary { padding: 9px 12px; cursor: pointer; user-select: none; font-size: 13px; font-weight: 700; }
 .inspector-section > summary::marker { color: var(--text-dim); }
 .inspector-section[open] > summary { border-bottom: 1px solid var(--border); }
@@ -461,7 +520,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .ast-name { color: var(--warning); }
 .ast-pos { color: var(--text-dim); font-size: 10px; cursor: pointer; }
 .ast-pos:hover { color: var(--accent); text-decoration: underline; }
-.ast-count { margin-left: 7px; padding: 0 5px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-dim); font-size: 10px; }
+.ast-count { margin-left: 7px; padding: 0 5px; border: 1px solid var(--border); border-radius: var(--radius-pill); color: var(--text-dim); font-size: 10px; }
 
 /* Inspector tables (trace, benchmark) */
 .trace-table, .bench-results { padding: 4px 12px 12px; }
@@ -469,7 +528,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .inspector-table th { position: sticky; top: 0; padding: 5px 7px; border-bottom: 1px solid var(--border-light); background: var(--surface-raised); color: var(--text-muted); font-weight: 700; text-align: left; }
 .inspector-table td { padding: 3.5px 7px; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); color: var(--text); vertical-align: top; word-break: break-word; }
 .trace-table { max-height: 340px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
-.trace-kind { padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+.trace-kind { padding: 1px 6px; border: 1px solid var(--border); border-radius: var(--radius-pill); color: var(--text-muted); font-size: 10px; white-space: nowrap; }
 .trace-call_start .trace-kind, .trace-call_end .trace-kind { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); color: var(--accent-hover); }
 .trace-goroutine_start .trace-kind, .trace-goroutine_end .trace-kind { border-color: color-mix(in srgb, var(--success) 45%, var(--border)); color: var(--success); }
 .trace-run_start .trace-kind, .trace-run_end .trace-kind { border-color: var(--border-light); color: var(--text); }
@@ -488,7 +547,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .callgraph-body { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 2px 12px 10px; border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
 .callgraph-col { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
 .callgraph-col-title { margin: 6px 0 1px; color: var(--text-dim); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
-.callgraph-edge { min-height: 0; max-width: 100%; padding: 2px 7px; overflow: hidden; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); font-family: var(--mono); font-size: 11px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.callgraph-edge { min-height: 0; max-width: 100%; padding: 2px 7px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-pill); color: var(--text-muted); font-family: var(--mono); font-size: 11px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .callgraph-edge.callgraph-resolved { border-color: color-mix(in srgb, var(--success) 40%, var(--border)); color: var(--success); }
 .callgraph-none { color: var(--text-dim); font-size: 11px; font-style: italic; }
 
@@ -504,7 +563,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 
 /* Call graph diagram (node/arrow view) */
 .callgraph-diagram { padding: 4px 12px 14px; }
-.callgraph-svg-wrap { max-height: 420px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; border: 1px solid var(--border); border-radius: 9px; background: var(--code-bg); }
+.callgraph-svg-wrap { max-height: 420px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--code-bg); }
 .callgraph-svg { display: block; }
 .callgraph-node rect { stroke-width: 1.5; fill: color-mix(in srgb, var(--accent) 10%, var(--surface-raised)); stroke: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .callgraph-node text { fill: var(--text); font-family: var(--mono); font-size: 11px; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
@@ -527,18 +586,21 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .nanogo-breakpoint-marker { display: block; width: 10px; height: 10px; margin: 4px auto 0; border: 1px solid color-mix(in srgb, var(--error) 78%, #fff); border-radius: 50%; background: var(--error); box-shadow: 0 0 0 2px color-mix(in srgb, var(--error) 16%, transparent); }
 .lab-content, .ai-content { display: grid; gap: 12px; }
 .lab-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
-.lab-graph { min-height: 230px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--code-bg); }
+.lab-replay-bar { display: flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface-raised); }
+.lab-replay-bar .inspector-note { margin: 0; }
+.lab-graph { min-height: 230px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--code-bg); }
 .lab-graph svg { display: block; min-width: max-content; max-width: none; margin: 0 auto; }
 .lab-graph .node { cursor: pointer; outline: none; }
 .lab-graph .node:hover rect, .lab-graph .node:focus rect { stroke-width: 3px; }
-.lab-details { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); border-radius: 9px; background: color-mix(in srgb, var(--accent) 7%, var(--surface-raised)); }
+.lab-graph .node.lab-node-active rect, .lab-graph .node.lab-node-active polygon { stroke: var(--warning) !important; stroke-width: 4px !important; filter: drop-shadow(0 0 6px color-mix(in srgb, var(--warning) 70%, transparent)); }
+.lab-details { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); border-radius: var(--radius-card); background: color-mix(in srgb, var(--accent) 7%, var(--surface-raised)); }
 .lab-detail-title { color: var(--text); font-family: var(--mono); font-size: 13px; font-weight: 750; }
 .lab-detail-meta { margin-top: 3px; color: var(--text-muted); font-size: 11px; }
 .lab-detail-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 9px; }
 
 /* The assistant is deliberately a small local client: a readable transcript,
    an explicit connection disclosure, and no automatic editor mutation. */
-.ai-settings { padding: 9px 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--code-bg); }
+.ai-settings { padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--code-bg); }
 .ai-settings > summary { cursor: pointer; color: var(--text-muted); font-size: 12px; font-weight: 700; }
 .ai-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
 .ai-settings label { display: grid; gap: 4px; color: var(--text-muted); font-size: 11px; }
@@ -547,7 +609,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .ai-context-toggle { display: flex !important; grid-template-columns: auto 1fr; align-items: center; gap: 7px !important; margin-top: 10px; }
 .ai-context-toggle input { min-height: 0; }
 .ai-messages { display: grid; gap: 9px; min-height: 180px; max-height: 420px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 2px; }
-.ai-message { padding: 10px 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--code-bg); }
+.ai-message { padding: 10px 11px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--code-bg); }
 .ai-message-user { border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); background: color-mix(in srgb, var(--accent) 8%, var(--surface-raised)); }
 .ai-message-label { margin-bottom: 5px; color: var(--text-dim); font-size: 10px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
 .ai-message-body { color: var(--text); font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
@@ -556,22 +618,15 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .ai-composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; align-items: end; }
 .ai-composer textarea { min-height: 72px; padding: 9px 10px; resize: vertical; line-height: 1.45; }
 
-@media (max-width: 640px) {
-  .ai-settings-grid { grid-template-columns: 1fr; }
-  .ai-composer { grid-template-columns: 1fr; }
-  .ai-composer .primary { width: 100%; }
-  .lab-graph { min-height: 190px; }
-}
-
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 9px; background: var(--border-light); background-clip: padding-box; }
+::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: var(--radius-card); background: var(--border-light); background-clip: padding-box; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); background-clip: padding-box; }
 
 /* Theme variables stay lightweight: the existing picker only needs to switch
    these tokens; the full layout above remains identical and accessible. */
-.theme-light { color-scheme: light; --bg:#f4f7fb; --surface:#fff; --surface-raised:#f5f8fc; --surface-hover:#eaf0f8; --panel:var(--surface); --panel-light:var(--surface-raised); --panel-elevated:var(--surface-hover); --text:#172033; --text-muted:#5e6d82; --text-dim:#7c8a9b; --border:#d9e2ef; --border-light:#bccbe0; --accent:#2463c5; --accent-hover:#174c9d; --accent-strong:#2463c5; --success:#13865b; --warning:#ae6f00; --error:#c23a4a; --code-bg:#f8fbff; --code-gutter:#eef4fa; --gradient-bg:linear-gradient(112deg,#f2f7ff,#fff); }
-.theme-solar, .theme-sepia { color-scheme: light; --bg:#f5efdf; --surface:#fff9ea; --surface-raised:#f3ead6; --surface-hover:#ecdfc4; --panel:var(--surface); --panel-light:var(--surface-raised); --panel-elevated:var(--surface-hover); --text:#4a4031; --text-muted:#756957; --text-dim:#988b78; --border:#ded2ba; --border-light:#cdbd9f; --accent:#9a6519; --accent-hover:#74490f; --accent-strong:#9a6519; --success:#31745d; --warning:#9a6519; --error:#b34b48; --code-bg:#fff9eb; --code-gutter:#f3ead7; }
+.theme-light { color-scheme: light; --bg:#f4f7fb; --surface:#fff; --surface-raised:#f5f8fc; --surface-hover:#eaf0f8; --text:#172033; --text-muted:#5e6d82; --text-dim:#7c8a9b; --border:#d9e2ef; --border-light:#bccbe0; --accent:#2463c5; --accent-hover:#174c9d; --accent-strong:#2463c5; --success:#13865b; --warning:#ae6f00; --error:#c23a4a; --code-bg:#f8fbff; --code-gutter:#eef4fa; --gradient-bg:linear-gradient(112deg,#f2f7ff,#fff); }
+.theme-solar, .theme-sepia { color-scheme: light; --bg:#f5efdf; --surface:#fff9ea; --surface-raised:#f3ead6; --surface-hover:#ecdfc4; --text:#4a4031; --text-muted:#756957; --text-dim:#988b78; --border:#ded2ba; --border-light:#cdbd9f; --accent:#9a6519; --accent-hover:#74490f; --accent-strong:#9a6519; --success:#31745d; --warning:#9a6519; --error:#b34b48; --code-bg:#fff9eb; --code-gutter:#f3ead7; }
 .theme-dracula { --bg:#282a36; --surface:#343746; --surface-raised:#414557; --surface-hover:#4d5265; --text:#f8f8f2; --text-muted:#c1c1b8; --border:#505466; --border-light:#696d81; --accent:#ff79c6; --accent-hover:#ff9bd6; --accent-strong:#c95f9f; --success:#50fa7b; --warning:#f1fa8c; --error:#ff5555; --code-bg:#20212b; --code-gutter:#292b36; }
 .theme-monokai { --bg:#272822; --surface:#30312a; --surface-raised:#3a3b34; --surface-hover:#46473f; --text:#f8f8f2; --text-muted:#b7b7aa; --border:#515248; --border-light:#6d6e61; --accent:#a6e22e; --accent-hover:#c1f26a; --accent-strong:#76ae1a; --success:#a6e22e; --warning:#e6db74; --error:#f92672; --code-bg:#1f201c; --code-gutter:#292a25; }
 .theme-ocean { --bg:#062d47; --surface:#0a3a55; --surface-raised:#104b67; --surface-hover:#155b79; --text:#e6f4f8; --text-muted:#b3d3df; --border:#1d6079; --border-light:#2d7590; --accent:#35d0c8; --accent-hover:#79efe7; --accent-strong:#159f9b; --success:#62d69b; --warning:#f3c56a; --error:#fb7d86; --code-bg:#062536; --code-gutter:#082f43; }
@@ -580,16 +635,18 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .theme-pastel { color-scheme: light; --bg:#fff7f3; --surface:#fff; --surface-raised:#fff0f4; --surface-hover:#ffe4ec; --text:#342b34; --text-muted:#74636e; --border:#f0d6e0; --border-light:#dfb8c8; --accent:#d35f91; --accent-hover:#a53c6b; --accent-strong:#be4e7e; --success:#3b9d78; --warning:#b47b20; --error:#c74d5d; --code-bg:#fffafd; --code-gutter:#fff0f5; }
 .theme-high-contrast { --bg:#000; --surface:#000; --surface-raised:#111; --surface-hover:#222; --text:#fff; --text-muted:#eee; --text-dim:#c4c4c4; --border:#fff; --border-light:#ff0; --accent:#ff0; --accent-hover:#fff; --accent-strong:#d3d300; --success:#7fff00; --warning:#ff0; --error:#ff5c5c; --code-bg:#000; --code-gutter:#111; }
 
-/* Below 1280px the output section drops to a full-width row under the
-   sidebar/editor row (see grid-column below). It has held only a tab bar
-   plus one active panel since the tabbed inspector redesign — the old
-   grid-template-columns: repeat(3, ...) here predates that and, for that
-   shape, squeezed the tab bar into a single narrow, vertically-stretched
-   column (grid items default to align-items:stretch) rather than a normal
-   horizontal row. Single-column is correct now; the panel itself still
-   lays out its own contents (canvas, log, inspector grid, ...) internally. */
-@media (max-width: 1280px) { .main { grid-template-columns: minmax(220px, 270px) minmax(430px, 1fr); } .output-section { grid-column: 1 / -1; } .output-panel.active { min-height: 270px; } #log { height: 280px; } }
-@media (max-width: 900px) { .header-content { align-items: flex-start; flex-direction: column; } .main { grid-template-columns: 1fr; } .sidebar { grid-template-columns: minmax(0, 1fr) minmax(240px, .8fr); } .output-section { grid-column: auto; grid-template-columns: 1fr; } .editor-container, .CodeMirror, .CodeMirror-scroll, #src { min-height: 480px; height: 480px; } }
+/* One breakpoint where editor/output stack instead of the old three-stage
+   dance (a column-count change at 1280px, full stacking at 900px, plus the
+   sidebar's own extra transitional column layout in between) — now that the
+   sidebar is a drawer overlay instead of a grid column, there's only ever
+   this one arrangement to switch between. */
+@media (max-width: 1000px) {
+  :root { --editor-min-h: 480px; }
+  .header-content { align-items: flex-start; flex-direction: column; }
+  .main { grid-template-areas: "editor" "output"; grid-template-columns: 1fr; }
+  .output-panel.active { min-height: 270px; }
+  #log { height: 280px; }
+}
 
 /* Phone breakpoint (iPhone in portrait or landscape, plus small Android).
    Below this width the two-column sidebar from the 900px tier no longer
@@ -600,7 +657,6 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
   .brand-subtitle { display: none; }
   .header-actions { justify-content: flex-start; }
   .main { padding: 14px; gap: 14px; }
-  .sidebar { grid-template-columns: 1fr; gap: 12px; }
   .editor-header { align-items: flex-start; flex-direction: column; }
   .editor-section { gap: 10px; }
   .controls { gap: 6px; }
@@ -638,11 +694,15 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
   /* Shorter panels so the page doesn't turn into an endless scroll: only
      one output panel is ever visible at a time (the tabs hide the rest),
      so this is the actual per-screen cost, not a sum across all of them. */
-  .editor-container, .CodeMirror, .CodeMirror-scroll, #src { min-height: 340px; height: 340px; }
+  :root { --editor-min-h: 340px; }
   .output-panel { min-height: 240px; }
   .canvas-container, #output { min-height: 220px; }
   #log { height: min(42vh, 420px); }
   .inspector-content { max-height: min(60vh, 560px); }
+  .ai-settings-grid { grid-template-columns: 1fr; }
+  .ai-composer { grid-template-columns: 1fr; }
+  .ai-composer .primary { width: 100%; }
+  .lab-graph { min-height: 190px; }
 }
 
 /* Smallest phones (iPhone SE / mini and narrower): trim padding further. */
@@ -655,7 +715,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 /* iPhone in landscape: viewport height is short (~375–430px), so tall fixed
    panels would otherwise force scrolling for even a single line of output. */
 @media (max-height: 480px) and (orientation: landscape) {
-  .editor-container, .CodeMirror, .CodeMirror-scroll, #src { min-height: 220px; height: 220px; }
+  :root { --editor-min-h: 220px; }
   .output-panel { min-height: 180px; }
   #log { height: min(38vh, 260px); }
   .examples-list { max-height: 30vh; }

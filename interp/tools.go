@@ -250,11 +250,14 @@ type CallGraphCall struct {
 // with the calls it makes and (for calls resolved to another local
 // declaration) the reverse edge of who calls it.
 type CallGraphFunc struct {
-	Name     string          `json:"name"` // "Foo", or "Type.Method" for a method
-	Recv     string          `json:"recv,omitempty"`
-	Line     int             `json:"line"`
-	Calls    []CallGraphCall `json:"calls,omitempty"`
-	CalledBy []string        `json:"calledBy,omitempty"`
+	Name       string          `json:"name"` // "Foo", or "Type.Method" for a method
+	Recv       string          `json:"recv,omitempty"`
+	Line       int             `json:"line"`
+	Calls      []CallGraphCall `json:"calls,omitempty"`
+	CalledBy   []string        `json:"calledBy,omitempty"`
+	Complexity int             `json:"complexity"`
+	LOC        int             `json:"loc"`
+	Recursive  bool            `json:"recursive,omitempty"`
 }
 
 // CallGraphResult is the full per-file call graph produced by
@@ -327,7 +330,9 @@ func AnalyzeCallGraph(src string) (*CallGraphResult, error) {
 	byKey := make(map[string]*CallGraphFunc, len(decls))
 	for i, di := range decls {
 		pos := fset.Position(di.decl.Pos())
-		result.Funcs[i] = CallGraphFunc{Name: di.key, Recv: di.recv, Line: pos.Line}
+		endPos := fset.Position(di.decl.End())
+		complexity, loc := funcComplexityAndLOC(di.decl, pos.Line, endPos.Line)
+		result.Funcs[i] = CallGraphFunc{Name: di.key, Recv: di.recv, Line: pos.Line, Complexity: complexity, LOC: loc}
 		byKey[di.key] = &result.Funcs[i]
 	}
 
@@ -357,6 +362,12 @@ func AnalyzeCallGraph(src string) (*CallGraphResult, error) {
 			result.Funcs[i].Calls = append(result.Funcs[i].Calls, cc)
 			return true
 		})
+		for _, call := range result.Funcs[i].Calls {
+			if call.Resolved == di.key {
+				result.Funcs[i].Recursive = true
+				break
+			}
+		}
 	}
 
 	for _, cf := range result.Funcs {
@@ -371,6 +382,42 @@ func AnalyzeCallGraph(src string) (*CallGraphResult, error) {
 	}
 
 	return result, nil
+}
+
+// funcComplexityAndLOC computes a purely AST-based cyclomatic complexity
+// (McCabe, starting at 1) plus a line count for d, using only branch-adding
+// node kinds — no go/types, matching AnalyzeCallGraph's single-file, no-import-
+// resolution scope. This intentionally mirrors interp/index/metrics.go's
+// computeMetrics, which can't be imported here directly: that package imports
+// interp for shared VFS helpers, so interp importing it back would cycle.
+func funcComplexityAndLOC(fd *ast.FuncDecl, startLine, endLine int) (complexity, loc int) {
+	complexity = 1
+	if fd.Body != nil {
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			switch nd := n.(type) {
+			case *ast.IfStmt:
+				complexity++
+			case *ast.ForStmt:
+				complexity++
+			case *ast.RangeStmt:
+				complexity++
+			case *ast.CaseClause:
+				if len(nd.List) > 0 { // a bare "default:" doesn't add a branch
+					complexity++
+				}
+			case *ast.CommClause:
+				if nd.Comm != nil { // a bare "default:" in a select doesn't add a branch
+					complexity++
+				}
+			case *ast.BinaryExpr:
+				if nd.Op.String() == "&&" || nd.Op.String() == "||" {
+					complexity++
+				}
+			}
+			return true
+		})
+	}
+	return complexity, endLine - startLine + 1
 }
 
 // isTerminatingStmt returns true if stmt unconditionally transfers control.

@@ -4,7 +4,7 @@
 // and returning visitors never keep stale assets. When served without that
 // substitution (local dev), the literal token is a valid, stable name — bump
 // the "uiN" suffix if you need to force a fresh local cache.
-const CACHE_NAME = 'nanogo-playground-ui2-__BUILD_ID__';
+const CACHE_NAME = 'nanogo-playground-ui3-__BUILD_ID__';
 const PRECACHE_URLS = [
   './',
   './index.html',

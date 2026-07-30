@@ -40,7 +40,7 @@
        loads before styles.css so the playground theme rules win the cascade;
        the scripts intentionally load before the inline application script. -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css" crossorigin="anonymous">
-  <link rel="stylesheet" href="styles.css?9">
+  <link rel="stylesheet" href="styles.css?11">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js" crossorigin="anonymous" defer></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js" crossorigin="anonymous" defer></script>
 </head>
@@ -49,6 +49,7 @@
   <header class="header">
     <div class="header-content">
       <div class="brand">
+        <button id="sidebarToggleBtn" class="sidebar-toggle-btn" title="Browse examples" aria-expanded="false" aria-controls="sidebar">☰</button>
         <img src="assets/logo.svg" alt="nanoGo">
         <span>nanoGo</span>
         <span class="brand-subtitle">Go playground · WebAssembly</span>
@@ -101,44 +102,49 @@
     </div>
   </header>
 
+  <!-- Sidebar drawer: an overlay (not a grid column) so opening it never
+       reflows the editor/CodeMirror underneath — see setupSidebar() below. -->
+  <div id="sidebarBackdrop" class="sidebar-backdrop"></div>
+  <aside class="sidebar" id="sidebar" aria-hidden="true">
+    <div class="sidebar-drawer-head">
+      <button id="sidebarCloseBtn" class="mini-btn" title="Close">✕ Close</button>
+    </div>
+    <div class="examples-panel">
+      <input type="checkbox" id="examplesToggle" class="examples-toggle-input">
+      <label for="examplesToggle" class="panel-header examples-toggle-label">
+        <span>📚 Examples &amp; Demos</span>
+        <span class="examples-chevron" aria-hidden="true">▾</span>
+      </label>
+      <div class="examples-panel-body">
+        <input id="exampleSearch" class="example-search" placeholder="Search examples..." aria-label="Search examples" />
+        <div id="tagFilters" class="tag-filters"></div>
+        <div class="examples-list" id="examplesList">
+          <!-- Examples will be populated by JavaScript -->
+        </div>
+      </div>
+    </div>
+
+    <div class="info-panel">
+      <h4 class="info-title">💡 Current Demo Info</h4>
+      <div class="info-content" id="demoInfo">
+        <p>Select an example to see detailed information about what it demonstrates.</p>
+      </div>
+    </div>
+
+    <section class="practice-panel" aria-labelledby="practice-title">
+      <p class="practice-kicker">Why nanoGo</p>
+      <h2 id="practice-title">Learn by changing working Go code.</h2>
+      <p>Move from a small example to a real pattern—then immediately see its output, concurrency, browser effect or test result.</p>
+      <ul class="practice-points">
+        <li><span>01</span> Explore Go without a local toolchain</li>
+        <li><span>02</span> Turn patterns into editable experiments</li>
+        <li><span>03</span> Practice tests and benchmarks in context</li>
+      </ul>
+    </section>
+  </aside>
+
   <!-- Main Content -->
   <main class="main">
-    <!-- Sidebar -->
-    <aside class="sidebar">
-      <div class="examples-panel">
-        <input type="checkbox" id="examplesToggle" class="examples-toggle-input">
-        <label for="examplesToggle" class="panel-header examples-toggle-label">
-          <span>📚 Examples &amp; Demos</span>
-          <span class="examples-chevron" aria-hidden="true">▾</span>
-        </label>
-        <div class="examples-panel-body">
-          <input id="exampleSearch" class="example-search" placeholder="Search examples..." aria-label="Search examples" />
-          <div id="tagFilters" class="tag-filters"></div>
-          <div class="examples-list" id="examplesList">
-            <!-- Examples will be populated by JavaScript -->
-          </div>
-        </div>
-      </div>
-
-      <div class="info-panel">
-        <h4 class="info-title">💡 Current Demo Info</h4>
-        <div class="info-content" id="demoInfo">
-          <p>Select an example to see detailed information about what it demonstrates.</p>
-        </div>
-      </div>
-
-      <section class="practice-panel" aria-labelledby="practice-title">
-        <p class="practice-kicker">Why nanoGo</p>
-        <h2 id="practice-title">Learn by changing working Go code.</h2>
-        <p>Move from a small example to a real pattern—then immediately see its output, concurrency, browser effect or test result.</p>
-        <ul class="practice-points">
-          <li><span>01</span> Explore Go without a local toolchain</li>
-          <li><span>02</span> Turn patterns into editable experiments</li>
-          <li><span>03</span> Practice tests and benchmarks in context</li>
-        </ul>
-      </section>
-    </aside>
-
     <!-- Editor Section -->
     <section class="editor-section">
       <div class="editor-header">
@@ -240,7 +246,7 @@ func main() {
           </span>
         </div>
         <div class="output-content">
-          <div id="log" tabindex="0" class="auto-scroll">Welcome to nanoGo!
+          <div id="log" tabindex="0">Welcome to nanoGo!
 Select an example from the sidebar to get started! 🚀</div>
         </div>
       </div>
@@ -272,6 +278,12 @@ Select an example from the sidebar to get started! 🚀</div>
           <div class="lab-toolbar">
             <button id="labAnalyzeBtn" class="mini-btn">Visualize current code</button>
             <span id="labStatus" class="inspector-note">Static graph · click a function to navigate</span>
+          </div>
+          <div id="labReplayBar" class="lab-replay-bar" hidden>
+            <button id="labReplayPrev" class="mini-btn" title="Previous call">⏮</button>
+            <button id="labReplayPlay" class="mini-btn" title="Play/pause replay">▶</button>
+            <button id="labReplayNext" class="mini-btn" title="Next call">⏭</button>
+            <span id="labReplayInfo" class="inspector-note">No recorded run yet</span>
           </div>
           <div id="labGraph" class="lab-graph" aria-live="polite">
             <p class="inspector-note">Analyze the current code to build its Mermaid call graph.</p>
@@ -931,6 +943,10 @@ Select an example from the sidebar to get started! 🚀</div>
       const embedPopoutLink = document.getElementById("embedPopoutLink");
       const themeBtn = document.getElementById("themeBtn");
       const themePopup = document.getElementById("themePopup");
+      const sidebarEl = document.getElementById("sidebar");
+      const sidebarBackdropEl = document.getElementById("sidebarBackdrop");
+      const sidebarToggleBtn = document.getElementById("sidebarToggleBtn");
+      const sidebarCloseBtn = document.getElementById("sidebarCloseBtn");
       const tagFilters = document.getElementById("tagFilters");
       const examplesList = document.getElementById("examplesList");
       const exampleSearch = document.getElementById("exampleSearch");
@@ -1100,11 +1116,8 @@ Select an example from the sidebar to get started! 🚀</div>
         cls.forEach(c => {
           if (c.startsWith('theme-')) document.documentElement.classList.remove(c);
         });
-        // remove legacy 'light' marker
-        document.documentElement.classList.remove('light');
-        // apply new theme class (also keep 'light' for legacy light styles)
-        if (theme === 'light') document.documentElement.classList.add('light');
-        document.documentElement.classList.add('theme-' + (theme === 'light' ? 'light' : theme));
+        // apply new theme class
+        document.documentElement.classList.add('theme-' + theme);
         localStorage.setItem("nanogo_theme", theme);
         // update button icon
         if (themeBtn) {
@@ -1113,6 +1126,25 @@ Select an example from the sidebar to get started! 🚀</div>
         }
       }
       setTheme(theme);
+
+      // Sidebar drawer: an overlay (see styles.css .sidebar) rather than a
+      // grid column, so opening it never reflows the editor/CodeMirror
+      // underneath. Open state persists like the theme does, except in embed
+      // mode, where the drawer stays closed and hidden regardless of any
+      // state saved from a previous non-embed visit to the same origin.
+      let sidebarOpen = !isEmbedMode && localStorage.getItem('nanogo_sidebar_open') === 'true';
+      function setSidebarOpen(open) {
+        sidebarOpen = open;
+        if (sidebarEl) { sidebarEl.classList.toggle('open', open); sidebarEl.setAttribute('aria-hidden', open ? 'false' : 'true'); }
+        if (sidebarBackdropEl) sidebarBackdropEl.classList.toggle('open', open);
+        if (sidebarToggleBtn) sidebarToggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (!isEmbedMode) localStorage.setItem('nanogo_sidebar_open', open ? 'true' : 'false');
+      }
+      setSidebarOpen(sidebarOpen);
+      if (sidebarToggleBtn) sidebarToggleBtn.addEventListener('click', () => setSidebarOpen(!sidebarOpen));
+      if (sidebarCloseBtn) sidebarCloseBtn.addEventListener('click', () => setSidebarOpen(false));
+      if (sidebarBackdropEl) sidebarBackdropEl.addEventListener('click', () => setSidebarOpen(false));
+      document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && sidebarOpen) setSidebarOpen(false); });
 
       // Theme popup control
       function closeThemePopup() {
@@ -1141,21 +1173,31 @@ Select an example from the sidebar to get started! 🚀</div>
         if (hidden) openThemePopup(); else closeThemePopup();
       };
 
-      // Wire theme option buttons and render swatches
+      // Wire theme option buttons and render swatches. Swatch colors are read
+      // from each theme's real --bg/--accent custom properties (briefly
+      // switching <html>'s theme class per swatch, synchronously, so nothing
+      // paints in between) rather than a hand-maintained hex table — the old
+      // table had already drifted from the actual CSS (e.g. dark's --bg is
+      // #080c14 in styles.css but was hardcoded here as #0a0c10), and a
+      // second source of truth like that can only drift further over time.
+      function computeThemeMeta(themeNames) {
+        const root = document.documentElement;
+        const active = Array.from(root.classList).filter(c => c.startsWith('theme-'));
+        active.forEach(c => root.classList.remove(c));
+        const meta = {};
+        themeNames.forEach(t => {
+          root.classList.add('theme-' + t);
+          const cs = getComputedStyle(root);
+          meta[t] = { bg: cs.getPropertyValue('--bg').trim(), accent: cs.getPropertyValue('--accent').trim() };
+          root.classList.remove('theme-' + t);
+        });
+        active.forEach(c => root.classList.add(c));
+        return meta;
+      }
+
       if (themePopup) {
-        const THEME_META = {
-          dark:    { bg: '#0a0c10', panel: '#111418', accent: '#3b82f6' },
-          light:   { bg: '#ffffff', panel: '#f8fafc', accent: '#2563eb' },
-          solar:   { bg: '#fdf6e3', panel: '#f6eedb', accent: '#b76e11' },
-          dracula: { bg: '#282a36', panel: '#44475a', accent: '#ff79c6' },
-          sepia:   { bg: '#f4ecd8', panel: '#efe6cf', accent: '#b76e11' },
-          monokai: { bg: '#272822', panel: '#2b2b2b', accent: '#a6e22e' },
-          ocean:   { bg: '#052f4a', panel: '#073848', accent: '#2dd4bf' },
-          forest:  { bg: '#06220f', panel: '#0b2e18', accent: '#10b981' },
-          midnight:{ bg: '#0b1220', panel: '#0f1724', accent: '#60a5fa' },
-          pastel:  { bg: '#fffaf6', panel: '#fff6f0', accent: '#f472b6' },
-          'high-contrast': { bg: '#000000', panel: '#000000', accent: '#ffff00' }
-        };
+        const themeNames = Array.from(themePopup.querySelectorAll('.theme-option')).map(btn => btn.getAttribute('data-theme'));
+        const THEME_META = computeThemeMeta(themeNames);
 
         themePopup.querySelectorAll('.theme-option').forEach(btn => {
           const t = btn.getAttribute('data-theme');
@@ -1698,7 +1740,10 @@ Select an example from the sidebar to get started! 🚀</div>
                 execTimeEl.textContent = label;
               }
               updateRunStats(elapsed, stats);
-              if (stats && stats.trace) renderTrace(stats.trace, stats.traceCap);
+              if (stats && stats.trace) {
+                renderTrace(stats.trace, stats.traceCap);
+                document.dispatchEvent(new CustomEvent('nanogo:trace', { detail: { events: stats.trace, cap: stats.traceCap } }));
+              }
               if (stats && stats.profile) applyHeatmap(stats.profile);
               setStatus('Ready', 'ready');
               postToHost({ type: 'nanogo:done', elapsed, stats });
@@ -2009,7 +2054,7 @@ Select an example from the sidebar to get started! 🚀</div>
           const sum = document.createElement('summary');
           const nameBtn = document.createElement('button');
           nameBtn.className = 'callgraph-name';
-          nameBtn.textContent = f.name;
+          nameBtn.textContent = f.name + (f.recursive ? ' ↺' : '');
           nameBtn.title = 'Jump to definition (line ' + f.line + ')';
           nameBtn.addEventListener('click', (ev) => {
             ev.preventDefault();
@@ -2022,8 +2067,11 @@ Select an example from the sidebar to get started! 🚀</div>
           counts.className = 'callgraph-counts';
           const callCount = f.calls ? f.calls.length : 0;
           const callerCount = f.calledBy ? f.calledBy.length : 0;
-          counts.textContent = callCount + ' call' + (callCount === 1 ? '' : 's') + ' · ' +
+          let countsText = callCount + ' call' + (callCount === 1 ? '' : 's') + ' · ' +
             callerCount + ' caller' + (callerCount === 1 ? '' : 's');
+          if (f.complexity) countsText += ' · complexity ' + f.complexity;
+          if (f.loc) countsText += ' · ' + f.loc + ' LOC';
+          counts.textContent = countsText;
           sum.appendChild(counts);
           det.appendChild(sum);
 
@@ -2521,6 +2569,7 @@ Select an example from the sidebar to get started! 🚀</div>
           const item = document.createElement('div');
           item.className = 'example-item';
           item.tabIndex = 0;
+          item.dataset.example = name;
           item.onclick = () => selectExample(name);
           item.onkeypress = (e) => { if (e.key === 'Enter') selectExample(name); };
 
@@ -2653,9 +2702,7 @@ Select an example from the sidebar to get started! 🚀</div>
           item.classList.remove('active');
         });
         
-        const activeItem = Array.from(document.querySelectorAll('.example-item')).find(
-          item => item.querySelector('.example-name').textContent === name
-        );
+        const activeItem = document.querySelector('.example-item[data-example="' + CSS.escape(name) + '"]');
         if (activeItem) activeItem.classList.add('active');
 
         // Update demo info
@@ -2865,7 +2912,7 @@ Select an example from the sidebar to get started! 🚀</div>
       startWasmWorker();
     })();
   </script>
-  <script src="lab.js?1"></script>
+  <script src="lab.js?2"></script>
   <script src="ai.js?1"></script>
 </body>
 </html>
