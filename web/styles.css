@@ -460,6 +460,20 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 #output { min-height: 260px; overflow: auto; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-card); background: #fff; color: #172033; }
 #output :first-child { margin-top: 0; }
 
+/* On the two-column desktop layout the editor defines the working height.
+   Let the active basic output use that same column instead of ending early
+   and leaving a dead strip beside a long source file. Inspector/Lab/AI keep
+   their own scroll and sizing rules. */
+@media (min-width: 1001px) {
+  #consolePanel, #canvasPanel, #domPanel { min-height: var(--editor-min-h); }
+  #consolePanel > .output-content,
+  #canvasPanel > .output-content,
+  #domPanel > .output-content { display: flex; flex-direction: column; }
+  #consolePanel #log,
+  #canvasPanel .canvas-container,
+  #domPanel #output { flex: 1; min-height: 0; height: auto; }
+}
+
 /* Output panel tabs. Always a single scrollable row rather than wrapping:
    on a phone four wrapped pill buttons would eat two lines of height for
    little benefit, while a horizontally-scrollable "segmented control" row
