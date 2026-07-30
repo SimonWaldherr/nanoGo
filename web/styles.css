@@ -72,7 +72,7 @@ button, input, select { font: inherit; }
     background: var(--surface-hover);
     transform: scale(.97);
   }
-  button, select, .upload-control, .header-link, .examples-toggle-label { min-height: 44px; }
+  button, select, .upload-control, .header-link, .examples-toggle-label, .control-settings > summary { min-height: 44px; }
 }
 
 button, select, .upload-control {
@@ -90,7 +90,7 @@ button:hover, select:hover, .upload-control:hover {
   background: var(--surface-hover);
 }
 
-button:focus-visible, input:focus-visible, select:focus-visible, .upload-control:focus-within, .header-link:focus-visible {
+button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible, .upload-control:focus-within, .header-link:focus-visible {
   outline: 3px solid color-mix(in srgb, var(--accent) 48%, transparent);
   outline-offset: 2px;
 }
@@ -268,6 +268,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
    Info and "Why nanoGo" panels are gone) — it grows to use the drawer's
    full height instead of leaving empty space below a short list. */
 .examples-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.sidebar .examples-panel { border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 
 .panel-header, .output-header {
   display: flex;
@@ -296,7 +297,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 
 .example-search {
   width: calc(100% - 28px);
-  margin: 12px 14px 10px;
+  margin: 9px 14px 8px;
   padding: 9px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -307,7 +308,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .example-search::placeholder { color: var(--text-dim); }
 .example-search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
 
-.tag-filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 10px; }
+.tag-filters { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 14px 8px; }
 .tag-btn { min-height: 26px; padding: 3px 8px; border-radius: var(--radius-pill); color: var(--text-muted); font-size: 11px; }
 .tag-btn.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 20%, var(--surface-raised)); color: var(--accent-hover); }
 
@@ -629,7 +630,9 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
    this one arrangement to switch between. */
 @media (max-width: 1000px) {
   :root { --editor-min-h: 480px; }
-  .header-content { align-items: flex-start; flex-direction: column; }
+  .brand-subtitle { display: none; }
+  .header-actions { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .header-actions::-webkit-scrollbar { display: none; }
   .main { grid-template-areas: "editor" "output"; grid-template-columns: 1fr; }
   .output-panel.active { min-height: 270px; }
   #log { height: 280px; }
@@ -643,8 +646,8 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 @media (max-width: 640px) {
   .brand-subtitle { display: none; }
   .header-actions { justify-content: flex-start; }
-  .main { padding: 14px; gap: 14px; }
-  .editor-section { gap: 10px; }
+  .main { padding: 10px; gap: 10px; }
+  .editor-section { gap: 8px; }
   .controls { gap: 6px; }
   .input-group { margin-left: 0; }
 
