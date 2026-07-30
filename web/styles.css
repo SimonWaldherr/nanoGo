@@ -31,7 +31,7 @@
      breakpoint (see the media queries below) instead of restating the same
      four-selector list (.editor-container, .CodeMirror, .CodeMirror-scroll,
      #src) at every width. */
-  --editor-min-h: 620px;
+  --editor-min-h: clamp(480px, calc(100vh - 170px), 720px);
   /* iOS safe-area insets (notch / home indicator). Zero on every other
      platform; only non-zero here when the viewport meta has viewport-fit=cover. */
   --safe-top: env(safe-area-inset-top, 0px);
@@ -111,10 +111,10 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
   align-items: center;
   justify-content: space-between;
   width: min(1720px, 100%);
-  min-height: 68px;
+  min-height: 56px;
   margin: 0 auto;
-  padding: max(12px, var(--safe-top)) max(clamp(16px, 3vw, 42px), calc(var(--safe-right) + 16px)) 12px max(clamp(16px, 3vw, 42px), calc(var(--safe-left) + 16px));
-  gap: 16px;
+  padding: max(8px, var(--safe-top)) max(clamp(14px, 2.4vw, 30px), calc(var(--safe-right) + 14px)) 8px max(clamp(14px, 2.4vw, 30px), calc(var(--safe-left) + 14px));
+  gap: 12px;
 }
 
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; font-weight: 760; letter-spacing: -.02em; font-size: 20px; }
@@ -203,12 +203,12 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .main {
   display: grid;
   grid-template-areas: "editor output";
-  grid-template-columns: minmax(520px, 1fr) minmax(340px, 460px);
+  grid-template-columns: minmax(520px, 1fr) minmax(330px, 440px);
   align-items: start;
   width: min(1720px, 100%);
   margin: 0 auto;
-  padding: clamp(16px, 2.5vw, 36px) clamp(16px, 3vw, 42px) 48px;
-  gap: clamp(16px, 2vw, 28px);
+  padding: clamp(10px, 1.5vw, 20px) clamp(12px, 2.2vw, 30px) 28px;
+  gap: clamp(12px, 1.4vw, 20px);
 }
 .editor-section { grid-area: editor; }
 .output-section { grid-area: output; }
@@ -221,15 +221,15 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
    responsive column-count logic the way the old always-present sidebar did. */
 .sidebar {
   position: fixed;
-  top: var(--header-h, 68px);
+  top: var(--header-h, 56px);
   left: 0;
   bottom: 0;
   z-index: 25;
-  display: grid;
-  align-content: start;
-  gap: 16px;
-  width: min(360px, 88vw);
-  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(330px, 88vw);
+  padding: 12px;
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
@@ -245,7 +245,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 
 .sidebar-backdrop {
   position: fixed;
-  top: var(--header-h, 68px);
+  top: var(--header-h, 56px);
   left: 0;
   right: 0;
   bottom: 0;
@@ -257,20 +257,24 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 }
 .sidebar-backdrop.open { opacity: 1; pointer-events: auto; }
 
-.examples-panel, .info-panel, .editor-header, .output-panel {
+.examples-panel, .output-panel {
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--surface) 94%, transparent);
   box-shadow: var(--shadow);
 }
+/* The examples panel is now the sidebar drawer's only content (the old Demo
+   Info and "Why nanoGo" panels are gone) — it grows to use the drawer's
+   full height instead of leaving empty space below a short list. */
+.examples-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 
 .panel-header, .output-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 48px;
-  padding: 11px 14px;
+  min-height: 40px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--surface-raised) 82%, transparent);
   color: var(--text);
@@ -288,7 +292,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
    active (see the max-width:640px query) — hidden otherwise so a wider
    viewport doesn't show an inert "closed" arrow above always-expanded content. */
 .examples-chevron { display: none; color: var(--text-dim); font-size: 11px; transition: transform .18s ease; }
-.examples-panel-body { display: block; }
+.examples-panel-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 
 .example-search {
   width: calc(100% - 28px);
@@ -307,7 +311,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .tag-btn { min-height: 26px; padding: 3px 8px; border-radius: var(--radius-pill); color: var(--text-muted); font-size: 11px; }
 .tag-btn.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 20%, var(--surface-raised)); color: var(--accent-hover); }
 
-.examples-list { max-height: min(58vh, 570px); overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; border-top: 1px solid var(--border); }
+.examples-list { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; border-top: 1px solid var(--border); }
 /* Category headers shown when browsing the full unfiltered list (see
    showGroups in fillExamples) — sticky so the current category stays
    visible while scrolling a list of 50+ demos. */
@@ -323,41 +327,14 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .example-tags { display: flex; max-width: 124px; flex: 0 1 auto; justify-content: flex-end; gap: 4px; flex-wrap: wrap; }
 .copy-btn { min-height: 27px; padding: 3px 7px; font-size: 11px; }
 
-.info-panel { padding: 14px; }
-.info-title { margin: 0 0 8px; color: var(--accent-hover); font-size: 13px; }
-.info-content { color: var(--text-muted); font-size: 12px; }
-.info-content p:first-child { margin-top: 0; color: var(--text); }
-.info-content ul { margin: 8px 0 0; padding-left: 18px; }
-.info-content code { padding: 1px 4px; border-radius: 4px; background: var(--code-bg); color: var(--accent-hover); font-family: var(--mono); font-size: 11px; }
-
-.practice-panel { position: relative; overflow: hidden; padding: 16px; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: var(--radius); background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 13%, var(--surface)), var(--surface) 62%); box-shadow: var(--shadow); }
-.practice-panel::after { position: absolute; right: -36px; bottom: -46px; width: 138px; height: 138px; border: 1px solid color-mix(in srgb, var(--success) 30%, transparent); border-radius: 50%; content: ""; }
-.practice-kicker { margin: 0 0 6px; color: var(--success); font-size: 10px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
-.practice-panel h2 { position: relative; z-index: 1; max-width: 20ch; margin: 0; font-size: 16px; line-height: 1.25; letter-spacing: -.02em; }
-.practice-panel > p:not(.practice-kicker) { position: relative; z-index: 1; margin: 9px 0 13px; color: var(--text-muted); font-size: 12px; line-height: 1.55; }
-.practice-points { position: relative; z-index: 1; display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; color: var(--text); font-size: 11px; }
-.practice-points li { display: flex; align-items: center; gap: 8px; }
-.practice-points span { display: inline-grid; width: 22px; height: 22px; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border)); border-radius: 6px; background: color-mix(in srgb, var(--accent) 10%, var(--code-bg)); color: var(--accent-hover); font-family: var(--mono); font-size: 9px; font-weight: 700; }
-
 /* Stretched (not align-items:start like its siblings) so its box is always
    at least as tall as the tallest column. position:sticky's containing
    block is this element, not the viewport — if it stayed short, the sticky
    toolbar inside would run out of room to stick to and vanish partway down
    a long page (e.g. a long Examples list making the sidebar the tallest
    column). See setupStickyOffsets() in index.html for the matching --header-h
-   / --toolbar-h vars. */
-.editor-section { display: grid; align-self: stretch; align-content: start; gap: 12px; }
-.editor-header {
-  position: sticky;
-  top: var(--header-h, 68px);
-  z-index: 15;
-  display: flex; align-items: center; justify-content: space-between; min-height: 76px; padding: 14px 16px; gap: 16px;
-  background: var(--surface);
-}
-.editor-header::before { position: absolute; top: 0; left: 0; width: 46px; height: 2px; border-radius: 0 0 3px 0; background: linear-gradient(90deg, var(--success), var(--accent)); content: ""; }
-.section-title { margin: 0; font-size: 17px; letter-spacing: -.01em; }
-.editor-meta { display: flex; align-items: center; gap: 6px; margin: 3px 0 0; color: var(--text-muted); font-size: 11px; }
-.editor-meta span { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 15%, transparent); }
+   var. */
+.editor-section { display: grid; align-self: stretch; align-content: start; gap: 8px; }
 
 .status { display: inline-flex; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid var(--border); border-radius: var(--radius-pill); color: var(--text-muted); font-size: 12px; white-space: nowrap; }
 .status-indicator { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
@@ -368,24 +345,34 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 
 /* Sticky so Run/Stop/Vet/Test/Inspect and the other controls stay reachable
    no matter how far the page (or a long code sample / output panel) is
-   scrolled — see setStickyOffsets(), which keeps --header-h/--toolbar-h in
-   sync with the actual (variable-height) header and editor-header above it. */
+   scrolled — see setupStickyOffsets(), which keeps --header-h in sync with
+   the actual (variable-height) site header above it. Now the first element
+   in .editor-section (the old title/status editor-header row was removed),
+   so it also carries that row's top-left accent marker. */
 .controls {
   position: sticky;
-  top: var(--toolbar-h, 144px);
+  top: var(--header-h, 64px);
   z-index: 14;
-  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
-  padding: 8px 16px;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow);
 }
-.controls > button { padding: 7px 10px; font-size: 12px; }
+.controls::before { position: absolute; top: 0; left: 0; width: 46px; height: 2px; border-radius: 0 0 3px 0; background: linear-gradient(90deg, var(--success), var(--accent)); content: ""; }
+.controls > button { padding: 6px 9px; font-size: 12px; }
 .controls .primary { border-color: var(--accent-strong); background: var(--accent-strong); color: white; font-weight: 700; }
 .controls .primary:hover { border-color: var(--accent); background: var(--accent); transform: translateY(-1px); box-shadow: 0 7px 16px rgba(52, 120, 221, .25); }
-.input-group { display: inline-flex; align-items: center; gap: 5px; margin-left: 3px; color: var(--text-muted); font-size: 11px; }
+.control-settings { position: relative; }
+.control-settings > summary { min-height: 32px; padding: 6px 9px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface-raised); color: var(--text-muted); cursor: pointer; font-size: 12px; list-style: none; }
+.control-settings > summary::-webkit-details-marker { display: none; }
+.control-settings[open] > summary { border-color: var(--accent); background: var(--surface-hover); color: var(--accent-hover); }
+.control-settings-menu { position: absolute; top: calc(100% + 7px); right: 0; z-index: 20; display: grid; gap: 9px; width: min(280px, calc(100vw - 28px)); padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow-lg); }
+.input-group { display: grid; gap: 4px; color: var(--text-muted); font-size: 11px; }
 .input-group select, .input-group input { min-height: 32px; max-width: 92px; padding: 4px 7px; font-size: 12px; }
+.control-settings-menu .input-group select, .control-settings-menu .input-group input { width: 100%; max-width: none; }
+.controls .status { margin-left: auto; }
 
 .editor-container { min-height: var(--editor-min-h); overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--code-bg); box-shadow: var(--shadow-lg), 0 0 0 1px color-mix(in srgb, var(--accent) 5%, transparent); }
 #src { width: 100%; min-height: var(--editor-min-h); padding: 16px; resize: vertical; border: 0; outline: 0; background: var(--code-bg); color: var(--text); font-family: var(--mono); line-height: 1.6; }
@@ -447,16 +434,16 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .cm-builtin, .cm-tag { color: #6ee7c0; }
 .cm-meta { color: #f5a3d7; }
 
-.output-section { display: grid; align-self: stretch; align-content: start; gap: 12px; }
-.output-panel { display: none; min-height: 300px; }
+.output-section { display: grid; align-self: stretch; align-content: start; gap: 8px; }
+.output-panel { display: none; min-height: 240px; }
 .output-panel.active { display: flex; flex-direction: column; }
 .output-header { font-size: 12px; }
 .output-actions { display: flex; align-items: center; gap: 7px; }
 #execTime { min-width: 32px; color: var(--text-dim); font-family: var(--mono); font-size: 11px; text-align: right; }
-.output-content { flex: 1; min-height: 0; padding: 12px; }
-.canvas-container { display: grid; min-height: 260px; place-items: center; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; border: 1px solid var(--border); border-radius: var(--radius-card); background: #080d13; }
+.output-content { flex: 1; min-height: 0; padding: 9px; }
+.canvas-container { display: grid; min-height: 220px; place-items: center; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; border: 1px solid var(--border); border-radius: var(--radius-card); background: #080d13; }
 #life { max-width: 100%; image-rendering: pixelated; }
-#log { height: min(59vh, 650px); overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 2px 1px; border: 1px solid transparent; border-radius: 8px; color: var(--text); font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre-wrap; }
+#log { height: min(54vh, 560px); overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 2px 1px; border: 1px solid transparent; border-radius: 8px; color: var(--text); font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre-wrap; }
 /* While the console has keyboard focus, log-line fading is paused (see the
    focus/blur handlers) — this border makes that "reading mode" state visible. */
 #log.focused { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
@@ -481,7 +468,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
   top: var(--header-h, 68px);
   z-index: 14;
   display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
-  padding: 6px 6px;
+  padding: 4px;
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow);
@@ -657,7 +644,6 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
   .brand-subtitle { display: none; }
   .header-actions { justify-content: flex-start; }
   .main { padding: 14px; gap: 14px; }
-  .editor-header { align-items: flex-start; flex-direction: column; }
   .editor-section { gap: 10px; }
   .controls { gap: 6px; }
   .input-group { margin-left: 0; }
@@ -678,18 +664,13 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
   .input-group select, .input-group input { max-width: 130px; font-size: 14px; }
   .callgraph-edge { min-height: 30px; padding: 5px 9px; }
 
-  /* Promotional panel: useful context on a wide screen, just scroll-length
-     tax on a phone where the editor should be reachable quickly. */
-  .practice-panel { display: none; }
-
   /* Examples list starts collapsed (see the checkbox toggle in the HTML)
      so a first-time visitor isn't forced to scroll past dozens of demos
      before reaching the editor; tapping the header re-expands it in place. */
   .examples-chevron { display: inline; }
   .examples-panel-body { display: none; }
-  .examples-toggle-input:checked ~ .examples-panel-body { display: block; }
+  .examples-toggle-input:checked ~ .examples-panel-body { display: flex; }
   .examples-toggle-input:checked ~ .examples-toggle-label .examples-chevron { transform: rotate(180deg); }
-  .examples-list { max-height: min(48vh, 420px); }
 
   /* Shorter panels so the page doesn't turn into an endless scroll: only
      one output panel is ever visible at a time (the tabs hide the rest),
@@ -718,6 +699,5 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
   :root { --editor-min-h: 220px; }
   .output-panel { min-height: 180px; }
   #log { height: min(38vh, 260px); }
-  .examples-list { max-height: 30vh; }
   .inspector-content { max-height: 46vh; }
 }

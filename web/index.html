@@ -137,33 +137,34 @@
         <button id="formatBtn" title="Format code with gofmt">✨ <span class="btn-label">Format</span></button>
         <button id="vetBtn" title="Run static analysis">🔍 <span class="btn-label">Vet</span></button>
         <button id="testBtn" title="Run TestXxx functions in the current document">🧪 <span class="btn-label">Test</span></button>
-        <div class="input-group">
-          <label for="testFilter">Tests:</label>
-          <input id="testFilter" type="text" placeholder="filter (regexp)" title="Optional go test -run style filter">
-        </div>
         <button id="inspectBtn" title="Open the execution inspector (AST, benchmark, trace)">🔬 <span class="btn-label">Inspect</span></button>
         <button id="clearBtn">🗑️ <span class="btn-label">Clear</span></button>
-        <div class="input-group">
-          <label for="modeSelect">Mode:</label>
-          <select id="modeSelect">
-            <option value="stream">Stream</option>
-            <option value="deferred">Deferred</option>
-          </select>
-        </div>
-        <div class="input-group">
-          <label for="scale">Canvas Scale:</label>
-          <input id="scale" type="number" value="8" min="1" max="20">
-        </div>
-        <div class="input-group">
-          <label for="fontSize">Font:</label>
-          <select id="fontSize">
-            <option value="12">12px</option>
-            <option value="13">13px</option>
-            <option value="14" selected>14px</option>
-            <option value="16">16px</option>
-            <option value="18">18px</option>
-          </select>
-        </div>
+        <details class="control-settings">
+          <summary title="Test, output, canvas, and editor settings">⚙️ <span class="btn-label">Options</span></summary>
+          <div class="control-settings-menu">
+            <label class="input-group" for="testFilter">Tests
+              <input id="testFilter" type="text" placeholder="filter (regexp)" title="Optional go test -run style filter">
+            </label>
+            <label class="input-group" for="modeSelect">Output mode
+              <select id="modeSelect">
+                <option value="stream">Stream</option>
+                <option value="deferred">Deferred</option>
+              </select>
+            </label>
+            <label class="input-group" for="scale">Canvas scale
+              <input id="scale" type="number" value="8" min="1" max="20">
+            </label>
+            <label class="input-group" for="fontSize">Editor font
+              <select id="fontSize">
+                <option value="12">12px</option>
+                <option value="13">13px</option>
+                <option value="14" selected>14px</option>
+                <option value="16">16px</option>
+                <option value="18">18px</option>
+              </select>
+            </label>
+          </div>
+        </details>
         <div id="status" class="status loading">
           <div class="status-indicator"></div>
           Loading WebAssembly...
