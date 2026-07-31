@@ -6,7 +6,10 @@
   --surface-hover: #1d2a3d;
   --text: #e6edf7;
   --text-muted: #98a7bd;
-  --text-dim: #65758e;
+  /* The dimmest text tier still has to be *readable* — it labels the stat
+     chips, inspector notes and example descriptions at 10–11px. Kept a clear
+     step below --text-muted while clearing 4.5:1 on --surface-raised. */
+  --text-dim: #8595ac;
   --border: #243247;
   --border-light: #33445f;
   --accent: #6ea8fe;
@@ -17,6 +20,20 @@
   --error: #ff7785;
   --code-bg: #0b111b;
   --code-gutter: #0f1724;
+  /* Syntax palette. These values used to be literal hex on the .cm-* rules,
+     which caused two separate problems: the tokens could not follow a theme
+     (on the four light themes a dark-theme palette is unreadable), and the
+     rules were losing outright to CodeMirror's own .cm-s-default palette —
+     see the specificity note above the .cm-* block. Themes override these
+     tokens instead (see "Syntax palettes per theme" below). */
+  --syn-keyword: #c792ea;
+  --syn-number: #f7c66a;
+  --syn-type: #7dcfff;
+  --syn-string: #a7db8d;
+  --syn-comment: #71809a;
+  --syn-operator: #f29e9e;
+  --syn-builtin: #6ee7c0;
+  --syn-meta: #f5a3d7;
   --shadow: 0 12px 32px rgba(0, 0, 0, .2);
   --shadow-lg: 0 24px 64px rgba(0, 0, 0, .34);
   --gradient-bg: linear-gradient(112deg, #101a2b, #0b101b 60%, #0a1622);
@@ -441,15 +458,35 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .heat-bar-8  { width: 86%; background: color-mix(in srgb, var(--error) 60%, var(--warning)); }
 .heat-bar-9  { width: 94%; background: color-mix(in srgb, var(--error) 85%, var(--warning)); }
 .heat-bar-10 { width: 100%; background: var(--error); }
-.cm-keyword, .cm-qualifier { color: #c792ea; font-weight: 650; }
-.cm-atom, .cm-number { color: #f7c66a; }
-.cm-def, .cm-variable-2, .cm-type { color: #7dcfff; }
-.cm-variable, .cm-property { color: var(--text); }
-.cm-string, .cm-string-2 { color: #a7db8d; }
-.cm-comment { color: #71809a; font-style: italic; }
-.cm-operator { color: #f29e9e; }
-.cm-builtin, .cm-tag { color: #6ee7c0; }
-.cm-meta { color: #f5a3d7; }
+/* These must be scoped through .cm-s-default, not written as bare `.cm-x`.
+   CodeMirror's own stylesheet declares its palette as `.cm-s-default .cm-atom`
+   — two classes — which outranks a single-class `.cm-atom` no matter which
+   stylesheet loads last. The bare rules that used to live here therefore lost
+   to it for every token CodeMirror itself defines (keyword, atom, number, def,
+   variable-2, type, comment, string, string-2, builtin, tag, meta), so the
+   editor silently rendered CodeMirror's *light* default theme — #221199 atoms
+   and #a11 strings — against our dark --code-bg, at ~1.2–2.7:1. Only
+   .cm-operator and .cm-variable, which CodeMirror leaves unstyled, ever
+   picked up the intended colors. Adding .CodeMirror keeps these ahead of it
+   without resorting to !important. */
+.CodeMirror.cm-s-default .cm-keyword,
+.CodeMirror.cm-s-default .cm-qualifier { color: var(--syn-keyword); font-weight: 650; }
+.CodeMirror.cm-s-default .cm-atom,
+.CodeMirror.cm-s-default .cm-number { color: var(--syn-number); }
+.CodeMirror.cm-s-default .cm-def,
+.CodeMirror.cm-s-default .cm-variable-2,
+.CodeMirror.cm-s-default .cm-variable-3,
+.CodeMirror.cm-s-default .cm-type { color: var(--syn-type); }
+.CodeMirror.cm-s-default .cm-variable,
+.CodeMirror.cm-s-default .cm-property { color: var(--text); }
+.CodeMirror.cm-s-default .cm-string,
+.CodeMirror.cm-s-default .cm-string-2 { color: var(--syn-string); }
+.CodeMirror.cm-s-default .cm-comment { color: var(--syn-comment); font-style: italic; }
+.CodeMirror.cm-s-default .cm-operator { color: var(--syn-operator); }
+.CodeMirror.cm-s-default .cm-builtin,
+.CodeMirror.cm-s-default .cm-tag { color: var(--syn-builtin); }
+.CodeMirror.cm-s-default .cm-meta { color: var(--syn-meta); }
+.CodeMirror.cm-s-default .cm-bracket { color: var(--text-muted); }
 
 .output-section { display: grid; align-self: stretch; align-content: start; gap: 8px; }
 .output-panel { display: none; min-height: 240px; }
@@ -665,15 +702,55 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 
 /* Theme variables stay lightweight: the existing picker only needs to switch
    these tokens; the full layout above remains identical and accessible. */
-.theme-light { color-scheme: light; --bg:#f4f7fb; --surface:#fff; --surface-raised:#f5f8fc; --surface-hover:#eaf0f8; --text:#172033; --text-muted:#5e6d82; --text-dim:#7c8a9b; --border:#d9e2ef; --border-light:#bccbe0; --accent:#2463c5; --accent-hover:#174c9d; --accent-strong:#2463c5; --success:#13865b; --warning:#ae6f00; --error:#c23a4a; --code-bg:#f8fbff; --code-gutter:#eef4fa; --gradient-bg:linear-gradient(112deg,#f2f7ff,#fff); }
-.theme-solar, .theme-sepia { color-scheme: light; --bg:#f5efdf; --surface:#fff9ea; --surface-raised:#f3ead6; --surface-hover:#ecdfc4; --text:#4a4031; --text-muted:#756957; --text-dim:#988b78; --border:#ded2ba; --border-light:#cdbd9f; --accent:#9a6519; --accent-hover:#74490f; --accent-strong:#9a6519; --success:#31745d; --warning:#9a6519; --error:#b34b48; --code-bg:#fff9eb; --code-gutter:#f3ead7; }
-.theme-dracula { --bg:#282a36; --surface:#343746; --surface-raised:#414557; --surface-hover:#4d5265; --text:#f8f8f2; --text-muted:#c1c1b8; --border:#505466; --border-light:#696d81; --accent:#ff79c6; --accent-hover:#ff9bd6; --accent-strong:#c95f9f; --success:#50fa7b; --warning:#f1fa8c; --error:#ff5555; --code-bg:#20212b; --code-gutter:#292b36; }
-.theme-monokai { --bg:#272822; --surface:#30312a; --surface-raised:#3a3b34; --surface-hover:#46473f; --text:#f8f8f2; --text-muted:#b7b7aa; --border:#515248; --border-light:#6d6e61; --accent:#a6e22e; --accent-hover:#c1f26a; --accent-strong:#76ae1a; --success:#a6e22e; --warning:#e6db74; --error:#f92672; --code-bg:#1f201c; --code-gutter:#292a25; }
-.theme-ocean { --bg:#062d47; --surface:#0a3a55; --surface-raised:#104b67; --surface-hover:#155b79; --text:#e6f4f8; --text-muted:#b3d3df; --border:#1d6079; --border-light:#2d7590; --accent:#35d0c8; --accent-hover:#79efe7; --accent-strong:#159f9b; --success:#62d69b; --warning:#f3c56a; --error:#fb7d86; --code-bg:#062536; --code-gutter:#082f43; }
-.theme-forest { --bg:#082312; --surface:#10341e; --surface-raised:#174629; --surface-hover:#205635; --text:#e8f7ea; --text-muted:#b5d6ba; --border:#2c6640; --border-light:#448158; --accent:#43c984; --accent-hover:#85efb5; --accent-strong:#249e60; --success:#4cda8f; --warning:#f1c46c; --error:#f47f86; --code-bg:#091b10; --code-gutter:#0d2918; }
-.theme-midnight { --bg:#0b1020; --surface:#121a30; --surface-raised:#192440; --surface-hover:#223054; --text:#e9efff; --text-muted:#b5c4e5; --border:#2a3a61; --border-light:#40527c; --accent:#7ea8ff; --accent-hover:#aac5ff; --accent-strong:#547ed1; --success:#62d7bb; --warning:#f3c66e; --error:#ff8391; --code-bg:#090e1a; --code-gutter:#10172a; }
-.theme-pastel { color-scheme: light; --bg:#fff7f3; --surface:#fff; --surface-raised:#fff0f4; --surface-hover:#ffe4ec; --text:#342b34; --text-muted:#74636e; --border:#f0d6e0; --border-light:#dfb8c8; --accent:#d35f91; --accent-hover:#a53c6b; --accent-strong:#be4e7e; --success:#3b9d78; --warning:#b47b20; --error:#c74d5d; --code-bg:#fffafd; --code-gutter:#fff0f5; }
+.theme-light { color-scheme: light; --bg:#f4f7fb; --surface:#fff; --surface-raised:#f5f8fc; --surface-hover:#eaf0f8; --text:#172033; --text-muted:#485565; --text-dim:#626f85; --border:#d9e2ef; --border-light:#bccbe0; --accent:#2463c5; --accent-hover:#174c9d; --accent-strong:#2463c5; --success:#13865b; --warning:#8f5a00; --error:#c23a4a; --code-bg:#f8fbff; --code-gutter:#eef4fa; --gradient-bg:linear-gradient(112deg,#f2f7ff,#fff); }
+.theme-solar, .theme-sepia { color-scheme: light; --bg:#f5efdf; --surface:#fff9ea; --surface-raised:#f3ead6; --surface-hover:#ecdfc4; --text:#4a4031; --text-muted:#5d5342; --text-dim:#71654f; --border:#ded2ba; --border-light:#cdbd9f; --accent:#9a6519; --accent-hover:#74490f; --accent-strong:#9a6519; --success:#31745d; --warning:#9a6519; --error:#b34b48; --code-bg:#fff9eb; --code-gutter:#f3ead7; }
+.theme-dracula { --bg:#282a36; --surface:#343746; --surface-raised:#414557; --surface-hover:#4d5265; --text:#f8f8f2; --text-muted:#d5d5cc; --text-dim:#b0b6cb; --border:#505466; --border-light:#696d81; --accent:#ff79c6; --accent-hover:#ff9bd6; --accent-strong:#c95f9f; --success:#50fa7b; --warning:#f1fa8c; --error:#ff8585; --code-bg:#20212b; --code-gutter:#292b36; }
+.theme-monokai { --bg:#272822; --surface:#30312a; --surface-raised:#3a3b34; --surface-hover:#46473f; --text:#f8f8f2; --text-muted:#cccbbf; --text-dim:#aca997; --border:#515248; --border-light:#6d6e61; --accent:#a6e22e; --accent-hover:#c1f26a; --accent-strong:#76ae1a; --success:#a6e22e; --warning:#e6db74; --error:#ff709f; --code-bg:#1f201c; --code-gutter:#292a25; }
+.theme-ocean { --bg:#062d47; --surface:#0a3a55; --surface-raised:#104b67; --surface-hover:#155b79; --text:#e6f4f8; --text-muted:#b3d3df; --text-dim:#9bbbca; --border:#1d6079; --border-light:#2d7590; --accent:#35d0c8; --accent-hover:#79efe7; --accent-strong:#159f9b; --success:#62d69b; --warning:#f3c56a; --error:#fb7d86; --code-bg:#062536; --code-gutter:#082f43; }
+.theme-forest { --bg:#082312; --surface:#10341e; --surface-raised:#174629; --surface-hover:#205635; --text:#e8f7ea; --text-muted:#b5d6ba; --text-dim:#99bda1; --border:#2c6640; --border-light:#448158; --accent:#43c984; --accent-hover:#85efb5; --accent-strong:#249e60; --success:#4cda8f; --warning:#f1c46c; --error:#f47f86; --code-bg:#091b10; --code-gutter:#0d2918; }
+.theme-midnight { --bg:#0b1020; --surface:#121a30; --surface-raised:#192440; --surface-hover:#223054; --text:#e9efff; --text-muted:#b5c4e5; --text-dim:#8e9fc4; --border:#2a3a61; --border-light:#40527c; --accent:#7ea8ff; --accent-hover:#aac5ff; --accent-strong:#547ed1; --success:#62d7bb; --warning:#f3c66e; --error:#ff8391; --code-bg:#090e1a; --code-gutter:#10172a; }
+.theme-pastel { color-scheme: light; --bg:#fff7f3; --surface:#fff; --surface-raised:#fff0f4; --surface-hover:#ffe4ec; --text:#342b34; --text-muted:#594b54; --text-dim:#6f6270; --border:#f0d6e0; --border-light:#dfb8c8; --accent:#d35f91; --accent-hover:#a53c6b; --accent-strong:#be4e7e; --success:#237a5b; --warning:#8b5c10; --error:#c74d5d; --code-bg:#fffafd; --code-gutter:#fff0f5; }
 .theme-high-contrast { --bg:#000; --surface:#000; --surface-raised:#111; --surface-hover:#222; --text:#fff; --text-muted:#eee; --text-dim:#c4c4c4; --border:#fff; --border-light:#ff0; --accent:#ff0; --accent-hover:#fff; --accent-strong:#d3d300; --success:#7fff00; --warning:#ff0; --error:#ff5c5c; --code-bg:#000; --code-gutter:#111; }
+
+/* Syntax palettes per theme. Only the tokens change here — the .cm-* rules
+   above read these variables, so a theme never has to restate a selector.
+   Every value clears 4.5:1 against that theme's own --code-bg, which is what
+   the shared dark palette could not do on a light background.
+
+   The light themes get hue-matched dark tokens (cool for Light, warm for
+   Solarized/Sepia, mauve for Pastel). Dracula and Monokai use their canonical
+   upstream palettes — that is the reason to pick those themes at all — except
+   for the comment color, which both projects define far too dim to read
+   (#6272a4 and #75715e sit near 3:1); each is lifted just far enough. */
+.theme-light {
+  --syn-keyword:#8250df; --syn-number:#8f4b00; --syn-type:#0550ae; --syn-string:#0f6a48;
+  --syn-comment:#5b6875; --syn-operator:#a52f28; --syn-builtin:#0d6f61; --syn-meta:#96297b;
+}
+.theme-solar, .theme-sepia {
+  --syn-keyword:#5a51b0; --syn-number:#855d00; --syn-type:#155f8d; --syn-string:#586a00;
+  --syn-comment:#75674f; --syn-operator:#ad231e; --syn-builtin:#1c6f65; --syn-meta:#9f2963;
+}
+.theme-pastel {
+  --syn-keyword:#8a3ea6; --syn-number:#8f4f09; --syn-type:#1a5da3; --syn-string:#14684a;
+  --syn-comment:#71606c; --syn-operator:#ab2c3c; --syn-builtin:#0d7062; --syn-meta:#9c2b73;
+}
+.theme-dracula {
+  --syn-keyword:#ff79c6; --syn-number:#bd93f9; --syn-type:#8be9fd; --syn-string:#f1fa8c;
+  --syn-comment:#8290c4; --syn-operator:#ff79c6; --syn-builtin:#50fa7b; --syn-meta:#ffb86c;
+}
+.theme-monokai {
+  --syn-keyword:#fd4a8b; --syn-number:#ae81ff; --syn-type:#66d9ef; --syn-string:#e6db74;
+  --syn-comment:#9f9b87; --syn-operator:#fd4a8b; --syn-builtin:#a6e22e; --syn-meta:#fd971f;
+}
+/* Ocean and Forest keep the shared dark tokens (they read well against their
+   deep backgrounds) but tint the comment toward the theme's own hue, which
+   also lifts it over 4.5:1. */
+.theme-ocean { --syn-comment:#7f9db0; }
+.theme-forest { --syn-comment:#7f9d89; }
+.theme-high-contrast {
+  --syn-keyword:#ff0; --syn-number:#0ff; --syn-type:#fff; --syn-string:#7fff00;
+  --syn-comment:#c4c4c4; --syn-operator:#ff0; --syn-builtin:#0ff; --syn-meta:#ff8cff;
+}
 
 /* One breakpoint where editor/output stack instead of the old three-stage
    dance (a column-count change at 1280px, full stacking at 900px, plus the
