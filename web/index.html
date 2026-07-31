@@ -88,9 +88,9 @@
           <p class="embed-popup-hint">Third-party pages can also control the embed via <code>window.postMessage</code> — see the README's "Embedding" section.</p>
         </div>
         <button id="downloadBtn" title="Download code">💾 <span class="btn-label">Download</span></button>
-        <label class="upload-control" title="Upload a .go file">
+        <label class="upload-control" title="Upload one or more .go/.mod workspace files">
           📂 <span class="btn-label">Upload</span>
-          <input id="fileInput" type="file" accept=".go" style="display:none">
+          <input id="fileInput" type="file" accept=".go,.mod" multiple style="display:none">
         </label>
         <a class="header-link" href="https://github.com/SimonWaldherr/nanogo" target="_blank" rel="noreferrer">
           📚 <span class="btn-label">GitHub</span>
@@ -171,6 +171,19 @@
         </div>
       </div>
 
+      <div class="workspace-bar" id="workspaceBar" aria-label="Go workspace">
+          <div class="workspace-project">
+            <span class="workspace-project-icon" aria-hidden="true">📁</span>
+            <span id="workspaceName">IDE workspace</span>
+            <span id="workspaceStatus" class="workspace-status">1 file · main.go</span>
+          </div>
+          <div id="workspaceTabs" class="workspace-tabs" role="tablist" aria-label="Workspace files"></div>
+          <div class="workspace-actions">
+            <button id="workspaceAddBtn" class="mini-btn" type="button" title="Create a new Go file">＋ File</button>
+            <button id="workspaceCheckBtn" class="mini-btn" type="button" title="Resolve packages and imports">✓ Check</button>
+            <button id="workspaceRunBtn" class="mini-btn workspace-run-btn" type="button" title="Run the complete multi-file workspace">▶ Project</button>
+          </div>
+      </div>
       <div class="editor-container">
         <textarea id="src" aria-label="Go source editor" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off" placeholder="// Select an example from the sidebar to get started
 // or write your own Go code here...
@@ -244,7 +257,7 @@ Select an example from the sidebar to get started! 🚀</div>
 
       <!-- Go Execution Lab: Mermaid is rendered by web/lab.js from the
            existing static call-graph result. Its nodes are source-linked and
-           can carry future interpreter breakpoint program points. -->
+           can record breakpoint hits during a deterministic debug run. -->
       <div class="output-panel" id="labPanel">
         <div class="output-header">
           <span>🧭 Go Execution Lab</span>
@@ -253,6 +266,7 @@ Select an example from the sidebar to get started! 🚀</div>
         <div class="output-content lab-content">
           <div class="lab-toolbar">
             <button id="labAnalyzeBtn" class="mini-btn">Visualize current code</button>
+            <button id="labDebugBtn" class="mini-btn lab-debug-btn" title="Run with trace and configured breakpoints">🐞 Debug run</button>
             <span id="labStatus" class="inspector-note">Static graph · click a function to navigate</span>
           </div>
           <div id="labReplayBar" class="lab-replay-bar" hidden>
@@ -309,6 +323,17 @@ Select an example from the sidebar to get started! 🚀</div>
             <div class="stat-chip"><span class="stat-value" id="statSteps">–</span><span class="stat-label">steps</span></div>
             <div class="stat-chip"><span class="stat-value" id="statStepsRate">–</span><span class="stat-label">steps/ms</span></div>
           </div>
+
+          <details class="inspector-section" id="workspaceSection" open>
+            <summary>📁 SDK / Workspace <span class="inspector-hint" id="workspaceMeta"></span></summary>
+            <div class="workspace-inspector-actions">
+              <button id="workspaceInspectBtn" class="mini-btn" type="button">Check imports</button>
+              <span class="inspector-note">Multi-file VFS, go.mod and package graph</span>
+            </div>
+            <div id="workspaceDiagnostics" class="workspace-diagnostics" aria-live="polite">
+              <p class="inspector-note">The active file runs directly. Add a second .go file to enable module-aware execution.</p>
+            </div>
+          </details>
 
           <details class="inspector-section" id="astSection" open>
             <summary>🌳 AST <span class="inspector-hint" id="astMeta"></span></summary>
@@ -371,6 +396,20 @@ Select an example from the sidebar to get started! 🚀</div>
       </div>
     </section>
   </main>
+
+  <!-- Lightweight IDE command palette. It is keyboard-first, but every item
+       remains a normal button so touch and screen-reader users get the same
+       actions without a second navigation system. -->
+  <div id="commandPalette" class="command-palette" role="dialog" aria-modal="true" aria-labelledby="commandPaletteTitle" hidden>
+    <div class="command-palette-card">
+      <div class="command-palette-head">
+        <strong id="commandPaletteTitle">Command palette</strong>
+        <span class="inspector-note">Esc to close</span>
+      </div>
+      <input id="commandPaletteInput" class="command-palette-input" type="search" autocomplete="off" spellcheck="false" placeholder="Run, format, inspect…" aria-label="Filter commands">
+      <div id="commandPaletteList" class="command-palette-list" role="listbox"></div>
+    </div>
+  </div>
 
   <!-- Scripts -->
   <script src="wasm_exec.js?1"></script>
@@ -574,6 +613,31 @@ Select an example from the sidebar to get started! 🚀</div>
       const fontSizeSelect = document.getElementById("fontSize");
       const execTimeEl = document.getElementById("execTime");
 
+      // IDE workspace state. The editor remains the fast single-document
+      // path, while a second file promotes the session to a VFS-backed module
+      // without losing the familiar tabs, examples, sharing, or download
+      // flows. Snapshots are local-only and never leave this browser unless
+      // the user explicitly runs the project against the WASM worker.
+      const workspaceBarEl = document.getElementById('workspaceBar');
+      const workspaceNameEl = document.getElementById('workspaceName');
+      const workspaceStatusEl = document.getElementById('workspaceStatus');
+      const workspaceTabsEl = document.getElementById('workspaceTabs');
+      const workspaceAddBtn = document.getElementById('workspaceAddBtn');
+      const workspaceCheckBtn = document.getElementById('workspaceCheckBtn');
+      const workspaceRunBtn = document.getElementById('workspaceRunBtn');
+      const workspaceInspectBtn = document.getElementById('workspaceInspectBtn');
+      const workspaceMetaEl = document.getElementById('workspaceMeta');
+      const workspaceDiagnosticsEl = document.getElementById('workspaceDiagnostics');
+      const commandPaletteEl = document.getElementById('commandPalette');
+      const commandPaletteInputEl = document.getElementById('commandPaletteInput');
+      const commandPaletteListEl = document.getElementById('commandPaletteList');
+      const WORKSPACE_STORAGE_KEY = 'nanogo_workspace_v1';
+      let workspaceFiles = new Map([['main.go', '']]);
+      let activeFilePath = 'main.go';
+      let workspaceModulePath = 'nanogo.local/workspace';
+      let workspaceSaveTimer = null;
+      let workspaceDirty = false;
+
       // Inspector elements
       const astBtn = document.getElementById("astBtn");
       const astTreeEl = document.getElementById("astTree");
@@ -616,6 +680,302 @@ Select an example from the sidebar to get started! 🚀</div>
       // load with `defer`, so they may not have executed yet when this inline
       // script runs — retry once the DOM (and deferred scripts) are ready.
       let editor = null;
+
+      function isWorkspaceProject() {
+        return workspaceFiles.size > 1 || workspaceFiles.has('go.mod');
+      }
+
+      function workspaceFileEntries() {
+        saveActiveWorkspaceSource();
+        return Array.from(workspaceFiles, ([path, source]) => ({ path, source }));
+      }
+
+      function saveActiveWorkspaceSource() {
+        if (!activeFilePath) return;
+        const source = editor && typeof editor.getValue === 'function'
+          ? editor.getValue() : (srcEl ? srcEl.value : '');
+        workspaceFiles.set(activeFilePath, String(source || ''));
+      }
+
+      function persistWorkspace() {
+        if (workspaceSaveTimer) clearTimeout(workspaceSaveTimer);
+        workspaceSaveTimer = setTimeout(() => {
+          workspaceSaveTimer = null;
+          saveActiveWorkspaceSource();
+          try {
+            localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify({
+              modulePath: workspaceModulePath,
+              active: activeFilePath,
+              files: workspaceFileEntries()
+            }));
+          } catch (e) { /* private browsing/storage quota: keep editing */ }
+        }, 120);
+      }
+
+      function fileLabel(filePath) {
+        const name = filePath.split('/').pop() || filePath;
+        return name === 'go.mod' ? '◇ ' + name : '▱ ' + name;
+      }
+
+      function renderWorkspaceTabs() {
+        if (!workspaceTabsEl) return;
+        workspaceTabsEl.innerHTML = '';
+        for (const filePath of workspaceFiles.keys()) {
+          const tab = document.createElement('button');
+          tab.type = 'button';
+          tab.className = 'workspace-tab' + (filePath === activeFilePath ? ' active' : '');
+          tab.setAttribute('role', 'tab');
+          tab.setAttribute('aria-selected', filePath === activeFilePath ? 'true' : 'false');
+          tab.title = filePath + ' · double-click rename · middle-click close';
+          tab.dataset.path = filePath;
+          tab.textContent = fileLabel(filePath);
+          tab.addEventListener('click', () => openWorkspaceFile(filePath));
+          tab.addEventListener('dblclick', ev => { ev.preventDefault(); renameWorkspaceFile(filePath); });
+          tab.addEventListener('auxclick', ev => { if (ev.button === 1) { ev.preventDefault(); removeWorkspaceFile(filePath); } });
+          workspaceTabsEl.appendChild(tab);
+        }
+        if (workspaceNameEl) workspaceNameEl.textContent = workspaceModulePath.split('/').pop() || 'IDE workspace';
+        if (workspaceStatusEl) {
+          const count = workspaceFiles.size;
+          workspaceStatusEl.textContent = count + ' file' + (count === 1 ? '' : 's') + ' · ' + activeFilePath + (workspaceDirty ? ' · unsaved' : '');
+        }
+        if (workspaceRunBtn) workspaceRunBtn.classList.toggle('active', isWorkspaceProject());
+      }
+
+      function setEditorModeForFile(filePath) {
+        if (editor && editor.setOption) editor.setOption('mode', filePath === 'go.mod' ? 'text/plain' : 'text/x-go');
+      }
+
+      function openWorkspaceFile(filePath) {
+        if (!workspaceFiles.has(filePath)) return;
+        saveActiveWorkspaceSource();
+        activeFilePath = filePath;
+        const source = workspaceFiles.get(filePath) || '';
+        setEditorModeForFile(filePath);
+        if (editor && typeof editor.setValue === 'function') editor.setValue(source);
+        else if (srcEl) srcEl.value = source;
+        renderWorkspaceTabs();
+        persistWorkspace();
+      }
+
+      function replaceWorkspace(files, active) {
+        const next = new Map();
+        (files || []).forEach(file => {
+          if (!file || typeof file.path !== 'string') return;
+          const clean = file.path.replace(/\\/g, '/').replace(/^\/+/, '');
+          if (!clean || clean === '.' || clean === '..' || clean.startsWith('../')) return;
+          if (clean !== 'go.mod' && !clean.endsWith('.go')) return;
+          next.set(clean, String(file.source || ''));
+        });
+        if (!next.size) next.set('main.go', '');
+        workspaceFiles = next;
+        activeFilePath = workspaceFiles.has(active) ? active : workspaceFiles.keys().next().value;
+        workspaceDirty = false;
+        setEditorModeForFile(activeFilePath);
+        const source = workspaceFiles.get(activeFilePath) || '';
+        if (editor && typeof editor.setValue === 'function') editor.setValue(source);
+        else if (srcEl) srcEl.value = source;
+        workspaceDirty = false;
+        renderWorkspaceTabs();
+        persistWorkspace();
+      }
+
+      function resetWorkspace(source, filePath) {
+        workspaceModulePath = 'nanogo.local/workspace';
+        replaceWorkspace([{ path: filePath || 'main.go', source: String(source || '') }], filePath || 'main.go');
+      }
+
+      function loadPersistedWorkspace() {
+        try {
+          const raw = localStorage.getItem(WORKSPACE_STORAGE_KEY);
+          if (!raw) return false;
+          const saved = JSON.parse(raw);
+          if (!saved || !Array.isArray(saved.files) || !saved.files.length) return false;
+          workspaceModulePath = typeof saved.modulePath === 'string' && saved.modulePath.trim()
+            ? saved.modulePath.trim() : 'nanogo.local/workspace';
+          replaceWorkspace(saved.files, saved.active);
+          logMessage('💾 Workspace restored: ' + workspaceFiles.size + ' file(s)', 'system');
+          return true;
+        } catch (e) { return false; }
+      }
+
+      function addWorkspaceFile(filePath, source) {
+        const clean = String(filePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+        if (!clean || (clean !== 'go.mod' && !clean.endsWith('.go')) || clean.includes('..')) return false;
+        saveActiveWorkspaceSource();
+        const defaultSource = clean === 'go.mod' ? 'module ' + workspaceModulePath + '\n' : 'package main\n';
+        workspaceFiles.set(clean, String(source || defaultSource));
+        workspaceDirty = true;
+        openWorkspaceFile(clean);
+        renderWorkspaceTabs();
+        persistWorkspace();
+        return true;
+      }
+
+      function renameWorkspaceFile(oldPath) {
+        const nextRaw = window.prompt('Rename workspace file', oldPath);
+        if (!nextRaw || nextRaw === oldPath) return;
+        const next = nextRaw.replace(/\\/g, '/').replace(/^\/+/, '');
+        if (!next || next.includes('..') || (next !== 'go.mod' && !next.endsWith('.go')) || workspaceFiles.has(next)) {
+          logMessage('📁 Invalid or duplicate workspace path', 'warn');
+          return;
+        }
+        const replacement = new Map();
+        workspaceFiles.forEach((source, path) => replacement.set(path === oldPath ? next : path, source));
+        workspaceFiles = replacement;
+        if (activeFilePath === oldPath) activeFilePath = next;
+        workspaceDirty = true;
+        renderWorkspaceTabs();
+        persistWorkspace();
+      }
+
+      function removeWorkspaceFile(filePath) {
+        if (workspaceFiles.size <= 1) {
+          logMessage('📁 Keep at least one workspace file', 'warn');
+          return;
+        }
+        workspaceFiles.delete(filePath);
+        if (activeFilePath === filePath) {
+          activeFilePath = workspaceFiles.keys().next().value;
+          setEditorModeForFile(activeFilePath);
+          const source = workspaceFiles.get(activeFilePath) || '';
+          if (editor && typeof editor.setValue === 'function') editor.setValue(source);
+          else if (srcEl) srcEl.value = source;
+        }
+        workspaceDirty = true;
+        renderWorkspaceTabs();
+        persistWorkspace();
+        logMessage('📁 Removed ' + filePath, 'system');
+      }
+
+      function workspacePayload() {
+        saveActiveWorkspaceSource();
+        return { files: workspaceFileEntries(), modulePath: workspaceModulePath };
+      }
+
+      function showWorkspaceResult(result, error) {
+        if (workspaceMetaEl) workspaceMetaEl.textContent = error ? 'error' : (result && result.workspace
+          ? result.workspace.packages.length + ' package(s)' : '');
+        if (!workspaceDiagnosticsEl) return;
+        if (error) {
+          workspaceDiagnosticsEl.innerHTML = '<div class="inspector-error">' + escapeHtml(error) + '</div>';
+          return;
+        }
+        const info = result && (result.workspace || result);
+        if (!info) {
+          workspaceDiagnosticsEl.innerHTML = '<p class="inspector-note">No workspace metadata returned.</p>';
+          return;
+        }
+        if (info.module && info.module !== workspaceModulePath) {
+          workspaceModulePath = info.module;
+          renderWorkspaceTabs();
+          persistWorkspace();
+        }
+        const packageRows = (info.packages || []).map(pkg => {
+          const imports = (pkg.imports || []).length ? ' · imports ' + pkg.imports.join(', ') : '';
+          return '<li><code>' + escapeHtml(pkg.name || '?') + '</code> <span class="workspace-package-path">' + escapeHtml(pkg.dir || '') + '</span> · ' + (pkg.files || []).length + ' file(s)' + escapeHtml(imports) + '</li>';
+        }).join('');
+        workspaceDiagnosticsEl.innerHTML =
+          '<div class="workspace-summary"><span><strong>' + escapeHtml(info.module || workspaceModulePath) + '</strong></span><span>' + info.files + ' file(s)</span><span>' + (info.packages || []).length + ' package(s)</span></div>' +
+          (packageRows ? '<ul class="workspace-package-list">' + packageRows + '</ul>' : '<p class="inspector-note">No packages discovered.</p>');
+      }
+
+      function requestWorkspaceCheck() {
+        if (!worker) { logMessage('Worker not ready', 'warn'); return; }
+        const payload = workspacePayload();
+        if (workspaceCheckBtn) { workspaceCheckBtn.disabled = true; workspaceCheckBtn.textContent = 'Checking…'; }
+        if (workspaceInspectBtn) { workspaceInspectBtn.disabled = true; workspaceInspectBtn.textContent = 'Checking…'; }
+        showOutputPanel('inspector');
+        worker.postMessage({ type: 'workspace-check', files: payload.files, modulePath: payload.modulePath });
+      }
+
+      function requestWorkspaceTests() {
+        if (!worker) { logMessage('Worker not ready', 'warn'); return; }
+        const payload = workspacePayload();
+        showOutputPanel('inspector');
+        if (testBtn) { testBtn.disabled = true; testBtn.textContent = '🧪 Testing…'; }
+        worker.postMessage({ type: 'workspace-test', files: payload.files, modulePath: payload.modulePath, filter: testFilterEl ? testFilterEl.value.trim() : '' });
+      }
+
+      function runWorkspace() {
+        if (!worker) { logMessage('Worker not ready', 'warn'); return; }
+        const payload = workspacePayload();
+        const scale = parseInt(scaleEl.value, 10);
+        worker.postMessage({ type: 'set-scale', scale: scale });
+        const c = document.getElementById('life');
+        if (c) c.getContext('2d').clearRect(0, 0, c.width, c.height);
+        if (execTimeEl) execTimeEl.textContent = '';
+        clearErrorHighlight();
+        breakpointHits.clear();
+        refreshBreakpointMarkers();
+        clearHeatmap();
+        logMessage('🚀 Running workspace…', 'system');
+        setStatus('Running workspace...', 'loading');
+        if (workspaceRunBtn) { workspaceRunBtn.disabled = true; workspaceRunBtn.textContent = '⏳ Project…'; }
+        const wantTrace = !!(traceToggle && traceToggle.checked);
+        const wantProfile = !!(heatmapToggle && heatmapToggle.checked);
+        const t0 = performance.now();
+        worker.postMessage({ type: 'workspace-run', files: payload.files, modulePath: payload.modulePath, trace: wantTrace, profile: wantProfile, t0 });
+      }
+
+      // A small command palette gives the playground IDE muscle memory: one
+      // shortcut exposes the same actions as the compact toolbar, including
+      // project-aware Run/Check and the existing analysis surfaces.
+      let commandPaletteIndex = 0;
+      function commandDefinitions() {
+        return [
+          { label: isWorkspaceProject() ? 'Run workspace' : 'Run active file', hint: 'Ctrl/⌘+Enter', run: runCode },
+          { label: 'Check workspace imports', hint: 'go list', run: requestWorkspaceCheck },
+          { label: 'Format source', hint: 'gofmt', run: () => formatBtn && formatBtn.click() },
+          { label: 'Vet source', hint: 'static analysis', run: () => vetBtn && vetBtn.click() },
+          { label: 'Run tests', hint: 'go test', run: () => testBtn && testBtn.click() },
+          { label: 'Open Inspector', hint: 'AST · trace · SDK', run: () => showOutputPanel('inspector') },
+          { label: 'Visualize call graph', hint: 'Mermaid', run: () => requestCallGraph() },
+          { label: 'Browse examples', hint: 'sidebar', run: () => setSidebarOpen(true) }
+        ];
+      }
+
+      function closeCommandPalette() {
+        if (!commandPaletteEl) return;
+        commandPaletteEl.hidden = true;
+      }
+
+      function renderCommandPalette() {
+        if (!commandPaletteListEl) return;
+        const query = (commandPaletteInputEl && commandPaletteInputEl.value || '').trim().toLowerCase();
+        const commands = commandDefinitions().filter(cmd => !query || (cmd.label + ' ' + cmd.hint).toLowerCase().includes(query));
+        commandPaletteIndex = Math.min(commandPaletteIndex, Math.max(0, commands.length - 1));
+        commandPaletteListEl.innerHTML = '';
+        commands.forEach((cmd, index) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'command-item' + (index === commandPaletteIndex ? ' active' : '');
+          button.setAttribute('role', 'option');
+          button.setAttribute('aria-selected', index === commandPaletteIndex ? 'true' : 'false');
+          button.innerHTML = '<span>' + escapeHtml(cmd.label) + '</span><small>' + escapeHtml(cmd.hint) + '</small>';
+          button.addEventListener('click', () => { closeCommandPalette(); cmd.run(); });
+          commandPaletteListEl.appendChild(button);
+        });
+      }
+
+      function openCommandPalette() {
+        if (!commandPaletteEl) return;
+        commandPaletteEl.hidden = false;
+        commandPaletteIndex = 0;
+        if (commandPaletteInputEl) { commandPaletteInputEl.value = ''; commandPaletteInputEl.focus(); }
+        renderCommandPalette();
+      }
+
+      if (commandPaletteInputEl) commandPaletteInputEl.addEventListener('input', () => {
+        commandPaletteIndex = 0;
+        renderCommandPalette();
+      });
+      if (commandPaletteEl) commandPaletteEl.addEventListener('click', ev => {
+        if (ev.target === commandPaletteEl) closeCommandPalette();
+      });
+
+      renderWorkspaceTabs();
+
       function initEditor() {
         if (editor || typeof CodeMirror === 'undefined' || !srcEl) return;
         try {
@@ -635,7 +995,11 @@ Select an example from the sidebar to get started! 🚀</div>
           // run — the line numbers it was anchored to may no longer mean
           // the same thing once the user starts changing the code.
           editor.on('change', () => {
+            saveActiveWorkspaceSource();
+            workspaceDirty = true;
             clearErrorHighlight(); clearHeatmap();
+            renderWorkspaceTabs();
+            persistWorkspace();
             document.dispatchEvent(new CustomEvent('nanogo:source-change'));
           });
           editor.on('gutterClick', (cm, line, gutter) => {
@@ -656,6 +1020,7 @@ Select an example from the sidebar to get started! 🚀</div>
       }
       initEditor();
       if (!editor) document.addEventListener('DOMContentLoaded', initEditor, { once: true });
+      setEditorModeForFile(activeFilePath);
 
       // Keep the sticky toolbar/tabs offset in sync with the header's real
       // (variable, wrapping-dependent) height, so the Run/Stop/Vet/Test/
@@ -674,31 +1039,82 @@ Select an example from the sidebar to get started! 🚀</div>
       })();
 
       function getSource() { return (editor && typeof editor.getValue === 'function') ? editor.getValue() : (srcEl ? srcEl.value : ''); }
-      function setSource(v) { if (editor && typeof editor.setValue === 'function') editor.setValue(v); if (srcEl) srcEl.value = v; }
+      function setSource(v) {
+        const source = String(v == null ? '' : v);
+        if (editor && typeof editor.setValue === 'function') editor.setValue(source);
+        if (srcEl) srcEl.value = source;
+        workspaceFiles.set(activeFilePath || 'main.go', source);
+        workspaceDirty = true;
+        renderWorkspaceTabs();
+        persistWorkspace();
+      }
 
-      // Breakpoints are source-linked program points. The Execution Lab uses
-      // these markers today; the upcoming cooperative pause engine consumes
-      // the same line set, so users do not lose their debugging intent.
-      const breakpointLines = new Set();
-      function breakpointMarker() {
+      // Breakpoints are source-linked program points. A debug run sends their
+      // line numbers to the interpreter, which records bounded hit events in
+      // the trace; replay can then jump through those exact source lines.
+      const breakpointHandles = new Set();
+      const breakpointHits = new Map();
+      function breakpointEntries() {
+        if (!editor) return [];
+        const entries = [];
+        breakpointHandles.forEach((handle) => {
+          const index = editor.getLineNumber(handle);
+          if (index < 0) {
+            breakpointHandles.delete(handle);
+            return;
+          }
+          entries.push({ handle, line: index + 1 });
+        });
+        entries.sort((a, b) => a.line - b.line);
+        return entries;
+      }
+      function breakpointLineNumbers() {
+        return breakpointEntries().map((entry) => entry.line);
+      }
+      function breakpointMarker(line) {
+        const hits = breakpointHits.get(line) || 0;
         const marker = document.createElement('span');
-        marker.className = 'nanogo-breakpoint-marker';
-        marker.title = 'Breakpoint';
-        marker.setAttribute('aria-label', 'Breakpoint');
+        marker.className = 'nanogo-breakpoint-marker' + (hits ? ' hit' : '');
+        marker.title = hits ? 'Breakpoint · ' + hits + ' hit(s)' : 'Breakpoint';
+        marker.setAttribute('aria-label', marker.title);
         return marker;
+      }
+      function refreshBreakpointMarkers() {
+        breakpointEntries().forEach((entry) => {
+          editor.setGutterMarker(entry.handle, 'nanogo-breakpoints', breakpointMarker(entry.line));
+        });
+      }
+      function applyBreakpointHits(events) {
+        breakpointHits.clear();
+        (events || []).forEach((event) => {
+          if (event.kind !== 'breakpoint' || !event.line) return;
+          breakpointHits.set(event.line, (breakpointHits.get(event.line) || 0) + 1);
+        });
+        refreshBreakpointMarkers();
+        document.dispatchEvent(new CustomEvent('nanogo:breakpoint-hits', {
+          detail: { hits: Array.from(breakpointHits, ([line, count]) => ({ line, count })) }
+        }));
       }
       function toggleBreakpoint(line) {
         if (!editor || !line) return false;
-        if (breakpointLines.has(line)) {
-          breakpointLines.delete(line);
-          editor.setGutterMarker(line - 1, 'nanogo-breakpoints', null);
+        const existing = breakpointEntries().find((entry) => entry.line === line);
+        if (existing) {
+          breakpointHandles.delete(existing.handle);
+          breakpointHits.delete(line);
+          editor.setGutterMarker(existing.handle, 'nanogo-breakpoints', null);
         } else {
-          breakpointLines.add(line);
-          editor.setGutterMarker(line - 1, 'nanogo-breakpoints', breakpointMarker());
+          const handle = editor.getLineHandle(line - 1);
+          if (!handle) return false;
+          breakpointHandles.add(handle);
+          editor.setGutterMarker(handle, 'nanogo-breakpoints', breakpointMarker(line));
         }
-        document.dispatchEvent(new CustomEvent('nanogo:breakpoints-change', { detail: { lines: Array.from(breakpointLines).sort((a, b) => a - b) } }));
-        return breakpointLines.has(line);
+        document.dispatchEvent(new CustomEvent('nanogo:breakpoints-change', { detail: { lines: breakpointLineNumbers() } }));
+        return breakpointLineNumbers().includes(line);
       }
+      document.addEventListener('nanogo:source-change', () => {
+        breakpointHits.clear();
+        refreshBreakpointMarkers();
+      });
 
       // Output panels
       const canvasPanel = document.getElementById("canvasPanel");
@@ -1158,7 +1574,7 @@ Select an example from the sidebar to get started! 🚀</div>
           return;
         }
 
-        worker = new Worker('wasm_worker.js?7');
+        worker = new Worker('wasm_worker.js?8');
         worker.onmessage = (ev) => {
           const m = ev.data;
           if (!m || !m.type) return;
@@ -1177,6 +1593,51 @@ Select an example from the sidebar to get started! 🚀</div>
         worker.postMessage({ type: 'init' });
       }
 
+      function finishRun(elapsed, stats) {
+        const timeStr = elapsed != null ? ' (' + elapsed + 'ms)' : '';
+        logMessage('✅ Execution finished' + timeStr, 'system');
+        if (execTimeEl) {
+          let label = elapsed != null ? elapsed + 'ms' : '';
+          if (stats && stats.steps) label += (label ? ' · ' : '') + formatSteps(stats.steps) + ' steps';
+          execTimeEl.textContent = label;
+        }
+        updateRunStats(elapsed, stats);
+        if (stats && stats.trace) {
+          applyBreakpointHits(stats.trace);
+          renderTrace(stats.trace, stats.traceCap);
+          document.dispatchEvent(new CustomEvent('nanogo:trace', { detail: { events: stats.trace, cap: stats.traceCap } }));
+        } else {
+          applyBreakpointHits([]);
+        }
+        if (stats && stats.profile) applyHeatmap(stats.profile);
+        setStatus(stats && stats.error ? 'Execution failed' : 'Ready', stats && stats.error ? 'error' : 'ready');
+        workspaceDirty = false;
+        renderWorkspaceTabs();
+        if (workspaceRunBtn) { workspaceRunBtn.disabled = false; workspaceRunBtn.textContent = '▶ Project'; }
+      }
+
+      function handleTestResult(result, error, scope) {
+        if (testBtn) { testBtn.disabled = false; testBtn.textContent = '🧪 Test'; }
+        if (error) {
+          logMessage('🧪 ' + (scope || 'Test') + ' error: ' + error, 'error');
+          return;
+        }
+        if (!result || !result.total) {
+          logMessage('🧪 No matching TestXxx functions found', 'warn');
+          return;
+        }
+        if (result.passed) {
+          const skipped = (result.results || []).filter(test => test.skipped).length;
+          logMessage('🧪 PASS: ' + result.total + ' test(s)' + (skipped ? ', ' + skipped + ' skipped' : '') + ' ✅', 'system');
+          return;
+        }
+        logMessage('🧪 FAIL: ' + result.failed + ' of ' + result.total + ' test(s) failed', 'error');
+        (result.results || []).filter(test => !test.passed).forEach(test => {
+          logMessage('  ' + (test.name || 'Test') + ' at ' + test.line + ':' + test.column + ' — ' + test.category, 'error');
+          (test.messages || []).forEach(message => logMessage('    ' + message, 'error'));
+        });
+      }
+
       function handleWorkerMessage(m) {
           switch (m.type) {
             case 'ready':
@@ -1187,6 +1648,10 @@ Select an example from the sidebar to get started! 🚀</div>
               if (callGraphBtn && wasmCapabilities.hasCallGraph === false) callGraphBtn.disabled = true;
               if (benchBtn && wasmCapabilities.hasBench === false) benchBtn.disabled = true;
               if (heatmapToggle && wasmCapabilities.hasProfile === false) heatmapToggle.disabled = true;
+              if (workspaceCheckBtn && wasmCapabilities.hasModuleCheck === false) workspaceCheckBtn.disabled = true;
+              if (workspaceInspectBtn && wasmCapabilities.hasModuleCheck === false) workspaceInspectBtn.disabled = true;
+              if (workspaceRunBtn && wasmCapabilities.hasWorkspace === false) workspaceRunBtn.disabled = true;
+              if (workspaceMetaEl && wasmCapabilities.sdk) workspaceMetaEl.textContent = wasmCapabilities.sdk;
               logMessage('🎉 WebAssembly loaded and ready!', 'system');
               fillExamples();
               loadCodeFromURL().then(() => {
@@ -1280,24 +1745,28 @@ Select an example from the sidebar to get started! 🚀</div>
                 m.issues.forEach(iss => logMessage('  ' + iss.line + ':' + iss.column + ': ' + iss.message, 'warn'));
               }
               break;
-            case 'test-result':
+            case 'workspace-check-result':
+              if (workspaceCheckBtn) { workspaceCheckBtn.disabled = false; workspaceCheckBtn.textContent = '✓ Check'; }
+              if (workspaceInspectBtn) { workspaceInspectBtn.disabled = false; workspaceInspectBtn.textContent = 'Check imports'; }
+              showWorkspaceResult(m.result, m.error);
+              if (m.error) logMessage('📁 Workspace check: ' + m.error, 'error');
+              else logMessage('📁 Workspace checked: ' + ((m.result && m.result.workspace && m.result.workspace.packages) || []).length + ' package(s) ✅', 'system');
+              break;
+            case 'workspace-done':
               if (m.error) {
-                logMessage('🧪 Test error: ' + m.error, 'error');
-              } else if (m.result) {
-                const result = m.result;
-                if (!result.total) {
-                  logMessage('🧪 No matching TestXxx functions found in the current document', 'warn');
-                } else if (result.passed) {
-                  const skipped = (result.results || []).filter(test => test.skipped).length;
-                  logMessage('🧪 PASS: ' + result.total + ' test(s)' + (skipped ? ', ' + skipped + ' skipped' : '') + ' ✅', 'system');
-                } else {
-                  logMessage('🧪 FAIL: ' + result.failed + ' of ' + result.total + ' test(s) failed', 'error');
-                  (result.results || []).filter(test => !test.passed).forEach(test => {
-                    logMessage('  ' + (test.name || 'Test') + ' at ' + test.line + ':' + test.column + ' — ' + test.category, 'error');
-                    (test.messages || []).forEach(message => logMessage('    ' + message, 'error'));
-                  });
-                }
+                if (workspaceRunBtn) { workspaceRunBtn.disabled = false; workspaceRunBtn.textContent = '▶ Project'; }
+                setStatus('Workspace error', 'error');
+                logMessage('📁 Workspace run error: ' + m.error, 'error');
+              } else {
+                if (m.stats && m.stats.workspace) showWorkspaceResult({ workspace: m.stats.workspace });
+                finishRun(m.elapsed, m.stats);
               }
+              break;
+            case 'test-result':
+              handleTestResult(m.result, m.error, 'Test');
+              break;
+            case 'workspace-test-result':
+              handleTestResult(m.result, m.error, 'Workspace test');
               break;
             case 'ast-result':
               if (astBtn) { astBtn.disabled = false; astBtn.textContent = 'Parse current code'; }
@@ -1335,20 +1804,7 @@ Select an example from the sidebar to get started! 🚀</div>
             case 'done': {
               const elapsed = m.elapsed != null ? m.elapsed : null;
               const stats = m.stats || null;
-              const timeStr = elapsed != null ? ` (${elapsed}ms)` : '';
-              logMessage('✅ Execution finished' + timeStr, 'system');
-              if (execTimeEl) {
-                let label = elapsed != null ? elapsed + 'ms' : '';
-                if (stats && stats.steps) label += (label ? ' · ' : '') + formatSteps(stats.steps) + ' steps';
-                execTimeEl.textContent = label;
-              }
-              updateRunStats(elapsed, stats);
-              if (stats && stats.trace) {
-                renderTrace(stats.trace, stats.traceCap);
-                document.dispatchEvent(new CustomEvent('nanogo:trace', { detail: { events: stats.trace, cap: stats.traceCap } }));
-              }
-              if (stats && stats.profile) applyHeatmap(stats.profile);
-              setStatus('Ready', 'ready');
+              finishRun(elapsed, stats);
               postToHost({ type: 'nanogo:done', elapsed, stats });
               break;
             }
@@ -1360,6 +1816,10 @@ Select an example from the sidebar to get started! 🚀</div>
       function runCode() {
         try {
           if (!worker) throw new Error('worker not initialized');
+          if (isWorkspaceProject()) {
+            runWorkspace();
+            return;
+          }
           clearErrorHighlight();
 
           // Show appropriate output panel for current example
@@ -1379,11 +1839,14 @@ Select an example from the sidebar to get started! 🚀</div>
           logMessage('🚀 Running…', 'system');
           setStatus('Running code...', 'loading');
           const mode = modeSelect.value || 'stream';
-          const wantTrace = !!(traceToggle && traceToggle.checked);
+          const breakpoints = breakpointLineNumbers();
+          const wantTrace = !!(traceToggle && traceToggle.checked) || breakpoints.length > 0;
           const wantProfile = !!(heatmapToggle && heatmapToggle.checked);
+          breakpointHits.clear();
+          refreshBreakpointMarkers();
           clearHeatmap();
           const t0 = performance.now();
-          worker.postMessage({ type: 'run', source: getSource(), mode: mode, trace: wantTrace, profile: wantProfile, t0 });
+          worker.postMessage({ type: 'run', source: getSource(), mode: mode, trace: wantTrace, profile: wantProfile, breakpoints: breakpoints, t0 });
         } catch (err) {
           setStatus('Runtime error', 'error');
           logMessage('❌ RUNTIME ERROR: ' + err.message, 'error');
@@ -1391,6 +1854,26 @@ Select an example from the sidebar to get started! 🚀</div>
       }
 
       runBtn.onclick = runCode;
+      if (workspaceRunBtn) workspaceRunBtn.onclick = runWorkspace;
+      if (workspaceCheckBtn) workspaceCheckBtn.onclick = requestWorkspaceCheck;
+      if (workspaceInspectBtn) workspaceInspectBtn.onclick = requestWorkspaceCheck;
+      if (workspaceAddBtn) workspaceAddBtn.onclick = () => {
+        const suggested = 'helper.go';
+        const filePath = window.prompt('New Go file path', suggested);
+        if (!filePath) return;
+        if (!addWorkspaceFile(filePath, 'package main\n\nfunc helper() {\n}\n')) {
+          logMessage('📁 Invalid file path. Use a .go file below the workspace root.', 'warn');
+        } else {
+          logMessage('📁 Added ' + filePath, 'system');
+        }
+      };
+
+      function runDebug() {
+        if (traceToggle) traceToggle.checked = true;
+        if (heatmapToggle) heatmapToggle.checked = true;
+        showOutputPanel('lab');
+        runCode();
+      }
 
       // ---------------- Execution inspector ----------------
 
@@ -2064,6 +2547,10 @@ Select an example from the sidebar to get started! 🚀</div>
       if (testBtn) {
         testBtn.onclick = () => {
           if (!worker) { logMessage('Worker not ready', 'warn'); return; }
+          if (isWorkspaceProject()) {
+            requestWorkspaceTests();
+            return;
+          }
           worker.postMessage({ type: 'test', source: getSource(), filter: testFilterEl ? testFilterEl.value.trim() : '' });
         };
       }
@@ -2083,15 +2570,30 @@ Select an example from the sidebar to get started! 🚀</div>
 
       if (fileInput) {
         fileInput.addEventListener('change', (ev) => {
-          const file = ev.target.files && ev.target.files[0];
-          if (!file) return;
-          const reader = new FileReader();
-          reader.onload = (e) => {
-            setSource(e.target.result);
-            logMessage('📂 Loaded: ' + file.name, 'system');
-            showOutputPanel('console');
-          };
-          reader.readAsText(file);
+          const selected = Array.from(ev.target.files || []);
+          if (!selected.length) return;
+          Promise.all(selected.map(file => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = e => resolve({ name: file.name, source: e.target.result });
+            reader.onerror = () => reject(reader.error || new Error('file read failed'));
+            reader.readAsText(file);
+          }))).then(entries => {
+            let loaded = 0;
+            entries.forEach(entry => {
+              if (entry.name === 'go.mod') {
+                saveActiveWorkspaceSource();
+                workspaceFiles.set('go.mod', String(entry.source || ''));
+                loaded++;
+              } else if (addWorkspaceFile(entry.name, entry.source)) {
+                loaded++;
+              }
+            });
+            workspaceDirty = true;
+            renderWorkspaceTabs();
+            persistWorkspace();
+            logMessage('📂 Loaded ' + loaded + ' workspace file(s)', 'system');
+            showOutputPanel(loaded > 1 ? 'inspector' : 'console');
+          }).catch(err => logMessage('❌ File load failed: ' + err.message, 'error'));
           // Reset input so the same file can be re-uploaded
           fileInput.value = '';
         });
@@ -2298,7 +2800,7 @@ Select an example from the sidebar to get started! 🚀</div>
         if (!getExampleSource(name)) return;
 
         currentExample = name;
-        setSource(getExampleSource(name));
+        resetWorkspace(getExampleSource(name), 'main.go');
 
         // Update active state
         document.querySelectorAll('.example-item').forEach(item => {
@@ -2391,15 +2893,15 @@ Select an example from the sidebar to get started! 🚀</div>
       };
 
       // Priority for the code shown on load: an explicit `#code=` share link,
-      // then a `?example=Name` query param (see the query-string options
-      // near the top of this script), then the last locally-saved session.
+      // then a `?example=Name` query param, then the persistent IDE workspace,
+      // and finally the legacy single-file session.
       // Returns true once source code actually ended up in the editor, so
       // callers (the 'ready' handler) know whether it's safe to autorun.
       async function loadCodeFromURL() {
         const hash = location.hash.startsWith("#code=") ? location.hash.slice(6) : "";
         if (hash) {
           try {
-            setSource(decodeCodeFromURL(hash));
+            resetWorkspace(decodeCodeFromURL(hash), 'main.go');
             logMessage("📥 Code loaded from URL", 'system');
             showOutputPanel('console'); // Default to console for shared code
             return true;
@@ -2420,9 +2922,13 @@ Select an example from the sidebar to get started! 🚀</div>
             logMessage('❌ Failed to load example from URL: ' + e.message, 'error');
           }
         }
+        if (loadPersistedWorkspace()) {
+          showOutputPanel(isWorkspaceProject() ? 'inspector' : 'console');
+          return true;
+        }
         const saved = localStorage.getItem("nanogo_last");
         if (saved && saved.trim().length > 0) {
-          setSource(saved);
+          resetWorkspace(saved, 'main.go');
           logMessage("💾 Restored previous session", 'system');
           showOutputPanel('console');
         }
@@ -2450,7 +2956,11 @@ Select an example from the sidebar to get started! 🚀</div>
       //
       // Incoming (window.parent -> this window, via iframe.contentWindow.postMessage):
       //   {type:'nanogo:set-code', code}                 — replace the editor contents
+      //   {type:'nanogo:set-workspace', files, modulePath} — replace the VFS workspace
       //   {type:'nanogo:run'}                             — trigger a run, as if Run was clicked
+      //   {type:'nanogo:workspace-check'}                 — resolve project imports
+      //   {type:'nanogo:workspace-run'}                   — run the complete workspace
+      //   {type:'nanogo:workspace-test'}                  — run workspace tests
       //   {type:'nanogo:stop'}                            — stop the running program
       //
       // No origin allowlist is enforced on either side: like other
@@ -2469,10 +2979,26 @@ Select an example from the sidebar to get started! 🚀</div>
         if (!data || typeof data !== 'object') return;
         switch (data.type) {
           case 'nanogo:set-code':
-            if (typeof data.code === 'string') setSource(data.code);
+            if (typeof data.code === 'string') resetWorkspace(data.code, 'main.go');
+            break;
+          case 'nanogo:set-workspace':
+            if (Array.isArray(data.files)) {
+              if (typeof data.modulePath === 'string' && data.modulePath.trim()) workspaceModulePath = data.modulePath.trim();
+              replaceWorkspace(data.files, data.active || 'main.go');
+            }
             break;
           case 'nanogo:run':
             runCode();
+            break;
+          case 'nanogo:workspace-check':
+            requestWorkspaceCheck();
+            break;
+          case 'nanogo:workspace-run':
+            runWorkspace();
+            break;
+          case 'nanogo:workspace-test':
+            if (isWorkspaceProject()) requestWorkspaceTests();
+            else if (testBtn) testBtn.click();
             break;
           case 'nanogo:stop':
             stopExecution();
@@ -2491,6 +3017,36 @@ Select an example from the sidebar to get started! 🚀</div>
 
       // Keyboard shortcuts
       window.addEventListener('keydown', (ev) => {
+        if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'k') {
+          openCommandPalette();
+          ev.preventDefault();
+          return;
+        }
+        if (commandPaletteEl && !commandPaletteEl.hidden) {
+          const items = commandPaletteListEl ? commandPaletteListEl.querySelectorAll('.command-item') : [];
+          if (ev.key === 'ArrowDown' && items.length) {
+            commandPaletteIndex = Math.min(commandPaletteIndex + 1, items.length - 1);
+            renderCommandPalette();
+            ev.preventDefault();
+            return;
+          }
+          if (ev.key === 'ArrowUp' && items.length) {
+            commandPaletteIndex = Math.max(commandPaletteIndex - 1, 0);
+            renderCommandPalette();
+            ev.preventDefault();
+            return;
+          }
+          if (ev.key === 'Enter' && items[commandPaletteIndex]) {
+            items[commandPaletteIndex].click();
+            ev.preventDefault();
+            return;
+          }
+          if (ev.key === 'Escape') {
+            closeCommandPalette();
+            ev.preventDefault();
+            return;
+          }
+        }
         if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
           runCode();
           ev.preventDefault();
@@ -2504,7 +3060,13 @@ Select an example from the sidebar to get started! 🚀</div>
         analyzeCallGraph: requestCallGraph,
         jumpToSource,
         toggleBreakpoint,
-        getBreakpoints: () => Array.from(breakpointLines).sort((a, b) => a - b),
+        getBreakpoints: breakpointLineNumbers,
+        getBreakpointHits: () => Array.from(breakpointHits, ([line, count]) => ({ line, count })),
+        runDebug,
+        runWorkspace,
+        checkWorkspace: requestWorkspaceCheck,
+        getWorkspace: () => ({ modulePath: workspaceModulePath, active: activeFilePath, files: workspaceFileEntries() }),
+        openCommandPalette,
         showPanel: showOutputPanel
       };
       setStatus('Loading WebAssembly...', 'loading');

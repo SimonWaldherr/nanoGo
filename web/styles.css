@@ -378,6 +378,22 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .editor-container { min-height: var(--editor-min-h); overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--code-bg); box-shadow: var(--shadow-lg), 0 0 0 1px color-mix(in srgb, var(--accent) 5%, transparent); }
 #src { width: 100%; min-height: var(--editor-min-h); padding: 16px; resize: vertical; border: 0; outline: 0; background: var(--code-bg); color: var(--text); font-family: var(--mono); line-height: 1.6; }
 
+/* Compact IDE workspace strip. It adds project context without stealing the
+   editor's vertical budget: tabs scroll horizontally and actions stay on the
+   right on wide screens, then wrap only on narrow phones. */
+.workspace-bar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; min-width: 0; padding: 4px 6px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow); }
+.workspace-project { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--text); font-size: 11px; font-weight: 750; white-space: nowrap; }
+.workspace-project-icon { font-size: 14px; }
+.workspace-status { max-width: 210px; overflow: hidden; color: var(--text-dim); font-family: var(--mono); font-size: 10px; font-weight: 500; text-overflow: ellipsis; }
+.workspace-tabs { display: flex; gap: 3px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.workspace-tabs::-webkit-scrollbar { display: none; }
+.workspace-tab { flex: 0 0 auto; min-height: 27px; max-width: 180px; padding: 3px 8px; overflow: hidden; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text-muted); font-family: var(--mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-tab:hover { background: var(--surface-hover); color: var(--text); }
+.workspace-tab.active { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); background: color-mix(in srgb, var(--accent) 13%, var(--surface-raised)); color: var(--accent-hover); }
+.workspace-actions { display: inline-flex; align-items: center; gap: 4px; }
+.workspace-actions .mini-btn { min-height: 27px; padding: 3px 7px; font-size: 11px; }
+.workspace-run-btn.active { border-color: color-mix(in srgb, var(--success) 55%, var(--border)); color: var(--success); }
+
 /* CodeMirror: Go mode supplies the token classes; these rules make syntax
    highlighting and the numbered gutter visible in every playground theme. */
 .CodeMirror { height: var(--editor-min-h); background: var(--code-bg); color: var(--text); font-family: var(--mono); line-height: 1.6; }
@@ -505,6 +521,13 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .inspector-section[open] > summary { border-bottom: 1px solid var(--border); }
 .inspector-hint { margin-left: 8px; color: var(--text-dim); font-size: 11px; font-weight: 500; }
 .inspector-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px 4px; }
+.workspace-inspector-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; padding: 9px 12px 4px; }
+.workspace-diagnostics { padding: 4px 12px 11px; color: var(--text-muted); font-size: 11px; }
+.workspace-summary { display: flex; flex-wrap: wrap; gap: 7px 14px; color: var(--text-muted); font-family: var(--mono); font-size: 11px; }
+.workspace-summary strong { color: var(--accent-hover); }
+.workspace-package-list { display: grid; gap: 4px; margin: 8px 0 0; padding-left: 17px; }
+.workspace-package-list li { min-width: 0; overflow-wrap: anywhere; }
+.workspace-package-path { color: var(--text-dim); font-family: var(--mono); }
 .inspector-field { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 12px; }
 .inspector-field input[type="number"] { width: 64px; min-height: 30px; padding: 3px 7px; border: 1px solid var(--border); border-radius: 7px; background: var(--code-bg); color: var(--text); }
 .inspector-note { color: var(--text-dim); font-size: 11px; }
@@ -536,6 +559,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .trace-run_start .trace-kind, .trace-run_end .trace-kind { border-color: var(--border-light); color: var(--text); }
 .trace-capability_denied .trace-kind, .trace-test_error .trace-kind, .trace-test_fatal .trace-kind { border-color: color-mix(in srgb, var(--error) 55%, var(--border)); color: var(--error); }
 .trace-debug_q .trace-kind, .trace-debug_mark .trace-kind { border-color: color-mix(in srgb, var(--warning) 50%, var(--border)); color: var(--warning); }
+.trace-breakpoint .trace-kind { border-color: color-mix(in srgb, var(--warning) 65%, var(--border)); color: var(--warning); font-weight: 700; }
 .trace-loc { min-height: 0; padding: 0 5px; border: 0; background: transparent; color: var(--accent); font-family: var(--mono); font-size: 11px; text-decoration: underline; cursor: pointer; }
 .bench-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 10px; }
 
@@ -586,8 +610,10 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 /* Execution Lab: AST-backed Mermaid graph, linked back into the editor. */
 .nanogo-breakpoints { width: 16px; }
 .nanogo-breakpoint-marker { display: block; width: 10px; height: 10px; margin: 4px auto 0; border: 1px solid color-mix(in srgb, var(--error) 78%, #fff); border-radius: 50%; background: var(--error); box-shadow: 0 0 0 2px color-mix(in srgb, var(--error) 16%, transparent); }
+.nanogo-breakpoint-marker.hit { border-color: color-mix(in srgb, var(--warning) 85%, #fff); background: var(--warning); box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 18%, transparent); }
 .lab-content, .ai-content { display: grid; gap: 12px; }
 .lab-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.lab-debug-btn { border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); color: var(--warning); }
 .lab-replay-bar { display: flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface-raised); }
 .lab-replay-bar .inspector-note { margin: 0; }
 .lab-graph { min-height: 230px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--code-bg); }
@@ -619,6 +645,18 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .ai-message-actions { display: flex; gap: 8px; margin-top: 9px; }
 .ai-composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; align-items: end; }
 .ai-composer textarea { min-height: 72px; padding: 9px 10px; resize: vertical; line-height: 1.45; }
+
+/* Command palette: a single, low-chrome layer for IDE actions. */
+.command-palette { position: fixed; inset: 0; z-index: 60; display: grid; place-items: start center; padding: min(15vh, 130px) 14px 20px; background: color-mix(in srgb, #000 48%, transparent); }
+.command-palette[hidden] { display: none; }
+.command-palette-card { width: min(560px, 100%); overflow: hidden; border: 1px solid var(--border-light); border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow-lg); }
+.command-palette-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px 8px; color: var(--text); }
+.command-palette-input { width: calc(100% - 20px); min-height: 38px; margin: 0 10px 8px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px; outline: 0; background: var(--code-bg); color: var(--text); font: 13px var(--mono); }
+.command-palette-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
+.command-palette-list { display: grid; max-height: min(50vh, 390px); overflow: auto; padding: 2px 7px 8px; }
+.command-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; padding: 7px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font-size: 12px; text-align: left; }
+.command-item small { color: var(--text-dim); font-family: var(--mono); font-size: 10px; }
+.command-item:hover, .command-item.active { background: color-mix(in srgb, var(--accent) 16%, var(--surface-raised)); color: var(--accent-hover); }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -664,6 +702,11 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
   .editor-section { gap: 8px; }
   .controls { gap: 6px; }
   .input-group { margin-left: 0; }
+  .workspace-bar { grid-template-columns: minmax(0, 1fr) auto; gap: 4px; }
+  .workspace-project { grid-column: 1 / -1; }
+  .workspace-tabs { grid-column: 1 / -1; order: 3; }
+  .workspace-actions { justify-self: end; }
+  .workspace-actions .mini-btn { min-height: 44px; }
 
   /* Icon-only buttons: the emoji stays, the trailing label collapses. The
      Run button keeps its own label (it's the primary action) but sheds the

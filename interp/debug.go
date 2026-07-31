@@ -57,6 +57,47 @@ type Tracer struct {
 	sequence atomic.Uint64
 }
 
+// breakpointSet is immutable after publication, so evaluator goroutines can
+// read it without taking a lock while a host updates breakpoints between runs.
+type breakpointSet struct {
+	lines map[int]struct{}
+}
+
+// SetBreakpoints installs source-line breakpoints for subsequent executions.
+// A breakpoint is a lightweight trace event when a tracer is enabled; it does
+// not pause or mutate guest execution. This keeps the core evaluator
+// deterministic and lets browser/host frontends choose replay or stepping
+// semantics without blocking an evaluator goroutine.
+func (vm *Interpreter) SetBreakpoints(lines []int) {
+	set := &breakpointSet{lines: make(map[int]struct{}, len(lines))}
+	for _, line := range lines {
+		if line > 0 {
+			set.lines[line] = struct{}{}
+		}
+	}
+	// Keep the hot evaluator path at a single nil atomic load when the host
+	// clears its breakpoint list (the normal case for an ordinary run).
+	if len(set.lines) == 0 {
+		vm.breakpoints.Store(nil)
+		return
+	}
+	vm.breakpoints.Store(set)
+}
+
+// Breakpoints returns a sorted snapshot of configured source lines.
+func (vm *Interpreter) Breakpoints() []int {
+	set := vm.breakpoints.Load()
+	if set == nil || len(set.lines) == 0 {
+		return nil
+	}
+	lines := make([]int, 0, len(set.lines))
+	for line := range set.lines {
+		lines = append(lines, line)
+	}
+	sort.Ints(lines)
+	return lines
+}
+
 // NewTracer creates a local trace recorder. A non-positive capacity selects a
 // compact default of 1,024 events.
 func NewTracer(capacity int) *Tracer {

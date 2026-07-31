@@ -104,7 +104,7 @@ self.onmessage = async function (ev) {
         const buffer = [];
         self.postMessage = function (m) { buffer.push(m); };
         try {
-          stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace, !!msg.profile));
+          stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace, !!msg.profile, msg.breakpoints || []));
         } finally {
           flushBatch();
           self.postMessage = origPost;
@@ -112,13 +112,71 @@ self.onmessage = async function (ev) {
           origPost.call(self, { type: 'done', elapsed: Date.now() - t0, stats: stats });
         }
       } else {
-        stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace, !!msg.profile));
+        stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace, !!msg.profile, msg.breakpoints || []));
         flushBatch();
         self.postMessage({ type: 'done', elapsed: Date.now() - t0, stats: stats });
       }
     } catch (err) {
       flushBatch();
       self.postMessage({ type: 'error', text: String(err) });
+    }
+    return;
+  }
+  if (msg && msg.type === 'workspace-run') {
+    if (!goReady || typeof self.nanoGoRunWorkspace !== 'function') {
+      self.postMessage({ type: 'workspace-done', error: 'multi-file workspace execution is not available in this WASM build' });
+      return;
+    }
+    const t0 = Date.now();
+    try {
+      const stats = parseStats(self.nanoGoRunWorkspace(msg.files || [], String(msg.modulePath || ''), !!msg.trace, !!msg.profile));
+      flushBatch();
+      if (!stats) {
+        self.postMessage({ type: 'workspace-done', error: 'workspace run returned no data' });
+      } else {
+        self.postMessage({ type: 'workspace-done', elapsed: Date.now() - t0, stats });
+      }
+    } catch (err) {
+      flushBatch();
+      self.postMessage({ type: 'workspace-done', error: String(err) });
+    }
+    return;
+  }
+  if (msg && msg.type === 'workspace-check') {
+    if (!goReady || typeof self.nanoGoWorkspaceCheck !== 'function') {
+      self.postMessage({ type: 'workspace-check-result', error: 'workspace check is not available in this WASM build' });
+      return;
+    }
+    try {
+      const result = parseStats(self.nanoGoWorkspaceCheck(msg.files || [], String(msg.modulePath || '')));
+      if (!result) {
+        self.postMessage({ type: 'workspace-check-result', error: 'workspace check returned no data' });
+      } else if (result.error) {
+        self.postMessage({ type: 'workspace-check-result', error: result.error, result });
+      } else {
+        self.postMessage({ type: 'workspace-check-result', result });
+      }
+    } catch (err) {
+      self.postMessage({ type: 'workspace-check-result', error: String(err) });
+    }
+    return;
+  }
+  if (msg && msg.type === 'workspace-test') {
+    if (!goReady || typeof self.nanoGoTestWorkspace !== 'function') {
+      self.postMessage({ type: 'workspace-test-result', error: 'multi-file workspace tests are not available in this WASM build' });
+      return;
+    }
+    try {
+      const result = parseStats(self.nanoGoTestWorkspace(msg.files || [], String(msg.modulePath || ''), String(msg.filter || '')));
+      if (!result) {
+        self.postMessage({ type: 'workspace-test-result', error: 'workspace tests returned no data' });
+      } else if (result.error) {
+        self.postMessage({ type: 'workspace-test-result', error: result.error, result });
+      } else {
+        self.postMessage({ type: 'workspace-test-result', result });
+      }
+    } catch (err) {
+      self.postMessage({ type: 'workspace-test-result', error: String(err) });
     }
     return;
   }
@@ -271,7 +329,10 @@ function getCapabilities() {
     hasTests: typeof self.nanoGoTest === 'function',
     hasAst: typeof self.nanoGoAst === 'function',
     hasCallGraph: typeof self.nanoGoCallGraph === 'function',
-    hasBench: typeof self.nanoGoBench === 'function'
+    hasBench: typeof self.nanoGoBench === 'function',
+    hasWorkspace: typeof self.nanoGoRunWorkspace === 'function',
+    hasModuleCheck: typeof self.nanoGoWorkspaceCheck === 'function',
+    hasWorkspaceTests: typeof self.nanoGoTestWorkspace === 'function'
   };
 }
 
@@ -342,6 +403,9 @@ async function initWasmWorker() {
   self.nanoGoCallGraph  = self.nanoGoCallGraph  || self.globalThis?.nanoGoCallGraph;
   self.nanoGoBench      = self.nanoGoBench      || self.globalThis?.nanoGoBench;
   self.nanoGoVersion  = self.nanoGoVersion  || self.globalThis?.nanoGoVersion;
+  self.nanoGoRunWorkspace = self.nanoGoRunWorkspace || self.globalThis?.nanoGoRunWorkspace;
+  self.nanoGoWorkspaceCheck = self.nanoGoWorkspaceCheck || self.globalThis?.nanoGoWorkspaceCheck;
+  self.nanoGoTestWorkspace = self.nanoGoTestWorkspace || self.globalThis?.nanoGoTestWorkspace;
 
   if (typeof self.nanoGoRun !== 'function') {
     throw new Error('nanoGoRun not registered');

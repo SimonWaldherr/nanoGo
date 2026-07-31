@@ -152,6 +152,11 @@ type Interpreter struct {
 	// IsRunning) continue to use execution.
 	activeExecution *execution
 	tracer          atomic.Pointer[Tracer]
+	// breakpoints is an immutable line set swapped atomically between runs.
+	// It is intentionally separate from the tracer: hosts can configure
+	// source breakpoints once, then opt into recording only when a run needs
+	// debug evidence.
+	breakpoints atomic.Pointer[breakpointSet]
 	// runtimeTraceAnnotations mirrors the selected high-level nanoGo events
 	// into the host's runtime/trace stream. It stays opt-in because a normal
 	// interpreter run must not pay tracing's formatting cost.

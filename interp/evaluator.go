@@ -1006,6 +1006,17 @@ func blockNeedsOwnScope(block *ast.BlockStmt) bool {
 // resolving the actual line number (traceLocation) is skipped entirely in
 // that (default) case.
 func (vm *Interpreter) evalStmt(s ast.Stmt, env *Env) (controlFlow, error) {
+	if set := vm.breakpoints.Load(); set != nil {
+		if line := vm.traceLocation(s.Pos()).Line; line > 0 {
+			if _, ok := set.lines[line]; ok {
+				function := "program"
+				if env != nil && env.frame != nil && env.frame.funcName != "" {
+					function = env.frame.funcName
+				}
+				vm.emitTrace("breakpoint", function, "breakpoint hit", s)
+			}
+		}
+	}
 	if p := vm.lineProfile.Load(); p != nil {
 		p.hit(vm.traceLocation(s.Pos()).Line)
 	}

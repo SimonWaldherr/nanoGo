@@ -49,6 +49,8 @@ playground still creates one interpreter per run and exposes **Stop**.
 - ✅ **Session storage**: The playground's worker-local `storage` facade persists only while that worker remains alive
 - ✅ **Math & random subsets**: Selected `math` and `math/rand` functions
 - ✅ **Multi-Package Modules**: Load multi-file, multi-package programs from a VFS module, run/hot-swap individual functions, and run tests and benchmarks that use nanoGo's supported `testing` subset (see [interp/loader](interp/loader) and [interp/index](interp/index))
+- ✅ **Browser IDE Workspace**: Persistent file tabs, multi-file upload/create, `go.mod` snapshots, package/import checks, project runs, and a keyboard command palette
+- ✅ **WASM SDK Surface**: `nanoGoVersion`, `nanoGoRunWorkspace`, `nanoGoWorkspaceCheck`, and `nanoGoTestWorkspace` expose capability/limit metadata plus module-aware execution/testing for custom frontends
 
 ### Execution Modes
 - **🌐 Web Playground**: Interactive browser-based Go editor with live execution
@@ -64,9 +66,12 @@ graph into a clickable [Mermaid](https://mermaid.js.org/) flowchart:
 - **Visualize current code** asks the WASM worker for the current static call
   graph; this is analysis, not a record of one particular runtime execution.
 - Selecting a function in the diagram jumps to its source line. The Lab can
-  also place a source-linked breakpoint marker in CodeMirror. Markers make
-  program points reviewable today; they are deliberately not presented as a
-  pausing debugger until the interpreter exposes a safe stepping protocol.
+  place source-linked breakpoint markers in CodeMirror. **Debug run** records
+  bounded breakpoint-hit events and line heat, turns hit markers amber, and
+  lets the replay controls jump through the recorded source locations.
+  This is deterministic record/replay, not a live pause: the worker finishes
+  the run before the browser replays it, so no evaluator goroutine is blocked
+  waiting for UI input.
 - Mermaid loads on demand and is included in the service worker cache after
   installation, so a previously opened playground can visualize code offline.
 
@@ -207,7 +212,11 @@ Incoming (your page → the iframe's `contentWindow`):
 | Message | Effect |
 |---|---|
 | `{type:'nanogo:set-code', code}` | Replaces the editor's contents. |
+| `{type:'nanogo:set-workspace', files, modulePath, active}` | Replaces the browser VFS snapshot; each file is `{path, source}`. |
 | `{type:'nanogo:run'}` | Starts a run, as if the Run button was clicked. |
+| `{type:'nanogo:workspace-check'}` | Resolves the current module/import graph without executing it. |
+| `{type:'nanogo:workspace-run'}` | Runs the complete current multi-file workspace. |
+| `{type:'nanogo:workspace-test'}` | Runs the supported `TestXxx` functions across the workspace. |
 | `{type:'nanogo:stop'}` | Stops the running program. |
 
 ```html
@@ -241,6 +250,52 @@ canvas updates) into `{type:'batch', items:[...]}` so a tight guest loop
 costs one `postMessage` instead of thousands. A frontend that only handles
 individual message types — without unwrapping `batch` first — will see
 almost no output from anything that logs or draws in a loop.
+
+#### Module-aware browser SDK
+
+The worker also exposes a safe, snapshot-based project protocol for IDEs. A
+frontend sends source contents rather than host paths; nanoGo copies them into
+an isolated VFS, resolves local imports and `go.mod`, and returns package
+metadata with the same loader used by native hosts:
+
+```js
+worker.postMessage({
+  type: 'workspace-check',
+  modulePath: 'example.com/demo',
+  files: [
+    { path: 'go.mod', source: 'module example.com/demo\n' },
+    { path: 'main.go', source: 'package main\nfunc main() { greet() }\n' },
+    { path: 'greet.go', source: 'package main\nfunc greet() {}\n' }
+  ]
+});
+
+worker.postMessage({
+  type: 'workspace-run',
+  modulePath: 'example.com/demo',
+  files: [/* same snapshot */],
+  trace: true,
+  profile: true
+});
+
+worker.postMessage({
+  type: 'workspace-test',
+  modulePath: 'example.com/demo',
+  files: [/* same snapshot */],
+  filter: 'Test'
+});
+```
+
+`workspace-check-result` reports `{ok, workspace}` with the resolved module,
+packages, files, and imports. `workspace-done` carries the normal run stats
+plus `stats.workspace`; `workspace-test-result` aggregates the supported
+`TestXxx` subset across packages. Paths are relative, must end in `.go` or be `go.mod`,
+and are rejected if they escape the virtual workspace. Dependencies are
+deliberately host-provided snapshots: the browser SDK never downloads or
+executes an unreviewed remote module.
+
+The full playground uses this protocol behind its compact **IDE workspace**
+bar. `Ctrl/⌘+K` opens the command palette; `Check` performs the module-aware
+resolution, and `Project` runs every file through `interp/loader`.
 
 ## 🤖 MCP Server for AI Coding Clients
 
@@ -731,6 +786,18 @@ The tracer is in-memory and bounded; it does not grant the guest filesystem or
 network access. See [examples/capabilities](examples/capabilities) and
 [examples/debug_trace](examples/debug_trace) for runnable host programs.
 
+Hosts can configure source breakpoints without enabling tracing globally. When
+a `Tracer` is attached, each matching statement produces a bounded
+`breakpoint` event with its function and source location:
+
+```go
+vm.SetBreakpoints([]int{12, 27})
+vm.SetTracer(interp.NewTracer(4096))
+```
+
+`SetBreakpoints` is an atomic, immutable line-set swap and adds no source-line
+lookup cost when no breakpoints are configured.
+
 ### Host runtime trace integration
 
 The browser inspector intentionally uses nanoGo's compact `Tracer`: it records
@@ -1201,11 +1268,15 @@ your own workload.
 ## 🗺️ Roadmap
 
 - [ ] **Enhanced Package Support**: More stdlib packages
-- [ ] **Debugger Integration**: Step-through debugging in browser
+- [x] **Debugger Integration (record/replay)**: Source breakpoints, bounded
+  hit events, and trace replay in the browser; live pause/continue remains a
+  future worker protocol.
 - [ ] **Performance Optimizations**: JIT compilation, bytecode caching
 - [x] **Module System**: Multi-file/multi-package programs loaded from a VFS module (local packages + `go.mod` module path only — no external package downloads); see [interp/loader](interp/loader)
 - [ ] **Advanced Types**: Better interface and generics support
-- [ ] **IDE Features**: Code completion, syntax highlighting improvements
+- [x] **IDE Features (workspace core)**: Persistent multi-file tabs, project
+  check/run, command palette, SDK capability metadata, and source-linked
+  diagnostics; completion and refactoring remain future work.
 - [x] **Testing Framework**: A `testing.T`/`testing.B` subset runs unmodified `TestXxx`/`BenchmarkXxx` functions, plus a data-driven function test/benchmark harness and hot-swap; see [interp/loader](interp/loader)
 
 ## 📄 License

@@ -4,8 +4,8 @@
 // events. This is intentionally a separate, dependency-light layer: the
 // interpreter remains the source of truth, while this file owns
 // visualization, source linking, breakpoint annotations, and now trace
-// replay — all derived from data the interpreter already sends (no new
-// interpreter/wasm surface is needed for the replay feature).
+// replay — all derived from data the interpreter sends. Breakpoint hits are
+// recorded by the runtime and replayed here; the browser never blocks a run.
 (function () {
   'use strict';
 
@@ -13,6 +13,7 @@
   const detailsEl = document.getElementById('labDetails');
   const statusEl = document.getElementById('labStatus');
   const analyzeBtn = document.getElementById('labAnalyzeBtn');
+  const debugBtn = document.getElementById('labDebugBtn');
   const replayBarEl = document.getElementById('labReplayBar');
   const replayPrevBtn = document.getElementById('labReplayPrev');
   const replayPlayBtn = document.getElementById('labReplayPlay');
@@ -91,7 +92,10 @@
     const sequence = [];
     const stack = [];
     for (const ev of events) {
-      if (ev.kind === 'call_start') {
+      if (ev.kind === 'breakpoint') {
+        const name = resolve(ev.fn);
+        sequence.push({ name, line: ev.line || 0, seq: ev.seq, ms: ev.ms || 0, kind: 'breakpoint' });
+      } else if (ev.kind === 'call_start') {
         const name = resolve(ev.fn);
         if (name) {
           nodeHits.set(name, (nodeHits.get(name) || 0) + 1);
@@ -239,17 +243,22 @@
       return;
     }
     if (replayIndex < 0) {
-      replayInfoEl.textContent = callSequence.length + ' call(s) recorded · press ▶ or ⏭ to step through';
+      replayInfoEl.textContent = callSequence.length + ' event(s) recorded · press ▶ or ⏭ to step through';
       return;
     }
     const step = callSequence[replayIndex];
-    replayInfoEl.textContent = 'event ' + (replayIndex + 1) + '/' + callSequence.length + ' · ' + step.name + ' · +' + step.ms.toFixed(2) + 'ms';
+    const location = step.line ? ' · L' + step.line : '';
+    const kind = step.kind === 'breakpoint' ? 'breakpoint' : 'call';
+    replayInfoEl.textContent = kind + ' ' + (replayIndex + 1) + '/' + callSequence.length + ' · ' + (step.name || 'program') + location + ' · +' + step.ms.toFixed(2) + 'ms';
   }
 
   function goToReplayStep(index) {
     if (!callSequence.length) return;
     replayIndex = Math.max(0, Math.min(callSequence.length - 1, index));
     setActiveNode(callSequence[replayIndex].name);
+    if (callSequence[replayIndex].kind === 'breakpoint' && callSequence[replayIndex].line) {
+      api().jumpToSource(callSequence[replayIndex].line, 1);
+    }
     updateReplayInfo();
     if (replayIndex >= callSequence.length - 1) stopReplayTimer();
   }
@@ -319,7 +328,7 @@
           if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); api().jumpToSource(fn.line, 1); showDetails(fn); }
         });
       });
-      const heatNote = heat ? ' · colored by ' + callSequence.length + ' recorded call(s)' : '';
+      const heatNote = heat ? ' · colored by ' + callSequence.length + ' recorded event(s)' : '';
       statusEl.textContent = model.funcs.length + ' function(s) · ' + model.externalCount + ' external call(s) · click nodes to navigate' + heatNote;
       document.dispatchEvent(new CustomEvent('nanogo:lab-graph', { detail: { functions: model.funcs.map(fn => ({ name: fn.name, line: fn.line })) } }));
     } catch (error) {
@@ -337,6 +346,12 @@
     statusEl.textContent = 'Analyzing code…';
     api().analyzeCallGraph();
   });
+  if (debugBtn) debugBtn.addEventListener('click', () => {
+    if (!api() || typeof api().runDebug !== 'function') return;
+    debugBtn.disabled = true;
+    debugBtn.textContent = '🐞 Debugging…';
+    api().runDebug();
+  });
   document.addEventListener('nanogo:callgraph', (event) => render(event.detail));
   document.addEventListener('nanogo:breakpoints-change', () => {
     if (currentGraph && !detailsEl.hidden) render(currentGraph);
@@ -348,7 +363,14 @@
   document.addEventListener('nanogo:trace', (event) => {
     traceEvents = (event.detail && event.detail.events) || [];
     traceValid = true;
+    if (debugBtn) { debugBtn.disabled = false; debugBtn.textContent = '🐞 Debug run'; }
     if (currentGraph) render(currentGraph);
+  });
+  document.addEventListener('nanogo:breakpoint-hits', (event) => {
+    const hits = (event.detail && event.detail.hits) || [];
+    if (!statusEl || !hits.length) return;
+    const total = hits.reduce((sum, hit) => sum + hit.count, 0);
+    statusEl.textContent = total + ' breakpoint hit(s) · replay jumps to source lines';
   });
 
   window.nanoGoExecutionLab = {

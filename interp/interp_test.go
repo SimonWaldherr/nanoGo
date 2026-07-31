@@ -1885,6 +1885,37 @@ func main() {
 	}
 }
 
+func TestTracerCapturesConfiguredBreakpointHits(t *testing.T) {
+	vm, _ := newTestVM()
+	tracer := NewTracer(16)
+	vm.SetTracer(tracer)
+	vm.SetBreakpoints([]int{5, 5, 0, -1})
+	if got := vm.Breakpoints(); len(got) != 1 || got[0] != 5 {
+		t.Fatalf("Breakpoints() = %#v, want [5]", got)
+	}
+	if err := vm.Run(`package main
+func main() {
+    value := 40
+    value++
+    value++
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var hits []TraceEvent
+	for _, event := range tracer.Events() {
+		if event.Kind == "breakpoint" {
+			hits = append(hits, event)
+		}
+	}
+	if len(hits) != 1 || hits[0].Function != "main" || hits[0].Location.Line != 5 {
+		t.Fatalf("breakpoint events = %#v, want one main event at line 5", hits)
+	}
+	vm.SetBreakpoints([]int{})
+	if got := vm.Breakpoints(); got != nil {
+		t.Fatalf("cleared breakpoints = %v, want nil", got)
+	}
+}
+
 func TestTracerUsesBoundedChronologicalRing(t *testing.T) {
 	tracer := NewTracer(2)
 	tracer.record(TraceEvent{Kind: "one"})
