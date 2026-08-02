@@ -63,13 +63,14 @@ type traceEventJSON struct {
 // profile (see profileToJSON) for a "how often was this line executed"
 // heatmap.
 type runStats struct {
-	ElapsedMs float64          `json:"elapsedMs"`
-	Steps     uint64           `json:"steps"`
-	Error     string           `json:"error,omitempty"`
-	Trace     []traceEventJSON `json:"trace,omitempty"`
-	TraceCap  int              `json:"traceCap,omitempty"`
-	Profile   []lineHit        `json:"profile,omitempty"`
-	Workspace *workspaceInfo   `json:"workspace,omitempty"`
+	ElapsedMs float64                   `json:"elapsedMs"`
+	Steps     uint64                    `json:"steps"`
+	Error     string                    `json:"error,omitempty"`
+	Trace     []traceEventJSON          `json:"trace,omitempty"`
+	TraceCap  int                       `json:"traceCap,omitempty"`
+	Profile   []lineHit                 `json:"profile,omitempty"`
+	Variables []interp.VariableSnapshot `json:"variables,omitempty"`
+	Workspace *workspaceInfo            `json:"workspace,omitempty"`
 }
 
 // lineHit is one entry of a line-execution profile: how many times line's
@@ -298,6 +299,8 @@ func jsNanoGoRun(this js.Value, args []js.Value) any {
 	}
 
 	vm := newPlaygroundVM()
+	variables := interp.NewVariableTracker()
+	vm.SetVariableTracker(variables)
 	vm.SetBreakpoints(breakpointLines)
 	// A worker-side CanvasBinding batches cell updates to avoid one Go→JS
 	// callback per cell. Ensure a program that omits CanvasFlush still paints
@@ -350,6 +353,7 @@ func jsNanoGoRun(this js.Value, args []js.Value) any {
 		}
 	}
 	stats.Profile = profileToJSON(profile)
+	stats.Variables = variables.Snapshots()
 
 	b, jsonErr := json.Marshal(stats)
 	if jsonErr != nil {
@@ -372,6 +376,8 @@ func jsNanoGoRunWorkspace(this js.Value, args []js.Value) any {
 	wantProfile := len(args) >= 4 && args[3].Truthy()
 
 	vm := newPlaygroundVM()
+	variables := interp.NewVariableTracker()
+	vm.SetVariableTracker(variables)
 	traceCapacity := 4096
 	var tracer *interp.Tracer
 	if wantTrace {
@@ -403,6 +409,7 @@ func jsNanoGoRunWorkspace(this js.Value, args []js.Value) any {
 	activeCanvas.Flush()
 	fillTraceStats(&stats, tracer, traceCapacity)
 	stats.Profile = profileToJSON(profile)
+	stats.Variables = variables.Snapshots()
 	data, _ := json.Marshal(stats)
 	return string(data)
 }

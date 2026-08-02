@@ -162,6 +162,10 @@ type Interpreter struct {
 	// interpreter run must not pay tracing's formatting cost.
 	runtimeTraceAnnotations atomic.Bool
 	lineProfile             atomic.Pointer[LineProfile]
+	// variableTracker is an opt-in, bounded-by-symbol-count snapshot used by
+	// debugger UIs. The normal interpreter path pays only one nil pointer load
+	// at explicit variable-write sites; hosts enable it per interpreter.
+	variableTracker atomic.Pointer[VariableTracker]
 
 	// lastSteps preserves the final step counter of the most recently ended
 	// execution so hosts can report deterministic cost after Run returns

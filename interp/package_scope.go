@@ -204,6 +204,7 @@ func (ps *PackageScope) EvalDecls(ctx context.Context, file *ast.File) error {
 					val = zeroValue(typeString(vs.Type))
 				}
 				vm.declare(name.Name, val, ps.env)
+				vm.recordVariable(name.Name, val, name, ps.env)
 				ps.declared[name.Name] = true
 			}
 		}

@@ -355,7 +355,7 @@ async function initWasmWorker() {
   // all — on a browser that never installs (or hasn't yet activated) the
   // service worker, the plain HTTP cache could keep serving a stale
   // interpreter build indefinitely after a deploy.
-  const WASM_URL = 'nanogo.wasm?7';
+  const WASM_URL = 'nanogo.wasm?8';
 
   // Prefer streaming instantiation: starts compilation while bytes are
   // still arriving and avoids buffering the full module in memory.

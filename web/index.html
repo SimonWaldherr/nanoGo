@@ -40,7 +40,7 @@
        loads before styles.css so the playground theme rules win the cascade;
        the scripts intentionally load before the inline application script. -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css" crossorigin="anonymous">
-  <link rel="stylesheet" href="styles.css?12">
+  <link rel="stylesheet" href="styles.css?13">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js" crossorigin="anonymous" defer></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js" crossorigin="anonymous" defer></script>
 </head>
@@ -208,6 +208,7 @@ func main() {
         <button class="output-tab" data-output="dom" role="tab">🌐 HTML</button>
         <button class="output-tab" data-output="lab" role="tab">🧭 Lab</button>
         <button class="output-tab" data-output="ai" role="tab">✨ AI</button>
+        <button class="output-tab" data-output="symbol" role="tab">🔎 Symbol</button>
         <button class="output-tab" data-output="inspector" role="tab">🔬 Inspector</button>
       </div>
 
@@ -306,6 +307,23 @@ Select an example from the sidebar to get started! 🚀</div>
           <div class="ai-composer">
             <textarea id="aiPrompt" rows="3" placeholder="Explain this code, add a test, or suggest a small patch…"></textarea>
             <button id="aiAskBtn" class="primary">Ask AI</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Contextual symbol details. Clicking an identifier in CodeMirror
+           populates this panel from the static call graph and the most recent
+           run's bounded last-value snapshots. -->
+      <div class="output-panel" id="symbolPanel">
+        <div class="output-header">
+          <span>🔎 Symbol details</span>
+          <span id="symbolPanelBadge" class="example-badge">Editor</span>
+        </div>
+        <div class="output-content symbol-content" id="symbolDetails" aria-live="polite">
+          <div class="symbol-empty">
+            <span class="symbol-empty-icon" aria-hidden="true">⌁</span>
+            <strong>Inspect code in place</strong>
+            <p>Click a variable or function in the editor. Functions show callers and callees; variables show the last value observed during a run.</p>
           </div>
         </div>
       </div>
@@ -647,6 +665,8 @@ Select an example from the sidebar to get started! 🚀</div>
       const callGraphMetaEl = document.getElementById("callGraphMeta");
       const callGraphDiagramEl = document.getElementById("callGraphDiagram");
       const callGraphViewSwitchEl = document.getElementById("callGraphViewSwitch");
+      const symbolDetailsEl = document.getElementById("symbolDetails");
+      const symbolPanelBadgeEl = document.getElementById("symbolPanelBadge");
       const benchBtn = document.getElementById("benchBtn");
       const benchIterationsEl = document.getElementById("benchIterations");
       const benchResultsEl = document.getElementById("benchResults");
@@ -666,6 +686,9 @@ Select an example from the sidebar to get started! 🚀</div>
       const statStepsEl = document.getElementById("statSteps");
       const statStepsRateEl = document.getElementById("statStepsRate");
       let wasmCapabilities = {};
+      let activeRunSource = '';
+      let lastRuntimeSource = '';
+      let lastRuntimeVariables = [];
 
       function applyFontSize(size) {
         const px = size + 'px';
@@ -900,6 +923,7 @@ Select an example from the sidebar to get started! 🚀</div>
       function runWorkspace() {
         if (!worker) { logMessage('Worker not ready', 'warn'); return; }
         const payload = workspacePayload();
+        activeRunSource = getSource();
         const scale = parseInt(scaleEl.value, 10);
         worker.postMessage({ type: 'set-scale', scale: scale });
         const c = document.getElementById('life');
@@ -998,12 +1022,20 @@ Select an example from the sidebar to get started! 🚀</div>
             saveActiveWorkspaceSource();
             workspaceDirty = true;
             clearErrorHighlight(); clearHeatmap();
+            invalidateSymbolSelection();
             renderWorkspaceTabs();
             persistWorkspace();
             document.dispatchEvent(new CustomEvent('nanogo:source-change'));
           });
           editor.on('gutterClick', (cm, line, gutter) => {
             if (gutter === 'nanogo-breakpoints') toggleBreakpoint(line + 1);
+          });
+          editor.on('mousedown', (cm, event) => {
+            if (event.button !== 0) return;
+            const pos = cm.coordsChar({ left: event.clientX, top: event.clientY }, 'window');
+            // Wait until CodeMirror has completed its own cursor/selection
+            // handling, then inspect the token that was actually clicked.
+            setTimeout(() => inspectEditorSymbolAt(pos), 0);
           });
           // CodeMirror creates its own hidden input for capturing keystrokes;
           // it does not inherit these attributes from the original textarea,
@@ -1446,7 +1478,8 @@ Select an example from the sidebar to get started! 🚀</div>
 
       const labPanel = document.getElementById("labPanel");
       const aiPanel = document.getElementById("aiPanel");
-      const OUTPUT_PANELS = { canvas: canvasPanel, dom: domPanel, lab: labPanel, ai: aiPanel, inspector: inspectorPanel, console: consolePanel };
+      const symbolPanel = document.getElementById("symbolPanel");
+      const OUTPUT_PANELS = { canvas: canvasPanel, dom: domPanel, lab: labPanel, ai: aiPanel, symbol: symbolPanel, inspector: inspectorPanel, console: consolePanel };
 
       function showOutputPanel(type) {
         const key = OUTPUT_PANELS[type] ? type : 'console';
@@ -1574,7 +1607,7 @@ Select an example from the sidebar to get started! 🚀</div>
           return;
         }
 
-        worker = new Worker('wasm_worker.js?8');
+        worker = new Worker('wasm_worker.js?9');
         worker.onmessage = (ev) => {
           const m = ev.data;
           if (!m || !m.type) return;
@@ -1602,6 +1635,9 @@ Select an example from the sidebar to get started! 🚀</div>
           execTimeEl.textContent = label;
         }
         updateRunStats(elapsed, stats);
+        lastRuntimeSource = activeRunSource;
+        lastRuntimeVariables = (stats && stats.variables) || [];
+        if (selectedSymbol) renderSelectedSymbol();
         if (stats && stats.trace) {
           applyBreakpointHits(stats.trace);
           renderTrace(stats.trace, stats.traceCap);
@@ -1779,13 +1815,20 @@ Select an example from the sidebar to get started! 🚀</div>
               }
               break;
             case 'callgraph-result':
+              const analyzedSource = callGraphRequestSources.shift() || getSource();
               if (callGraphBtn) { callGraphBtn.disabled = false; callGraphBtn.textContent = 'Analyze functions'; }
               if (m.error) {
                 if (callGraphMetaEl) callGraphMetaEl.textContent = '';
                 if (callGraphListEl) callGraphListEl.innerHTML = '<div class="inspector-error">' + escapeHtml(m.error) + '</div>';
+                if (selectedSymbol && selectedSymbol.source === analyzedSource && symbolDetailsEl) {
+                  symbolDetailsEl.innerHTML = '<div class="inspector-error">' + escapeHtml(m.error) + '</div>';
+                }
                 logMessage('📞 Function analysis error: ' + m.error, 'error');
               } else if (m.result) {
+                lastCallGraphSource = analyzedSource;
+                symbolAnalysisPendingSource = '';
                 renderCallGraph(m.result);
+                if (selectedSymbol && selectedSymbol.source === analyzedSource) renderSelectedSymbol();
                 document.dispatchEvent(new CustomEvent('nanogo:callgraph', { detail: m.result }));
               }
               break;
@@ -1835,7 +1878,9 @@ Select an example from the sidebar to get started! 🚀</div>
           ctx.clearRect(0, 0, c.width, c.height);
           
           if (execTimeEl) execTimeEl.textContent = '';
-          localStorage.setItem("nanogo_last", getSource());
+          const source = getSource();
+          activeRunSource = source;
+          localStorage.setItem("nanogo_last", source);
           logMessage('🚀 Running…', 'system');
           setStatus('Running code...', 'loading');
           const mode = modeSelect.value || 'stream';
@@ -1846,7 +1891,7 @@ Select an example from the sidebar to get started! 🚀</div>
           refreshBreakpointMarkers();
           clearHeatmap();
           const t0 = performance.now();
-          worker.postMessage({ type: 'run', source: getSource(), mode: mode, trace: wantTrace, profile: wantProfile, breakpoints: breakpoints, t0 });
+          worker.postMessage({ type: 'run', source, mode: mode, trace: wantTrace, profile: wantProfile, breakpoints: breakpoints, t0 });
         } catch (err) {
           setStatus('Runtime error', 'error');
           logMessage('❌ RUNTIME ERROR: ' + err.message, 'error');
@@ -2091,7 +2136,198 @@ Select an example from the sidebar to get started! 🚀</div>
       // or a method call the analyzer couldn't uniquely attribute to a type)
       // is still listed under "Calls" but renders as plain text, not a link.
       let lastCallGraphResult = null;
+      let lastCallGraphSource = '';
+      let symbolAnalysisPendingSource = '';
+      const callGraphRequestSources = [];
+      let selectedSymbol = null;
+      let symbolMarks = [];
       let callGraphView = 'list';
+
+      function clearSymbolMarks() {
+        symbolMarks.forEach(mark => mark.clear());
+        symbolMarks = [];
+      }
+
+      function markSymbolOccurrences(name, selectedLine, selectedColumn) {
+        clearSymbolMarks();
+        if (!editor || !name) return;
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = new RegExp('(^|[^A-Za-z0-9_])(' + escaped + ')(?=$|[^A-Za-z0-9_])', 'g');
+        for (let line = 0; line < editor.lineCount() && symbolMarks.length < 200; line++) {
+          const text = editor.getLine(line);
+          pattern.lastIndex = 0;
+          let match;
+          while ((match = pattern.exec(text)) !== null && symbolMarks.length < 200) {
+            const start = match.index + match[1].length;
+            const token = editor.getTokenAt({ line, ch: start + 1 });
+            const tokenType = token && token.type ? token.type : '';
+            if (!/(comment|string)/.test(tokenType)) {
+              const selected = line + 1 === selectedLine && start + 1 === selectedColumn;
+              symbolMarks.push(editor.markText(
+                { line, ch: start }, { line, ch: start + name.length },
+                { className: selected ? 'cm-symbol-selected' : 'cm-symbol-highlight' }
+              ));
+            }
+            if (match[0].length === 0) pattern.lastIndex++;
+          }
+        }
+      }
+
+      function renderSymbolEmpty(message) {
+        if (symbolPanelBadgeEl) symbolPanelBadgeEl.textContent = 'Editor';
+        if (!symbolDetailsEl) return;
+        symbolDetailsEl.innerHTML = '<div class="symbol-empty"><span class="symbol-empty-icon" aria-hidden="true">⌁</span>' +
+          '<strong>Inspect code in place</strong><p>' + escapeHtml(message || 'Click a variable or function in the editor to see details.') + '</p></div>';
+      }
+
+      function invalidateSymbolSelection() {
+        lastCallGraphSource = '';
+        symbolAnalysisPendingSource = '';
+        selectedSymbol = null;
+        clearSymbolMarks();
+        renderSymbolEmpty('The source changed. Click a symbol to inspect the updated code.');
+      }
+
+      function inspectEditorSymbolAt(pos) {
+        if (!editor || !pos) return;
+        const lineText = editor.getLine(pos.line) || '';
+        const token = editor.getTokenAt({ line: pos.line, ch: Math.min(pos.ch + 1, lineText.length) });
+        const name = token && String(token.string || '').trim();
+        const tokenType = token && token.type ? token.type : '';
+        if (!name || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || /(comment|string|number|keyword)/.test(tokenType)) return;
+
+        const column = Math.max(1, (token.start || pos.ch) + 1);
+        selectedSymbol = { name, line: pos.line + 1, column, source: getSource() };
+        markSymbolOccurrences(name, selectedSymbol.line, column);
+        showOutputPanel('symbol');
+        renderSelectedSymbol();
+      }
+
+      function simpleSymbolName(name) {
+        const parts = String(name || '').split('.');
+        return parts[parts.length - 1];
+      }
+
+      function resolveSelectedFunction(selection) {
+        if (!lastCallGraphResult || lastCallGraphSource !== selection.source) return null;
+        const funcs = lastCallGraphResult.funcs || [];
+        const byName = {};
+        funcs.forEach(fn => { byName[fn.name] = fn; });
+
+        // A call site is the strongest signal, especially when two receiver
+        // types expose methods with the same short name.
+        for (const owner of funcs) {
+          for (const call of (owner.calls || [])) {
+            if (call.line === selection.line && simpleSymbolName(call.name) === selection.name && call.resolved && byName[call.resolved]) {
+              return byName[call.resolved];
+            }
+          }
+        }
+        const declarations = funcs.filter(fn => fn.line === selection.line && simpleSymbolName(fn.name) === selection.name);
+        if (declarations.length === 1) return declarations[0];
+        const exact = funcs.filter(fn => fn.name === selection.name);
+        if (exact.length === 1) return exact[0];
+        const short = funcs.filter(fn => simpleSymbolName(fn.name) === selection.name);
+        return short.length === 1 ? short[0] : null;
+      }
+
+      function symbolJumpButton(label, line, extraClass) {
+        if (!line) return '<span class="symbol-muted">' + escapeHtml(label) + '</span>';
+        return '<button class="symbol-link ' + (extraClass || '') + '" data-jump-line="' + line + '">' + escapeHtml(label) + '</button>';
+      }
+
+      function renderFunctionSymbol(fn) {
+        const funcs = (lastCallGraphResult && lastCallGraphResult.funcs) || [];
+        const byName = {};
+        funcs.forEach(item => { byName[item.name] = item; });
+        const calls = (fn.calls || []).map(call => {
+          const target = call.resolved && byName[call.resolved];
+          const label = call.name + (target ? '' : ' · external');
+          return '<li>' + symbolJumpButton(label, call.line, target ? 'resolved' : 'external') + '</li>';
+        }).join('') || '<li class="symbol-muted">No function calls</li>';
+        const callers = (fn.calledBy || []).map(name => {
+          const caller = byName[name];
+          let line = caller && caller.line;
+          if (caller) {
+            const callSite = (caller.calls || []).find(call => call.resolved === fn.name);
+            if (callSite) line = callSite.line;
+          }
+          return '<li>' + symbolJumpButton(name, line, 'resolved') + '</li>';
+        }).join('') || '<li class="symbol-muted">Entry point or no local caller</li>';
+
+        if (symbolPanelBadgeEl) symbolPanelBadgeEl.textContent = 'Function';
+        symbolDetailsEl.innerHTML =
+          '<div class="symbol-heading"><div><span class="symbol-kind">Function</span><h2>' + escapeHtml(fn.name) + (fn.recursive ? ' <span title="Recursive">↺</span>' : '') + '</h2></div>' +
+          symbolJumpButton('Definition · L' + fn.line, fn.line, 'definition') + '</div>' +
+          '<div class="symbol-metrics"><span><strong>' + (fn.calledBy || []).length + '</strong> callers</span><span><strong>' + (fn.calls || []).length + '</strong> calls</span><span><strong>' + fn.complexity + '</strong> complexity</span><span><strong>' + fn.loc + '</strong> LOC</span></div>' +
+          '<div class="symbol-grid"><section class="symbol-section"><h3>Called by</h3><ul>' + callers + '</ul></section>' +
+          '<section class="symbol-section"><h3>Calls</h3><ul>' + calls + '</ul></section></div>';
+      }
+
+      function prettyRuntimeType(type) {
+        if (!type || type === '<nil>') return 'nil';
+        return String(type).replace(/^\*?interp\./, '');
+      }
+
+      function renderVariableSymbol(selection) {
+        const funcs = (lastCallGraphResult && lastCallGraphResult.funcs) || [];
+        const owner = funcs.find(fn => selection.line >= fn.line && selection.line < fn.line + Math.max(1, fn.loc || 1));
+        const ownerName = owner ? simpleSymbolName(owner.name) : '';
+        const allMatches = lastRuntimeVariables
+          .filter(snapshot => snapshot.name === selection.name)
+          .sort((a, b) => (b.sequence || 0) - (a.sequence || 0));
+        // Prefer the lexical function containing the clicked token. Values
+        // from same-named bindings in other functions stay visible below.
+        const matches = ownerName
+          ? allMatches.filter(snapshot => snapshot.function === ownerName).concat(allMatches.filter(snapshot => snapshot.function !== ownerName))
+          : allMatches;
+        const stale = !!lastRuntimeSource && lastRuntimeSource !== selection.source;
+        if (symbolPanelBadgeEl) symbolPanelBadgeEl.textContent = matches.length ? 'Runtime value' : 'Variable';
+
+        let valueBlock;
+        if (matches.length) {
+          const latest = matches[0];
+          const location = latest.line ? symbolJumpButton((latest.file ? latest.file.split('/').pop() + ' · ' : '') + 'L' + latest.line, latest.line, 'definition') : '<span class="symbol-muted">parameter / runtime binding</span>';
+          valueBlock = '<div class="symbol-value-card ' + (stale ? 'stale' : '') + '">' +
+            '<div class="symbol-value-label">' + (stale ? 'Last value before source changed' : 'Last observed value') + '</div>' +
+            '<pre>' + escapeHtml(latest.value) + '</pre>' +
+            '<div class="symbol-value-meta"><span>' + escapeHtml(prettyRuntimeType(latest.type)) + '</span><span>' + escapeHtml(latest.function || 'program') + '</span><span>' + latest.writes + ' write' + (latest.writes === 1 ? '' : 's') + '</span>' + location + '</div></div>';
+        } else {
+          valueBlock = '<div class="symbol-no-value"><strong>No runtime value yet</strong><p>Run the program to capture the latest assignment for this variable.</p><button class="mini-btn" data-symbol-run>▶ Run and inspect</button></div>';
+        }
+
+        const scopes = matches.slice(1).map(snapshot => '<li><span><strong>' + escapeHtml(snapshot.function || 'program') + '</strong> · ' + escapeHtml(prettyRuntimeType(snapshot.type)) + '</span><code>' + escapeHtml(snapshot.value) + '</code></li>').join('');
+        symbolDetailsEl.innerHTML = '<div class="symbol-heading"><div><span class="symbol-kind variable">Variable</span><h2>' + escapeHtml(selection.name) + '</h2></div>' +
+          '<span class="symbol-location">Selected · L' + selection.line + ':' + selection.column + '</span></div>' + valueBlock +
+          (scopes ? '<section class="symbol-section symbol-scopes"><h3>Other scopes</h3><ul>' + scopes + '</ul></section>' : '') +
+          '<p class="symbol-footnote">Values are last-write snapshots from the most recent run; mutable fields are shown when they are assigned.</p>';
+      }
+
+      function renderSelectedSymbol() {
+        if (!selectedSymbol || !symbolDetailsEl) return;
+        if (lastCallGraphSource !== selectedSymbol.source) {
+          symbolDetailsEl.innerHTML = '<div class="symbol-loading"><span class="status-indicator"></span><div><strong>Analyzing ' + escapeHtml(selectedSymbol.name) + '</strong><p>Resolving functions and runtime values…</p></div></div>';
+          if (symbolAnalysisPendingSource !== selectedSymbol.source) {
+            symbolAnalysisPendingSource = selectedSymbol.source;
+            requestCallGraph();
+          }
+          return;
+        }
+        const fn = resolveSelectedFunction(selectedSymbol);
+        if (fn) renderFunctionSymbol(fn);
+        else renderVariableSymbol(selectedSymbol);
+      }
+
+      if (symbolDetailsEl) {
+        symbolDetailsEl.addEventListener('click', event => {
+          const jump = event.target.closest('[data-jump-line]');
+          if (jump) {
+            jumpToSource(Number(jump.dataset.jumpLine), 1);
+            return;
+          }
+          if (event.target.closest('[data-symbol-run]')) runCode();
+        });
+      }
 
       function renderCallGraph(result) {
         lastCallGraphResult = result;
@@ -2446,7 +2682,9 @@ Select an example from the sidebar to get started! 🚀</div>
       function requestCallGraph() {
         if (!worker) { logMessage('Worker not ready', 'warn'); return; }
         if (callGraphBtn) { callGraphBtn.disabled = true; callGraphBtn.textContent = 'Analyzing…'; }
-        worker.postMessage({ type: 'callgraph', source: getSource() });
+        const source = getSource();
+        callGraphRequestSources.push(source);
+        worker.postMessage({ type: 'callgraph', source });
       }
 
       function renderBench(result) {
