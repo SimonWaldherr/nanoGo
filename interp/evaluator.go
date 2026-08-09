@@ -123,7 +123,9 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 							val = zeroValue(typeString(vs.Type))
 						}
 						vm.declare(name.Name, val, global)
-						vm.recordVariable(name.Name, val, name, global)
+						if vm.trackingVariables() {
+							vm.recordVariable(name.Name, val, name, global)
+						}
 					}
 				}
 			}
@@ -1078,7 +1080,9 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 					}
 					if intOK {
 						vm.declareInt(id.Name, n, env)
-						vm.recordVariable(id.Name, n, id, env)
+						if vm.trackingVariables() {
+							vm.recordVariable(id.Name, n, id, env)
+						}
 						return controlFlow{}, nil
 					}
 				case token.ASSIGN:
@@ -1088,7 +1092,9 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 							return controlFlow{}, err
 						}
 						if intOK && vm.setInt(id.Name, n, env) {
-							vm.recordVariable(id.Name, n, id, env)
+							if vm.trackingVariables() {
+								vm.recordVariable(id.Name, n, id, env)
+							}
 							return controlFlow{}, nil
 						}
 					}
@@ -1187,7 +1193,9 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 					v = rightVals[i]
 				}
 				vm.declare(id.Name, v, env)
-				vm.recordVariable(id.Name, v, id, env)
+				if vm.trackingVariables() {
+					vm.recordVariable(id.Name, v, id, env)
+				}
 			}
 		case token.ASSIGN:
 			for i, l := range st.Lhs {
@@ -1199,7 +1207,9 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				}
 				if id, ok := l.(*ast.Ident); ok {
 					vm.set(id.Name, v, env)
-					vm.recordVariable(id.Name, v, id, env)
+					if vm.trackingVariables() {
+						vm.recordVariable(id.Name, v, id, env)
+					}
 					continue
 				}
 				ref, err := vm.resolveRef(l, env)
@@ -1209,7 +1219,9 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				if err := ref.Set(v); err != nil {
 					return controlFlow{}, err
 				}
-				vm.recordAssignedExpression(l, v, env)
+				if vm.trackingVariables() {
+					vm.recordAssignedExpression(l, v, env)
+				}
 			}
 		default:
 			// augmented assignments supported via applyBinaryOp
@@ -1250,7 +1262,9 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 					return controlFlow{}, err
 				}
 				vm.set(id.Name, newVal, env)
-				vm.recordVariable(id.Name, newVal, id, env)
+				if vm.trackingVariables() {
+					vm.recordVariable(id.Name, newVal, id, env)
+				}
 				return controlFlow{}, nil
 			}
 			ref, err := vm.resolveRef(st.Lhs[0], env)
@@ -1264,7 +1278,9 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			if err := ref.Set(newVal); err != nil {
 				return controlFlow{}, err
 			}
-			vm.recordAssignedExpression(st.Lhs[0], newVal, env)
+			if vm.trackingVariables() {
+				vm.recordAssignedExpression(st.Lhs[0], newVal, env)
+			}
 		}
 		return controlFlow{}, nil
 
@@ -1273,10 +1289,14 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			if cur, ok := vm.getInt(id.Name, env); ok {
 				if st.Tok == token.INC {
 					vm.setInt(id.Name, cur+1, env)
-					vm.recordVariable(id.Name, cur+1, id, env)
+					if vm.trackingVariables() {
+						vm.recordVariable(id.Name, cur+1, id, env)
+					}
 				} else {
 					vm.setInt(id.Name, cur-1, env)
-					vm.recordVariable(id.Name, cur-1, id, env)
+					if vm.trackingVariables() {
+						vm.recordVariable(id.Name, cur-1, id, env)
+					}
 				}
 				return controlFlow{}, nil
 			}
@@ -1284,10 +1304,14 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			cur := ToInt(v)
 			if st.Tok == token.INC {
 				vm.set(id.Name, cur+1, env)
-				vm.recordVariable(id.Name, cur+1, id, env)
+				if vm.trackingVariables() {
+					vm.recordVariable(id.Name, cur+1, id, env)
+				}
 			} else {
 				vm.set(id.Name, cur-1, env)
-				vm.recordVariable(id.Name, cur-1, id, env)
+				if vm.trackingVariables() {
+					vm.recordVariable(id.Name, cur-1, id, env)
+				}
 			}
 			return controlFlow{}, nil
 		}
@@ -1300,12 +1324,16 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			if err := ref.Set(cur + 1); err != nil {
 				return controlFlow{}, err
 			}
-			vm.recordAssignedExpression(st.X, cur+1, env)
+			if vm.trackingVariables() {
+				vm.recordAssignedExpression(st.X, cur+1, env)
+			}
 		} else {
 			if err := ref.Set(cur - 1); err != nil {
 				return controlFlow{}, err
 			}
-			vm.recordAssignedExpression(st.X, cur-1, env)
+			if vm.trackingVariables() {
+				vm.recordAssignedExpression(st.X, cur-1, env)
+			}
 		}
 		return controlFlow{}, nil
 
@@ -1333,7 +1361,9 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 						val = zeroValue(typeString(vs.Type))
 					}
 					vm.declare(n.Name, val, env)
-					vm.recordVariable(n.Name, val, n, env)
+					if vm.trackingVariables() {
+						vm.recordVariable(n.Name, val, n, env)
+					}
 				}
 			}
 		}
@@ -1435,13 +1465,17 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				if st.Key != nil {
 					if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
 						vm.set(id.Name, i, local)
-						vm.recordVariable(id.Name, i, id, local)
+						if vm.trackingVariables() {
+							vm.recordVariable(id.Name, i, id, local)
+						}
 					}
 				}
 				if st.Value != nil {
 					if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" {
 						vm.set(id.Name, s.Data[i], local)
-						vm.recordVariable(id.Name, s.Data[i], id, local)
+						if vm.trackingVariables() {
+							vm.recordVariable(id.Name, s.Data[i], id, local)
+						}
 					}
 				}
 				c, err := vm.evalStmt(st.Body, local)
@@ -1463,13 +1497,17 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				if st.Key != nil {
 					if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
 						vm.set(id.Name, key, local)
-						vm.recordVariable(id.Name, key, id, local)
+						if vm.trackingVariables() {
+							vm.recordVariable(id.Name, key, id, local)
+						}
 					}
 				}
 				if st.Value != nil {
 					if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" {
 						vm.set(id.Name, val, local)
-						vm.recordVariable(id.Name, val, id, local)
+						if vm.trackingVariables() {
+							vm.recordVariable(id.Name, val, id, local)
+						}
 					}
 				}
 				c, err := vm.evalStmt(st.Body, local)
@@ -1489,13 +1527,17 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				if st.Key != nil {
 					if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
 						vm.set(id.Name, i, local)
-						vm.recordVariable(id.Name, i, id, local)
+						if vm.trackingVariables() {
+							vm.recordVariable(id.Name, i, id, local)
+						}
 					}
 				}
 				if st.Value != nil {
 					if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" {
 						vm.set(id.Name, int(s[i]), local)
-						vm.recordVariable(id.Name, int(s[i]), id, local)
+						if vm.trackingVariables() {
+							vm.recordVariable(id.Name, int(s[i]), id, local)
+						}
 					}
 				}
 				c, err := vm.evalStmt(st.Body, local)
@@ -1522,7 +1564,9 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				if st.Key != nil {
 					if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
 						vm.set(id.Name, v, local)
-						vm.recordVariable(id.Name, v, id, local)
+						if vm.trackingVariables() {
+							vm.recordVariable(id.Name, v, id, local)
+						}
 					}
 				}
 				c, err := vm.evalStmt(st.Body, local)
@@ -1941,17 +1985,23 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 	argIndex := 0
 	if fn.RecvName != "" && recv != nil {
 		vm.declare(fn.RecvName, *recv, local)
-		vm.recordVariable(fn.RecvName, *recv, nil, local)
+		if vm.trackingVariables() {
+			vm.recordVariable(fn.RecvName, *recv, nil, local)
+		}
 	}
 	if fn.IsVariadic && len(fn.Params) > 0 {
 		// All args before the last param are regular; the rest packed into a slice.
 		for i := 0; i < len(fn.Params)-1; i++ {
 			if argIndex >= len(args) {
 				vm.declare(fn.Params[i], nil, local)
-				vm.recordVariable(fn.Params[i], nil, nil, local)
+				if vm.trackingVariables() {
+					vm.recordVariable(fn.Params[i], nil, nil, local)
+				}
 			} else {
 				vm.declare(fn.Params[i], args[argIndex], local)
-				vm.recordVariable(fn.Params[i], args[argIndex], nil, local)
+				if vm.trackingVariables() {
+					vm.recordVariable(fn.Params[i], args[argIndex], nil, local)
+				}
 			}
 			argIndex++
 		}
@@ -1962,15 +2012,21 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 		}
 		restValue := &SliceVal{ElementType: "any", Data: rest}
 		vm.declare(fn.Params[len(fn.Params)-1], restValue, local)
-		vm.recordVariable(fn.Params[len(fn.Params)-1], restValue, nil, local)
+		if vm.trackingVariables() {
+			vm.recordVariable(fn.Params[len(fn.Params)-1], restValue, nil, local)
+		}
 	} else {
 		for _, p := range fn.Params {
 			if argIndex >= len(args) {
 				vm.declare(p, nil, local)
-				vm.recordVariable(p, nil, nil, local)
+				if vm.trackingVariables() {
+					vm.recordVariable(p, nil, nil, local)
+				}
 			} else {
 				vm.declare(p, args[argIndex], local)
-				vm.recordVariable(p, args[argIndex], nil, local)
+				if vm.trackingVariables() {
+					vm.recordVariable(p, args[argIndex], nil, local)
+				}
 			}
 			argIndex++
 		}

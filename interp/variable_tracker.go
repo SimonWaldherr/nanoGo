@@ -75,6 +75,18 @@ func (t *VariableTracker) record(snapshot VariableSnapshot) {
 	t.mu.Unlock()
 }
 
+// trackingVariables reports whether a VariableTracker is attached. Call
+// sites guard every recordVariable/recordAssignedExpression call with this
+// check rather than relying on those functions' own nil check: Go boxes a
+// concrete value (e.g. a loop counter int) into the `value any` parameter at
+// the call site itself, before the callee runs, so skipping the call
+// entirely is the only way to avoid that heap allocation on the hot
+// assignment/increment/loop-variable/function-call-argument paths when no
+// tracker is configured (the default).
+func (vm *Interpreter) trackingVariables() bool {
+	return vm.variableTracker.Load() != nil
+}
+
 func (vm *Interpreter) recordVariable(name string, value any, node ast.Node, env *Env) {
 	tracker := vm.variableTracker.Load()
 	if tracker == nil || name == "" || name == "_" {
