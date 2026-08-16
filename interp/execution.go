@@ -146,17 +146,25 @@ func (vm *Interpreter) beginExecution(parent context.Context) (*execution, error
 	}
 	ctx, cancel := context.WithCancel(parent)
 	e := &execution{ctx: ctx, cancel: cancel, limits: vm.Limits}
-	// The one place this execution's ctx.Done() channel is actually waited
-	// on: cheaply (a parked goroutine, not a busy poll) and exactly once,
-	// flipping e.cancelled for err()'s hot-path atomic read. This goroutine
-	// always exits promptly — RunContext/WithExecution's defer calls
-	// e.cancel() unconditionally, including on ordinary successful
-	// completion, which closes Done() and unblocks it — so it never leaks
-	// or outlives the execution it belongs to.
-	go func() {
-		<-ctx.Done()
-		e.cancelled.Store(true)
-	}()
+	// A background context cannot be cancelled by its parent. Avoid creating
+	// a short-lived watcher goroutine for that overwhelmingly common Run()
+	// path: limits and Kill already report through their own atomics, while
+	// blocked guest operations receive ctx directly. A cancellable parent
+	// (deadline, WithCancel, ...) still gets the watcher so evaluator
+	// checkpoints return the parent's precise cancellation error promptly.
+	if parent.Done() != nil {
+		// This is the one place this execution's ctx.Done() channel is waited
+		// on: cheaply (a parked goroutine, not a busy poll) and exactly once,
+		// flipping e.cancelled for err()'s hot-path atomic read. This goroutine
+		// always exits promptly — RunContext/WithExecution's defer calls
+		// e.cancel() unconditionally, including on ordinary successful
+		// completion, which closes Done() and unblocks it — so it never leaks
+		// or outlives the execution it belongs to.
+		go func() {
+			<-ctx.Done()
+			e.cancelled.Store(true)
+		}()
+	}
 	vm.execution.Store(e)
 	vm.activeExecution = e
 	return e, nil

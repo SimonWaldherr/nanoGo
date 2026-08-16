@@ -37,10 +37,11 @@ func (e *panicError) Error() string { return fmt.Sprintf("panic: %v", e.value) }
 type FieldDef struct{ Name, Type string }
 
 type TypeDef struct {
-	Name    string
-	Kind    string // "struct", "interface", "chan"
-	Fields  []FieldDef
-	Methods map[string]*Function
+	Name       string
+	Kind       string // "struct", "interface", "chan", "alias"
+	Underlying string // scalar representation for a named or alias type
+	Fields     []FieldDef
+	Methods    map[string]*Function
 }
 
 // Function represents either a user-defined or native function.
@@ -69,6 +70,9 @@ type StructVal struct {
 type SliceVal struct {
 	ElementType string
 	Data        []any
+	// Fixed distinguishes a Go array from a slice. Both share indexed storage,
+	// but arrays reject append and preserve their declared length.
+	Fixed bool
 }
 
 type MapVal struct {
@@ -316,7 +320,7 @@ func ToString(v any) string {
 		}
 		return "false"
 	case *SliceVal:
-		if x.ElementType == "byte" {
+		if isByteType(x.ElementType) {
 			b := make([]byte, len(x.Data))
 			for i := range b {
 				b[i] = byte(ToInt(x.Data[i]) & 0xFF)

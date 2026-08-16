@@ -354,8 +354,13 @@ func (vm *Interpreter) get(name string, env *Env) (any, bool) {
 // which boxes large ints; tight arithmetic loops use this helper instead.
 func (vm *Interpreter) getInt(name string, env *Env) (int, bool) {
 	exec := vm.activeExecution
+	// A guest cannot become concurrent halfway through this lookup: the go
+	// statement sets concurrent before its child can execute. Snapshot it once
+	// instead of issuing the same atomic load for every lexical parent; integer
+	// arithmetic commonly walks two scopes (loop counter plus accumulator).
+	concurrent := exec != nil && exec.concurrent.Load()
 	for e := env; e != nil; e = e.Parent {
-		if e.shared || (exec != nil && exec.concurrent.Load()) {
+		if e.shared || concurrent {
 			e.mu.RLock()
 			n, ok := lookupIntVar(e, name)
 			e.mu.RUnlock()
@@ -518,8 +523,12 @@ func (vm *Interpreter) declareInt(name string, value int, env *Env) {
 // the name is either undefined or currently holds a dynamic (non-int) value.
 func (vm *Interpreter) setInt(name string, value int, env *Env) bool {
 	exec := vm.activeExecution
+	// See getInt: one execution cannot gain a second guest goroutine before
+	// reserveGoroutine has published concurrent, so one snapshot is enough for
+	// this complete lexical update.
+	concurrent := exec != nil && exec.concurrent.Load()
 	for e := env; e != nil; e = e.Parent {
-		if e.shared || (exec != nil && exec.concurrent.Load()) {
+		if e.shared || concurrent {
 			e.mu.RLock()
 			_, ok := lookupIntVar(e, name)
 			e.mu.RUnlock()

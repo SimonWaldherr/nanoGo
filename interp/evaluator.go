@@ -102,7 +102,12 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 						}
 						vm.types[td.Name] = td
 					default:
-						// other type decls are ignored in this subset
+						underlying := typeString(tt)
+						if isBuiltinType(underlying) {
+							// Keep named scalar types useful for firmware-style code
+							// without introducing a second runtime representation.
+							vm.types[ts.Name.Name] = &TypeDef{Name: ts.Name.Name, Kind: "alias", Underlying: underlying}
+						}
 					}
 				}
 			case token.CONST, token.VAR:
@@ -120,7 +125,7 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 							}
 							val = v
 						} else {
-							val = zeroValue(typeString(vs.Type))
+							val = vm.zeroValueForType(typeString(vs.Type))
 						}
 						vm.declare(name.Name, val, global)
 						if vm.trackingVariables() {
@@ -204,6 +209,9 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 	case *ast.BasicLit:
 		switch ex.Kind {
 		case token.INT:
+			if n, ok := parseFastDecimalInt(ex.Value); ok {
+				return n, nil
+			}
 			if exec := vm.activeExecution; exec != nil {
 				if n, ok := exec.litCache[ex]; ok {
 					return n, nil
@@ -277,7 +285,15 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		if n, ok := vm.natives[ex.Name]; ok {
 			return &Function{Name: ex.Name, Native: n}, nil
 		}
-		if _, ok := vm.types[ex.Name]; ok {
+		if td, ok := vm.types[ex.Name]; ok {
+			if td.Kind == "alias" {
+				return &Function{Name: ex.Name, Native: func(args []any) (any, error) {
+					if len(args) == 0 {
+						return vm.zeroValueForType(ex.Name), nil
+					}
+					return vm.coerceToType(args[0], ex.Name), nil
+				}}, nil
+			}
 			return ex.Name, nil
 		}
 		return nil, NewRuntimeError("undefined: " + ex.Name)
@@ -761,17 +777,57 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 	case *ast.CompositeLit:
 		// Struct, slice, map literals.
 		typ := typeString(ex.Type)
-		if strings.HasPrefix(typ, "[]") {
-			elem := typ[2:]
-			lit := &SliceVal{ElementType: elem, Data: []any{}}
+		if strings.HasPrefix(typ, "[]") || strings.HasPrefix(typ, "[") {
+			elem := ""
+			length := 0
+			fixed := false
+			if strings.HasPrefix(typ, "[]") {
+				elem = typ[2:]
+			} else {
+				var ok bool
+				length, elem, ok = parseArrayType(typ)
+				if !ok {
+					return nil, NewRuntimeError("array literal requires a constant length")
+				}
+				fixed = true
+			}
+			data := make([]any, 0, len(ex.Elts))
+			if fixed {
+				data = make([]any, length)
+				for i := range data {
+					data[i] = vm.zeroValueForType(elem)
+				}
+			}
+			next := 0
 			for _, elt := range ex.Elts {
-				v, err := vm.evalExpr(elt, env)
+				index := next
+				valueExpr := elt
+				if keyed, ok := elt.(*ast.KeyValueExpr); ok {
+					indexValue, err := vm.evalExpr(keyed.Key, env)
+					if err != nil {
+						return nil, err
+					}
+					index = ToInt(indexValue)
+					valueExpr = keyed.Value
+				}
+				v, err := vm.evalExpr(valueExpr, env)
 				if err != nil {
 					return nil, err
 				}
-				lit.Data = append(lit.Data, v)
+				if fixed {
+					if index < 0 || index >= len(data) {
+						return nil, NewRuntimeError("array literal index out of bounds")
+					}
+					data[index] = vm.coerceToType(v, elem)
+				} else {
+					for len(data) <= index {
+						data = append(data, vm.zeroValueForType(elem))
+					}
+					data[index] = vm.coerceToType(v, elem)
+				}
+				next = index + 1
 			}
-			return lit, nil
+			return &SliceVal{ElementType: elem, Data: data, Fixed: fixed}, nil
 		}
 		if strings.HasPrefix(typ, "map[") {
 			k, v := parseMapType(typ)
@@ -801,7 +857,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		}
 		obj := &StructVal{TypeName: typ, Fields: map[string]any{}}
 		for _, f := range td.Fields {
-			obj.Fields[f.Name] = zeroValue(f.Type)
+			obj.Fields[f.Name] = vm.zeroValueForType(f.Type)
 		}
 		for _, elt := range ex.Elts {
 			kv, ok := elt.(*ast.KeyValueExpr)
@@ -853,6 +909,9 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 	case *ast.BasicLit:
 		if ex.Kind != token.INT {
 			return 0, false, nil
+		}
+		if n, ok := parseFastDecimalInt(ex.Value); ok {
+			return n, true, nil
 		}
 		if exec := vm.activeExecution; exec != nil {
 			if n, ok := exec.litCache[ex]; ok {
@@ -935,6 +994,26 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 	return 0, false, nil
 }
 
+// parseFastDecimalInt handles the ordinary non-zero-prefixed decimal form
+// without a map lookup or strconv call. The parser has already validated the
+// token; the conservative fallback preserves strconv's exact handling for
+// bases, separators, leading-zero literals, and overflow diagnostics.
+func parseFastDecimalInt(s string) (int, bool) {
+	if len(s) == 0 || (len(s) > 1 && s[0] == '0') {
+		return 0, false
+	}
+	maxInt := int(^uint(0) >> 1)
+	n := 0
+	for i := 0; i < len(s); i++ {
+		digit := s[i] - '0'
+		if digit > 9 || n > (maxInt-int(digit))/10 {
+			return 0, false
+		}
+		n = n*10 + int(digit)
+	}
+	return n, true
+}
+
 func isIntArithmetic(op token.Token) bool {
 	switch op {
 	case token.ADD, token.SUB, token.MUL, token.REM, token.SHL, token.SHR,
@@ -963,6 +1042,7 @@ const (
 	controlReturn
 	controlBreak
 	controlContinue
+	controlFallthrough
 )
 
 type controlFlow struct {
@@ -1354,11 +1434,11 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 							return controlFlow{}, err
 						}
 						if vs.Type != nil {
-							v = coerceToType(v, typeString(vs.Type))
+							v = vm.coerceToType(v, typeString(vs.Type))
 						}
 						val = v
 					} else {
-						val = zeroValue(typeString(vs.Type))
+						val = vm.zeroValueForType(typeString(vs.Type))
 					}
 					vm.declare(n.Name, val, env)
 					if vm.trackingVariables() {
@@ -1392,7 +1472,7 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				return controlFlow{}, err
 			}
 			switch c.kind {
-			case controlReturn, controlBreak, controlContinue:
+			case controlReturn, controlBreak, controlContinue, controlFallthrough:
 				return c, nil
 			}
 		}
@@ -1523,7 +1603,10 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				}
 			}
 		case string:
-			for i := 0; i < len(s); i++ {
+			// Go ranges over UTF-8 strings by byte offset and decoded rune, not
+			// by individual bytes. This matters for the Unicode-heavy display
+			// and serial protocols commonly used by TinyGo targets as well.
+			for i, r := range s {
 				if st.Key != nil {
 					if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
 						vm.set(id.Name, i, local)
@@ -1534,9 +1617,33 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				}
 				if st.Value != nil {
 					if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" {
-						vm.set(id.Name, int(s[i]), local)
+						vm.set(id.Name, int(r), local)
 						if vm.trackingVariables() {
-							vm.recordVariable(id.Name, int(s[i]), id, local)
+							vm.recordVariable(id.Name, int(r), id, local)
+						}
+					}
+				}
+				c, err := vm.evalStmt(st.Body, local)
+				if err != nil {
+					return controlFlow{}, err
+				}
+				switch c.kind {
+				case controlBreak:
+					return controlFlow{}, nil
+				case controlReturn:
+					return c, nil
+				case controlContinue:
+				}
+			}
+		case int:
+			// Go 1.22 added `for i := range n`. It is a compact, allocation-free
+			// loop form that maps well to firmware-style TinyGo code.
+			for i := 0; i < s; i++ {
+				if st.Key != nil {
+					if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
+						vm.set(id.Name, i, local)
+						if vm.trackingVariables() {
+							vm.recordVariable(id.Name, i, id, local)
 						}
 					}
 				}
@@ -1601,38 +1708,62 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				return controlFlow{}, err
 			}
 		}
+		// A default clause is considered only after every explicit case, even
+		// when it appears before a matching case in source order.
+		defaultIndex := -1
 		matched := false
-		for _, clause := range st.Body.List {
+		for i, clause := range st.Body.List {
 			cc := clause.(*ast.CaseClause)
-			if cc.List == nil {
+			if !matched {
+				if cc.List == nil {
+					defaultIndex = i
+					continue
+				}
+				for _, ce := range cc.List {
+					val, err := vm.evalExpr(ce, local)
+					if err != nil {
+						return controlFlow{}, err
+					}
+					if (st.Tag == nil && ToBool(val)) || (st.Tag != nil && equals(tag, val)) {
+						matched = true
+						break
+					}
+				}
 				if !matched {
-					return vm.evalStmt(&ast.BlockStmt{List: cc.Body}, local)
+					continue
 				}
+			}
+
+			c, err := vm.evalStmt(&ast.BlockStmt{List: cc.Body}, local)
+			if err != nil {
+				return controlFlow{}, err
+			}
+			switch c.kind {
+			case controlFallthrough:
+				if i == len(st.Body.List)-1 {
+					return controlFlow{}, NewRuntimeError("cannot fallthrough final case")
+				}
+				// Keep matched true: the following body runs without evaluating
+				// its case expression, exactly as Go's fallthrough specifies.
 				continue
+			case controlBreak:
+				// break exits this switch, rather than leaking to an enclosing for.
+				return controlFlow{}, nil
+			case controlReturn, controlContinue:
+				return c, nil
+			default:
+				return controlFlow{}, nil
 			}
-			if matched {
-				continue
+		}
+		if !matched && defaultIndex >= 0 {
+			c, err := vm.evalStmt(&ast.BlockStmt{List: st.Body.List[defaultIndex].(*ast.CaseClause).Body}, local)
+			if err != nil {
+				return controlFlow{}, err
 			}
-			for _, ce := range cc.List {
-				val, err := vm.evalExpr(ce, local)
-				if err != nil {
-					return controlFlow{}, err
-				}
-				if st.Tag == nil {
-					if ToBool(val) {
-						matched = true
-						break
-					}
-				} else {
-					if equals(tag, val) {
-						matched = true
-						break
-					}
-				}
+			if c.kind == controlBreak {
+				return controlFlow{}, nil
 			}
-			if matched {
-				return vm.evalStmt(&ast.BlockStmt{List: cc.Body}, local)
-			}
+			return c, nil
 		}
 		return controlFlow{}, nil
 
@@ -1849,6 +1980,8 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			return controlFlow{kind: controlBreak}, nil
 		case token.CONTINUE:
 			return controlFlow{kind: controlContinue}, nil
+		case token.FALLTHROUGH:
+			return controlFlow{kind: controlFallthrough}, nil
 		}
 		return controlFlow{}, nil
 

@@ -108,7 +108,11 @@ func (ps *PackageScope) CollectDecls(file *ast.File, fset *token.FileSet) error 
 					vm.types[td.Name] = td
 					ps.declaredTypes[td.Name] = true
 				default:
-					// other type decls are ignored in this subset, matching RunContext.
+					underlying := typeString(tt)
+					if isBuiltinType(underlying) {
+						vm.types[ts.Name.Name] = &TypeDef{Name: ts.Name.Name, Kind: "alias", Underlying: underlying}
+						ps.declaredTypes[ts.Name.Name] = true
+					}
 				}
 			}
 		case *ast.FuncDecl:
@@ -201,7 +205,7 @@ func (ps *PackageScope) EvalDecls(ctx context.Context, file *ast.File) error {
 					}
 					val = v
 				} else {
-					val = zeroValue(typeString(vs.Type))
+					val = vm.zeroValueForType(typeString(vs.Type))
 				}
 				vm.declare(name.Name, val, ps.env)
 				vm.recordVariable(name.Name, val, name, ps.env)

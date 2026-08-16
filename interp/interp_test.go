@@ -1520,6 +1520,151 @@ func TestSharedVFSAcrossInterpreters(t *testing.T) {
 	}
 }
 
+func TestParseFastDecimalInt(t *testing.T) {
+	tests := []struct {
+		literal string
+		want    int
+		ok      bool
+	}{
+		{literal: "0", want: 0, ok: true},
+		{literal: "7", want: 7, ok: true},
+		{literal: "100000", want: 100000, ok: true},
+		// These forms intentionally fall back to strconv so their Go literal
+		// semantics and diagnostics remain unchanged.
+		{literal: "012", ok: false},
+		{literal: "0x10", ok: false},
+		{literal: "1_000", ok: false},
+		{literal: "999999999999999999999999999999", ok: false},
+	}
+	for _, tt := range tests {
+		got, ok := parseFastDecimalInt(tt.literal)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("parseFastDecimalInt(%q) = (%d, %t), want (%d, %t)", tt.literal, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+func TestGoAndTinyGoScalarAndRangeCompatibility(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+
+func main() {
+	var zero uint16
+	b := byte(260)
+	i8 := int8(130)
+	f := float32(1.25)
+	fmt.Println(zero, b, i8, f)
+
+	sum := 0
+	for i := range 3 {
+		sum = sum*10 + i
+	}
+	fmt.Println(sum)
+
+	for offset, r := range "aä" {
+		fmt.Println(offset, r)
+	}
+	fmt.Println(string([]uint8{104, 105}))
+}
+`)
+	for _, want := range []string{
+		"0 4 -126 1.25",
+		"12",
+		"0 97",
+		"1 228",
+		"hi",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q does not contain %q", out, want)
+		}
+	}
+}
+
+func TestFixedByteArraysForTinyGoStyleBuffers(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+
+func main() {
+	var buffer [4]byte
+	buffer[0] = 'o'
+	buffer[1] = 'k'
+	packet := [4]byte{0: 'N', 2: 'G'}
+	fmt.Println(len(buffer), cap(buffer), string(buffer[:2]))
+	fmt.Println(packet[0], packet[1], packet[2], packet[3])
+}
+`)
+	for _, want := range []string{"4 4 ok", "78 0 71 0"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q does not contain %q", out, want)
+		}
+	}
+
+	vm, _ := newTestVM()
+	err := vm.Run(`package main
+func main() { a := [1]byte{1}; append(a, 2) }`)
+	if err == nil || !strings.Contains(err.Error(), "first argument must be a slice") {
+		t.Fatalf("append(array) error = %v, want slice-only error", err)
+	}
+}
+
+func TestSwitchBreakAndFallthroughCompatibility(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+
+func classify(n int) string {
+	switch n {
+	case 0:
+		fallthrough
+	case 1:
+		return "low"
+	default:
+		return "high"
+	}
+}
+
+func main() {
+	fmt.Println(classify(0), classify(2))
+	for i := 0; i < 2; i++ {
+		switch i {
+		case 0:
+			break
+		}
+		fmt.Println(i)
+	}
+}
+`)
+	for _, want := range []string{"low high", "0", "1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q does not contain %q", out, want)
+		}
+	}
+}
+
+func TestNamedScalarTypesForTinyGoStyleCode(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+
+type Pin uint8
+type Millis = uint16
+
+func main() {
+	var p Pin
+	var wait Millis
+	p = Pin(260)
+	wait = Millis(70000)
+	levels := make([]Pin, 2)
+	fmt.Println(p, wait, levels[0], levels[1])
+}
+`)
+	if !strings.Contains(out, "4 4464 0 0") {
+		t.Errorf("output %q does not contain named scalar values", out)
+	}
+}
+
 func TestRunContextStopsBusyLoopAtDeadline(t *testing.T) {
 	vm, _ := newTestVM()
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)

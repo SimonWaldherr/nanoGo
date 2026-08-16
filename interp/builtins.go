@@ -4,6 +4,7 @@ package interp
 import (
 	"context"
 	"go/ast"
+	"strconv"
 	"strings"
 )
 
@@ -15,7 +16,14 @@ func typeString(e ast.Expr) string {
 	case *ast.StarExpr:
 		return "*" + typeString(t.X)
 	case *ast.ArrayType:
-		// We only support slices (Len == nil). Fixed arrays are not yet supported.
+		if t.Len != nil {
+			if lit, ok := t.Len.(*ast.BasicLit); ok {
+				return "[" + lit.Value + "]" + typeString(t.Elt)
+			}
+			// Preserve the type shape even when its constant length cannot be
+			// resolved without the evaluator's lexical environment.
+			return "[?]" + typeString(t.Elt)
+		}
 		return "[]" + typeString(t.Elt)
 	case *ast.MapType:
 		return "map[" + typeString(t.Key) + "]" + typeString(t.Value)
@@ -58,10 +66,17 @@ func parseMapType(s string) (key, val string) {
 }
 
 func zeroValue(typ string) any {
+	if length, elem, ok := parseArrayType(typ); ok {
+		data := make([]any, length)
+		for i := range data {
+			data[i] = zeroValue(elem)
+		}
+		return &SliceVal{ElementType: elem, Data: data, Fixed: true}
+	}
 	switch typ {
-	case "int", "byte":
+	case "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune":
 		return 0
-	case "float64":
+	case "float32", "float64":
 		return 0.0
 	case "bool":
 		return false
@@ -87,6 +102,41 @@ func zeroValue(typ string) any {
 	}
 }
 
+// zeroValueForType resolves scalar named types such as `type Pin uint8`.
+// Their dynamic value is the underlying scalar, while the source retains the
+// named type for declarations and conversions.
+func (vm *Interpreter) zeroValueForType(typ string) any {
+	if td := vm.types[typ]; td != nil && td.Kind == "alias" {
+		return zeroValue(td.Underlying)
+	}
+	return zeroValue(typ)
+}
+
+func (vm *Interpreter) coerceToType(val any, typ string) any {
+	if td := vm.types[typ]; td != nil && td.Kind == "alias" {
+		typ = td.Underlying
+	}
+	return coerceToType(val, typ)
+}
+
+// parseArrayType recognizes the concrete fixed-array spelling emitted by
+// typeString, e.g. "[32]byte". Variable-sized forms stay unsupported rather
+// than guessing their size at runtime.
+func parseArrayType(typ string) (length int, elem string, ok bool) {
+	if !strings.HasPrefix(typ, "[") || strings.HasPrefix(typ, "[]") {
+		return 0, "", false
+	}
+	end := strings.IndexByte(typ, ']')
+	if end <= 1 || end == len(typ)-1 {
+		return 0, "", false
+	}
+	n, err := strconv.Atoi(typ[1:end])
+	if err != nil || n < 0 {
+		return 0, "", false
+	}
+	return n, typ[end+1:], true
+}
+
 // coerceToType widens an untyped int literal's evaluated Go value to a
 // declared float64 type, mirroring Go's implicit conversion of an untyped
 // int constant to a float64 variable or struct field (e.g. `var x float64 =
@@ -96,10 +146,8 @@ func zeroValue(typ string) any {
 // turning later arithmetic (and any /-division on it) back into int math.
 // Every other combination is returned unchanged.
 func coerceToType(val any, typ string) any {
-	if typ == "float64" {
-		if i, ok := val.(int); ok {
-			return float64(i)
-		}
+	if isBuiltinType(typ) {
+		return builtinConvert(typ, val)
 	}
 	return val
 }
@@ -129,7 +177,7 @@ func (vm *Interpreter) builtinMake(typ string, args []any) (any, error) {
 		}
 		data := make([]any, length, capacity)
 		for i := 0; i < length; i++ {
-			data[i] = zeroValue(elem)
+			data[i] = vm.zeroValueForType(elem)
 		}
 		return &SliceVal{ElementType: elem, Data: data}, nil
 	}
@@ -189,10 +237,13 @@ func (vm *Interpreter) builtinAppend(slice any, elems ...any) (any, error) {
 	if !ok {
 		return slice, nil
 	}
+	if s.Fixed {
+		return nil, NewRuntimeError("append: first argument must be a slice")
+	}
 	if len(elems) > vm.maxContainerSize()-len(s.Data) {
 		return nil, NewRuntimeError("append: size exceeds interpreter limit")
 	}
-	if s.ElementType == "byte" {
+	if isByteType(s.ElementType) {
 		for _, e := range elems {
 			s.Data = append(s.Data, ToInt(e)&0xFF)
 		}
@@ -204,6 +255,10 @@ func (vm *Interpreter) builtinAppend(slice any, elems ...any) (any, error) {
 		s.Data = append(s.Data, elems...)
 	}
 	return s, nil
+}
+
+func isByteType(typ string) bool {
+	return typ == "byte" || typ == "uint8"
 }
 
 // builtinCopy mirrors Go's own copy(): SliceVal.Data values can alias the
@@ -357,14 +412,32 @@ func builtinConvert(typ string, v any) any {
 	switch typ {
 	case "int":
 		return ToInt(v)
+	case "int8":
+		return int(int8(ToInt(v)))
+	case "int16":
+		return int(int16(ToInt(v)))
+	case "int32", "rune":
+		return int(int32(ToInt(v)))
+	case "int64":
+		return ToInt(v)
+	case "uint":
+		return int(uint(ToInt(v)))
+	case "uint8", "byte":
+		return ToInt(v) & 0xFF
+	case "uint16":
+		return ToInt(v) & 0xFFFF
+	case "uint32":
+		return int(uint32(ToInt(v)))
+	case "uint64", "uintptr":
+		return ToInt(v)
+	case "float32":
+		return float64(float32(ToFloat(v)))
 	case "float64":
 		return ToFloat(v)
 	case "bool":
 		return ToBool(v)
 	case "string":
 		return ToString(v)
-	case "byte":
-		return ToInt(v) & 0xFF
 	default:
 		return v
 	}
@@ -372,7 +445,7 @@ func builtinConvert(typ string, v any) any {
 
 func isBuiltinType(name string) bool {
 	switch name {
-	case "int", "float64", "bool", "string", "byte":
+	case "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "float32", "float64", "bool", "string", "byte", "rune":
 		return true
 	default:
 		return false
