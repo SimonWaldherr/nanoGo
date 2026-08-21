@@ -909,6 +909,34 @@ func jsNanoGoDebugStop(this js.Value, args []js.Value) any {
 	return true
 }
 
+// jsNanoGoDebugSetVariable assigns a new value to a local variable in the
+// goroutine paused at token, letting a host edit state while stepping
+// through a live debug session. Arguments: token (number), name (string),
+// a Go expression to evaluate as the new value (string). Returns
+// {ok:true, value:"<display string>"} on success or {ok:false, error:"..."}.
+func jsNanoGoDebugSetVariable(this js.Value, args []js.Value) any {
+	result := js.Global().Get("Object").New()
+	debugMu.Lock()
+	session := activeDebug
+	debugMu.Unlock()
+	if session == nil || len(args) < 3 {
+		result.Set("ok", false)
+		result.Set("error", "no active debug session")
+		return result
+	}
+	token := interp.PauseToken(uint64(args[0].Int()))
+	name := args[1].String()
+	value, err := session.dc.SetVariable(token, name, args[2].String())
+	if err != nil {
+		result.Set("ok", false)
+		result.Set("error", err.Error())
+		return result
+	}
+	result.Set("ok", true)
+	result.Set("value", value)
+	return result
+}
+
 // jsNanoGoSetCanvas binds a canvas by element id and optional cell scale.
 func jsNanoGoSetCanvas(this js.Value, args []js.Value) any {
 	if len(args) < 1 {
@@ -955,6 +983,7 @@ func main() {
 	js.Global().Set("nanoGoDebugStepOut", js.FuncOf(jsNanoGoDebugStepOut))
 	js.Global().Set("nanoGoDebugPause", js.FuncOf(jsNanoGoDebugPause))
 	js.Global().Set("nanoGoDebugSetBreakpoints", js.FuncOf(jsNanoGoDebugSetBreakpoints))
+	js.Global().Set("nanoGoDebugSetVariable", js.FuncOf(jsNanoGoDebugSetVariable))
 	js.Global().Set("nanoGoDebugStop", js.FuncOf(jsNanoGoDebugStop))
 
 	// Signal readiness to the host (worker or main thread). The worker

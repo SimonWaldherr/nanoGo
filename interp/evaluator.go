@@ -1742,12 +1742,33 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		return controlFlow{}, nil
 
 	case *ast.ReturnStmt:
+		// namedResult is "" for a function with zero or 2+ named results —
+		// see callFrame.namedResult — in which case this behaves exactly
+		// as before.
+		namedResult := ""
+		if env.frame != nil {
+			namedResult = env.frame.namedResult
+		}
 		if len(st.Results) == 0 {
-			return controlFlow{kind: controlReturn, val: nil}, nil
+			// A naked return with a named result yields whatever that
+			// variable currently holds (Go: `return` is `return name`).
+			var v any
+			if namedResult != "" {
+				v, _ = vm.get(namedResult, env)
+			}
+			return controlFlow{kind: controlReturn, val: v}, nil
 		}
 		v, err := vm.evalExpr(st.Results[0], env)
 		if err != nil {
 			return controlFlow{}, err
+		}
+		if namedResult != "" {
+			// `return expr` with a named result is `name = expr; return`:
+			// the assignment matters even though c.val already carries expr's
+			// value, because a defer running afterward (callFunction's
+			// closure) re-reads name as the final word on what's returned,
+			// and would otherwise clobber this with name's stale prior value.
+			vm.set(namedResult, v, env)
 		}
 		return controlFlow{kind: controlReturn, val: v}, nil
 
@@ -2327,6 +2348,18 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 		frameDepth = env.frame.depth + 1
 	}
 	frame := &callFrame{funcName: fn.Name, caller: env.frame, depth: frameDepth}
+	if len(fn.Results) == 1 {
+		frame.namedResult = fn.Results[0]
+	}
+	// local is declared here (rather than := further down, where it's
+	// actually assigned) so the deferred closure below — which runs before
+	// local's own declaration point is reached on some paths (e.g. the
+	// native-function early return) but always after it's been assigned on
+	// the user-defined-function path — can read it to re-fetch a named
+	// result's final value. A closure may only reference a variable whose
+	// declaration lexically precedes it, hence declaring the (typed nil)
+	// var up here instead of a := below.
+	var local *Env
 	defer func() {
 		// A guest panic() never reaches here as a native panic — it
 		// propagates as a *panicError return value instead (see below),
@@ -2356,6 +2389,19 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 		if frame.panicking {
 			err = &panicError{value: frame.panicVal}
 		}
+		// A single named result is the final authority on what this call
+		// returns, re-read here (after every defer, including one that
+		// calls recover()) rather than trusting whatever value flowed
+		// through the return statement itself — matching Go, where a
+		// deferred function can still change a named result after the
+		// return expression already ran. local is nil on the native-
+		// function path (no named-result concept there) and get() on a nil
+		// Env would be invalid, hence the guard.
+		if local != nil && frame.namedResult != "" {
+			if v, ok := vm.get(frame.namedResult, local); ok {
+				ret = v
+			}
+		}
 		message := "ok"
 		if err != nil {
 			message = err.Error()
@@ -2377,7 +2423,7 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 	}
 
 	// User-defined function
-	local := NewEnv(fn.Env)
+	local = NewEnv(fn.Env)
 	local.frame = frame
 	argIndex := 0
 	if fn.RecvName != "" && recv != nil {
@@ -2427,6 +2473,14 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 			}
 			argIndex++
 		}
+	}
+	// Named results start out nil — nanoGo has no per-type zero-value
+	// tracking for them (consistent with a missing argument also
+	// defaulting to nil above, rather than 0/""/false) — so they exist as
+	// ordinary locals a naked `return` or a deferred function can read and
+	// write by name.
+	for _, name := range fn.Results {
+		vm.declare(name, nil, local)
 	}
 
 	c, bodyErr := vm.execStmtList(fn.Body.(*ast.BlockStmt).List, local)

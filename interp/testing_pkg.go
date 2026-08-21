@@ -12,9 +12,12 @@ import (
 // it crosses callFunction's return like any other native error, it unwinds
 // the whole guest call stack up to whoever invoked the test function (see
 // interp/loader's RunPackageTests) — no new control-flow primitive needed.
-// nanoGo has no guest-visible recover() builtin (only Go's own recover() is
-// used internally, to convert *panicError back into a plain error), so a
-// guest defer cannot accidentally intercept it.
+// nanoGo does have a guest-visible recover() builtin (interp/evaluator.go),
+// but it cannot intercept this: recover() only fires when callFrame.panicking
+// is set, and that only ever happens for a *panicError (a guest panic()) or
+// an unexpected native Go panic — never for a plain sentinel error like this
+// one returned normally, so a guest defer genuinely cannot catch it. This
+// mirrors real Go, where recover() cannot stop runtime.Goexit() either.
 var errTestFatal = errors.New("nanogo: testing.T.Fatalf")
 
 // errTestSkip mirrors testing.T.Skipf's Goexit behaviour. It is deliberately

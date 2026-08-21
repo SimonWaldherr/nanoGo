@@ -144,6 +144,51 @@ func TestAdd(t *testing.T) {
 	}
 }
 
+// TestRecoverCannotInterceptTestFatal locks in an invariant recover()
+// depends on (see interp/testing_pkg.go's errTestFatal comment): t.Fatalf
+// unwinds the whole guest call stack the same way real Go's runtime.Goexit
+// does, and a guest defer's recover() call must not be able to stop that —
+// if it could, a test wrapping its own body in a defer+recover (a
+// reasonable thing to write, unaware of nanoGo's internals) would silently
+// keep running past a fatal failure instead of stopping.
+func TestRecoverCannotInterceptTestFatal(t *testing.T) {
+	vm, _ := newLoaderTestVM()
+	vfs := vm.VFS
+	writeLoaderFile(t, vfs, "/fatalrecover/go.mod", "module example.com/fatalrecover\n")
+	writeLoaderFile(t, vfs, "/fatalrecover/main.go", "package fatalrecover\n")
+	writeLoaderFile(t, vfs, "/fatalrecover/main_test.go", `package fatalrecover
+
+import "testing"
+
+func TestFatalThenRecover(t *testing.T) {
+	defer func() {
+		recover()
+	}()
+	t.Fatalf("boom")
+	t.Error("must not run")
+}
+`)
+
+	prog, err := LoadModule(vfs, "/fatalrecover", Options{})
+	if err != nil {
+		t.Fatalf("LoadModule: %v", err)
+	}
+	results, err := RunPackageTests(context.Background(), vm, prog, "fatalrecover")
+	if err != nil {
+		t.Fatalf("RunPackageTests: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d: %+v", len(results), results)
+	}
+	r := results[0]
+	if r.Pass || r.Category != CategoryWrongValue {
+		t.Errorf("expected a failed, non-recovered test; got %+v", r)
+	}
+	if len(r.Messages) != 1 || r.Messages[0] != "boom" {
+		t.Errorf("expected only Fatalf's own message (the code after it must never run); got %+v", r.Messages)
+	}
+}
+
 func TestRunPackageTestsSupportsCommonTestingMethodsAndFilter(t *testing.T) {
 	vm, _ := newLoaderTestVM()
 	vfs := vm.VFS

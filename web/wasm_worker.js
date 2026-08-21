@@ -136,10 +136,23 @@ self.onmessage = async function (ev) {
   }
   if (msg && msg.type === 'debug-command') {
     // Each command directly calls the matching WASM export. These calls are
-    // synchronous but cheap (a map lookup and a channel send) — the guest
-    // goroutine that's actually parked mid-statement resumes independently,
-    // via the Go scheduler, once the resume channel it's blocked on receives
-    // a value.
+    // synchronous but cheap (a map lookup and a channel send, or — for
+    // set-variable — one expression evaluation) — the guest goroutine that's
+    // actually parked mid-statement resumes independently, via the Go
+    // scheduler, once the resume channel it's blocked on receives a value.
+    if (msg.command === 'set-variable') {
+      if (typeof self.nanoGoDebugSetVariable !== 'function') {
+        self.postMessage({ type: 'debug-command-result', command: msg.command, ok: false, error: 'live debugging is not available in this WASM build' });
+        return;
+      }
+      try {
+        const result = self.nanoGoDebugSetVariable(msg.token || 0, String(msg.name || ''), String(msg.value || ''));
+        self.postMessage({ type: 'debug-command-result', command: msg.command, ok: !!(result && result.ok), value: result && result.value, error: result && result.error, name: msg.name });
+      } catch (err) {
+        self.postMessage({ type: 'debug-command-result', command: msg.command, ok: false, error: String(err), name: msg.name });
+      }
+      return;
+    }
     const fn = {
       continue: self.nanoGoDebugContinue,
       'step-into': self.nanoGoDebugStepInto,

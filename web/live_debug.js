@@ -31,6 +31,11 @@
   // cleared as soon as a resume command is sent so a stray double-click
   // can't resume the same pause twice.
   let currentToken = null;
+  // stopping suppresses the "Error: nanogo: execution killed" message that
+  // a user-initiated Stop naturally produces (Stop kills the interpreter,
+  // which is exactly what should happen) — the user asked for this, so the
+  // final status should read "Stopped", not "Error: ...".
+  let stopping = false;
 
   function setButtons(mode) {
     // mode is 'idle' (nothing running), 'running' (free-running, only Pause
@@ -42,8 +47,47 @@
     stopBtn.disabled = mode === 'idle';
   }
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  // renderVarRow builds one editable row: name, a text input pre-filled
+  // with the current value (editing it and pressing Enter or "Set" sends a
+  // set-variable command for the pause currently displayed), and a spot for
+  // an inline error if that assignment is rejected (e.g. an undefined name,
+  // which can't happen from this UI, or a value expression that fails to
+  // evaluate, e.g. a syntax error or a type mismatch).
+  function renderVarRow(v) {
+    const tr = document.createElement('tr');
+    tr.dataset.varName = v.name;
+    const nameTd = document.createElement('td');
+    nameTd.textContent = v.name;
+    nameTd.title = v.type || '';
+    const valueTd = document.createElement('td');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'live-debug-var-input';
+    input.value = v.value;
+    input.title = v.type || '';
+    input.spellcheck = false;
+    const setBtn = document.createElement('button');
+    setBtn.type = 'button';
+    setBtn.className = 'mini-btn';
+    setBtn.textContent = 'Set';
+    const msg = document.createElement('span');
+    msg.className = 'live-debug-var-msg';
+    const submit = () => sendSetVariable(v.name, input.value, msg);
+    setBtn.addEventListener('click', submit);
+    input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') submit(); });
+    valueTd.appendChild(input);
+    valueTd.appendChild(setBtn);
+    valueTd.appendChild(msg);
+    tr.appendChild(nameTd);
+    tr.appendChild(valueTd);
+    return tr;
+  }
+
+  function sendSetVariable(name, value, msgEl) {
+    if (currentToken == null || !api()) return;
+    msgEl.textContent = '';
+    msgEl.classList.remove('live-debug-var-error');
+    api().debugCommand('set-variable', { token: currentToken, name: name, value: value });
   }
 
   function renderPause(info) {
@@ -54,10 +98,20 @@
     statusEl.textContent = (info.reason || 'paused') + ' in ' + (info.function || 'program') + where;
     if (stackEl) stackEl.textContent = info.stack || '(no active call)';
     if (varsBodyEl) {
-      const rows = (info.vars || []).map((v) =>
-        '<tr><td>' + escapeHtml(v.name) + '</td><td title="' + escapeHtml(v.type || '') + '">' + escapeHtml(v.value) + '</td></tr>'
-      );
-      varsBodyEl.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="2"><em>no local variables</em></td></tr>';
+      varsBodyEl.innerHTML = '';
+      const vars = info.vars || [];
+      if (!vars.length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 2;
+        const em = document.createElement('em');
+        em.textContent = 'no local variables';
+        td.appendChild(em);
+        tr.appendChild(td);
+        varsBodyEl.appendChild(tr);
+      } else {
+        vars.forEach((v) => varsBodyEl.appendChild(renderVarRow(v)));
+      }
     }
     if (loc.line && api() && typeof api().jumpToSource === 'function') {
       api().jumpToSource(loc.line, loc.column || 1);
@@ -90,6 +144,7 @@
   });
   pauseBtn.addEventListener('click', () => { if (api()) api().debugCommand('pause'); });
   stopBtn.addEventListener('click', () => {
+    stopping = true;
     if (api()) api().debugCommand('stop');
     reset('Stopped');
   });
@@ -98,9 +153,30 @@
   stepOverBtn.addEventListener('click', () => resumeWith('step-over'));
   stepOutBtn.addEventListener('click', () => resumeWith('step-out'));
 
+  document.addEventListener('nanogo:debug-command-result', (ev) => {
+    const m = ev.detail || {};
+    if (m.command !== 'set-variable' || !varsBodyEl) return;
+    const row = varsBodyEl.querySelector('tr[data-var-name="' + (m.name || '').replace(/"/g, '') + '"]');
+    if (!row) return;
+    const input = row.querySelector('.live-debug-var-input');
+    const msg = row.querySelector('.live-debug-var-msg');
+    if (m.ok) {
+      if (input && m.value != null) input.value = m.value;
+      if (msg) { msg.textContent = '✓'; msg.classList.remove('live-debug-var-error'); }
+    } else if (msg) {
+      msg.textContent = m.error || 'failed';
+      msg.classList.add('live-debug-var-error');
+    }
+  });
+
   document.addEventListener('nanogo:debug-pause', (ev) => renderPause(ev.detail));
   document.addEventListener('nanogo:debug-done', (ev) => {
     const result = ev.detail || {};
+    if (stopping) {
+      stopping = false;
+      reset('Stopped');
+      return;
+    }
     reset(result.error ? 'Error: ' + result.error : 'Finished');
   });
 

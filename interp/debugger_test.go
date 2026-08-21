@@ -240,6 +240,72 @@ func main() {
 	}
 }
 
+func TestDebugSetVariableChangesObservedValue(t *testing.T) {
+	dc := NewDebugController()
+	dc.SetBreakpoints([]int{6})
+	pauses, done, _ := runDebugged(t, dc, `
+package main
+import "fmt"
+func main() {
+	for i := 0; i < 3; i++ {
+		fmt.Println(i)
+	}
+	fmt.Println("done")
+}
+`)
+	first := mustPause(t, pauses)
+	if v, ok := varValue(first.Vars, "i"); !ok || v != "0" {
+		t.Fatalf("i = %q (ok=%v), want 0", v, ok)
+	}
+	display, err := dc.SetVariable(first.Token, "i", "9")
+	if err != nil {
+		t.Fatalf("SetVariable: %v", err)
+	}
+	if display != "9" {
+		t.Fatalf("SetVariable returned %q, want 9", display)
+	}
+	if !dc.Continue(first.Token) {
+		t.Fatal("Continue reported not pending")
+	}
+	// The loop's post statement (i++) now runs against the edited value, so
+	// the very next breakpoint hit — if any — should observe i == 10, and
+	// the loop condition (i < 3) should end the loop instead of looping
+	// twice more.
+	select {
+	case p := <-pauses:
+		t.Fatalf("unexpected extra pause after editing the loop counter past its bound: %+v", p)
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Run to finish")
+	}
+}
+
+func TestDebugSetVariableRejectsUnknownName(t *testing.T) {
+	dc := NewDebugController()
+	dc.SetBreakpoints([]int{5})
+	pauses, done, _ := runDebugged(t, dc, `
+package main
+import "fmt"
+func main() {
+	i := 0
+	fmt.Println(i)
+}
+`)
+	first := mustPause(t, pauses)
+	if _, err := dc.SetVariable(first.Token, "doesNotExist", "1"); err == nil {
+		t.Fatal("expected an error for an undefined variable")
+	}
+	if !dc.Continue(first.Token) {
+		t.Fatal("Continue reported not pending")
+	}
+	if err := mustFinish(t, done); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+}
+
 func TestDebugDetachResumesAndStopsPausing(t *testing.T) {
 	dc := NewDebugController()
 	dc.SetBreakpoints([]int{6})

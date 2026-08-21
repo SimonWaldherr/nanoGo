@@ -102,11 +102,24 @@ type DebugController struct {
 	baseFrame atomic.Pointer[callFrame]
 
 	pendingMu sync.Mutex
-	pending   map[PauseToken]chan StepMode
+	pending   map[PauseToken]*pendingPause
 	nextToken atomic.Uint64
 
 	onPauseMu sync.RWMutex
 	onPause   func(DebugPauseInfo)
+}
+
+// pendingPause is what checkpoint registers for one paused goroutine: the
+// channel it blocks on, plus enough to let a host inspect or mutate that
+// exact pause's scope (via SetVariable) while it waits. env is only ever
+// touched by the paused goroutine itself (once resumed) and by SetVariable
+// calls that arrive before then — pendingMu's Lock/Unlock around every
+// lookup and removal of a token's entry is what makes those safe to
+// interleave with the resume, not any lock on env itself.
+type pendingPause struct {
+	ch  chan StepMode
+	vm  *Interpreter
+	env *Env
 }
 
 // NewDebugController creates a debug session with no breakpoints, in free
@@ -115,7 +128,7 @@ type DebugController struct {
 func NewDebugController() *DebugController {
 	return &DebugController{
 		breakpoints: make(map[int]debugBreakpoint),
-		pending:     make(map[PauseToken]chan StepMode),
+		pending:     make(map[PauseToken]*pendingPause),
 	}
 }
 
@@ -225,16 +238,16 @@ func (dc *DebugController) Detach() {
 	dc.detached.Store(true)
 	dc.pendingMu.Lock()
 	pending := dc.pending
-	dc.pending = make(map[PauseToken]chan StepMode)
+	dc.pending = make(map[PauseToken]*pendingPause)
 	dc.pendingMu.Unlock()
-	for _, ch := range pending {
-		ch <- DebugRun
+	for _, p := range pending {
+		p.ch <- DebugRun
 	}
 }
 
 func (dc *DebugController) resume(token PauseToken, mode StepMode) bool {
 	dc.pendingMu.Lock()
-	ch, ok := dc.pending[token]
+	p, ok := dc.pending[token]
 	if ok {
 		delete(dc.pending, token)
 	}
@@ -242,8 +255,41 @@ func (dc *DebugController) resume(token PauseToken, mode StepMode) bool {
 	if !ok {
 		return false
 	}
-	ch <- mode
+	p.ch <- mode
 	return true
+}
+
+// SetVariable assigns the value of expr — a single Go expression, evaluated
+// in the paused statement's own scope — to name, in the goroutine paused at
+// token. It is safe to call while that goroutine is parked in checkpoint()
+// waiting to be resumed (see pendingPause's doc comment for why), but has no
+// effect once it has resumed: token stops being valid the moment Continue/
+// StepInto/StepOver/StepOut/Detach removes it from the pending set, and
+// SetVariable then reports "not paused" like any other stale token. It
+// reports an error if name isn't an existing binding visible from that
+// scope — this only edits variables, it does not declare new ones — or if
+// expr fails to parse or evaluate. On success it returns the same
+// capability-safe display string a VariableSnapshot would show.
+func (dc *DebugController) SetVariable(token PauseToken, name, expr string) (string, error) {
+	dc.pendingMu.Lock()
+	p, ok := dc.pending[token]
+	dc.pendingMu.Unlock()
+	if !ok {
+		return "", NewRuntimeError("nanogo: no goroutine is paused at that token")
+	}
+	if _, found := p.vm.get(name, p.env); !found {
+		return "", NewRuntimeError("nanogo: undefined variable " + name)
+	}
+	valueExpr, err := parser.ParseExpr(expr)
+	if err != nil {
+		return "", fmt.Errorf("nanogo: invalid value expression: %w", err)
+	}
+	value, err := p.vm.evalExpr(valueExpr, p.env)
+	if err != nil {
+		return "", err
+	}
+	p.vm.set(name, value, p.env)
+	return debugValue(value), nil
 }
 
 // Continue resumes the goroutine paused at token in free-run mode. It
@@ -353,9 +399,9 @@ func (dc *DebugController) checkpoint(vm *Interpreter, s ast.Stmt, env *Env) err
 
 	token := PauseToken(dc.nextToken.Add(1))
 	info.Token = token
-	ch := make(chan StepMode, 1)
+	p := &pendingPause{ch: make(chan StepMode, 1), vm: vm, env: env}
 	dc.pendingMu.Lock()
-	dc.pending[token] = ch
+	dc.pending[token] = p
 	dc.pendingMu.Unlock()
 
 	dc.onPauseMu.RLock()
@@ -366,7 +412,7 @@ func (dc *DebugController) checkpoint(vm *Interpreter, s ast.Stmt, env *Env) err
 	}
 
 	select {
-	case mode := <-ch:
+	case mode := <-p.ch:
 		dc.mode.Store(int32(mode))
 		if mode == DebugRun {
 			dc.baseFrame.Store(nil)

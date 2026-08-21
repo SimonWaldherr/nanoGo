@@ -236,6 +236,70 @@ Loop:
 	}
 }
 
+func TestNamedResultRecoverSetsReturnValue(t *testing.T) {
+	// The idiomatic Go pattern this whole recover() feature exists to
+	// support: a deferred recover() assigning a named result must actually
+	// change what the caller receives, not just a variable local to the
+	// deferred closure itself.
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func safeDiv(a, b int) (result int) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = -1
+		}
+	}()
+	if b == 0 {
+		panic("div by zero")
+	}
+	return a / b
+}
+func main() {
+	fmt.Println(safeDiv(10, 0))
+	fmt.Println(safeDiv(10, 2))
+}
+`)
+	want := "-1\n5\n"
+	if out != want {
+		t.Errorf("want %q, got %q", want, out)
+	}
+}
+
+func TestNamedResultNakedReturn(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func f() (n int) {
+	n = 5
+	return
+}
+func main() { fmt.Println(f()) }
+`)
+	want := "5\n"
+	if out != want {
+		t.Errorf("want %q, got %q", want, out)
+	}
+}
+
+func TestNamedResultDeferMutatesWithoutPanic(t *testing.T) {
+	// A deferred function can change a named result even when nothing
+	// panicked at all — recover() is one way to reach this, not the only one.
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func f() (n int) {
+	defer func() { n = n * 2 }()
+	return 5
+}
+func main() { fmt.Println(f()) }
+`)
+	want := "10\n"
+	if out != want {
+		t.Errorf("want %q, got %q", want, out)
+	}
+}
+
 func TestRecoverStopsPanic(t *testing.T) {
 	out := runAndCapture(t, `
 package main

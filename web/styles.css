@@ -721,11 +721,13 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .lab-live-debug-stack, .lab-live-debug-vars { min-width: 0; }
 .lab-live-debug-stack strong, .lab-live-debug-vars strong { display: block; margin-bottom: 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .03em; color: var(--text-muted); }
 .lab-live-debug-stack pre { margin: 0; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--code-bg); font-family: var(--mono); font-size: 12px; max-height: 160px; overflow: auto; white-space: pre-wrap; }
-#liveDebugVarsTable { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+#liveDebugVarsTable { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; display: block; max-height: 160px; overflow: auto; }
 #liveDebugVarsTable th, #liveDebugVarsTable td { padding: 3px 6px; border-bottom: 1px solid var(--border); text-align: left; }
-#liveDebugVarsTable td:last-child { color: var(--text-muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#liveDebugVarsTable { display: block; max-height: 160px; overflow: auto; }
 #liveDebugVarsTable thead, #liveDebugVarsTable tbody { display: table; width: 100%; table-layout: fixed; }
+#liveDebugVarsTable td:last-child { display: flex; align-items: center; gap: 4px; }
+.live-debug-var-input { flex: 1; min-width: 0; padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); font-family: var(--mono); font-size: 12px; }
+.live-debug-var-msg { flex-shrink: 0; font-size: 11px; color: var(--success, var(--accent)); }
+.live-debug-var-msg.live-debug-var-error { color: var(--error); }
 @media (max-width: 640px) {
   .lab-live-debug-info { grid-template-columns: 1fr; }
 }
