@@ -713,6 +713,22 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 .lab-graph .node:hover rect, .lab-graph .node:focus rect { stroke-width: 3px; }
 .lab-graph .node.lab-node-active rect, .lab-graph .node.lab-node-active polygon { stroke: var(--warning) !important; stroke-width: 4px !important; filter: drop-shadow(0 0 6px color-mix(in srgb, var(--warning) 70%, transparent)); }
 .lab-details { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); border-radius: var(--radius-card); background: color-mix(in srgb, var(--accent) 7%, var(--surface-raised)); }
+.lab-live-debug { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--error) 35%, var(--border)); border-radius: var(--radius-card); background: color-mix(in srgb, var(--error) 5%, var(--surface-raised)); }
+.lab-live-debug .lab-toolbar { justify-content: flex-start; }
+#liveDebugStartBtn { border-color: color-mix(in srgb, var(--error) 45%, var(--border)); color: var(--error); }
+#liveDebugStatus { margin: 0; }
+.lab-live-debug-info { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(200px, 2fr); gap: 12px; }
+.lab-live-debug-stack, .lab-live-debug-vars { min-width: 0; }
+.lab-live-debug-stack strong, .lab-live-debug-vars strong { display: block; margin-bottom: 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .03em; color: var(--text-muted); }
+.lab-live-debug-stack pre { margin: 0; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--code-bg); font-family: var(--mono); font-size: 12px; max-height: 160px; overflow: auto; white-space: pre-wrap; }
+#liveDebugVarsTable { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+#liveDebugVarsTable th, #liveDebugVarsTable td { padding: 3px 6px; border-bottom: 1px solid var(--border); text-align: left; }
+#liveDebugVarsTable td:last-child { color: var(--text-muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#liveDebugVarsTable { display: block; max-height: 160px; overflow: auto; }
+#liveDebugVarsTable thead, #liveDebugVarsTable tbody { display: table; width: 100%; table-layout: fixed; }
+@media (max-width: 640px) {
+  .lab-live-debug-info { grid-template-columns: 1fr; }
+}
 .lab-detail-title { color: var(--text); font-family: var(--mono); font-size: 13px; font-weight: 750; }
 .lab-detail-meta { margin-top: 3px; color: var(--text-muted); font-size: 11px; }
 .lab-detail-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 9px; }

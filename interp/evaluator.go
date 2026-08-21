@@ -156,6 +156,7 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 					}
 				}
 			}
+			fn.Results = namedResults(d.Type.Results)
 			// Method receiver?
 			if d.Recv != nil && len(d.Recv.List) > 0 {
 				rcv := d.Recv.List[0]
@@ -920,6 +921,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 				}
 			}
 		}
+		fn.Results = namedResults(ex.Type.Results)
 		return fn, nil
 
 	default:
@@ -1105,9 +1107,13 @@ type controlFlow struct {
 // blocks: a nested block's own declarations are scoped to itself regardless
 // of whether this outer block forked, by the same recursive application of
 // this rule when that inner block is evaluated.
+//
+// A label doesn't change where its statement declares into — `Loop: x :=
+// i` still declares x into this block, not some scope of Loop's own (labels
+// aren't scopes) — so it unwraps through unwrapLabel first.
 func blockNeedsOwnScope(block *ast.BlockStmt) bool {
 	for _, s := range block.List {
-		switch s := s.(type) {
+		switch s := unwrapLabel(s).(type) {
 		case *ast.AssignStmt:
 			if s.Tok == token.DEFINE {
 				return true
@@ -1117,6 +1123,19 @@ func blockNeedsOwnScope(block *ast.BlockStmt) bool {
 		}
 	}
 	return false
+}
+
+// unwrapLabel peels off any (possibly stacked) *ast.LabeledStmt wrappers
+// and returns the real statement underneath, since a label changes nothing
+// about what its statement does or where it declares.
+func unwrapLabel(s ast.Stmt) ast.Stmt {
+	for {
+		ls, ok := s.(*ast.LabeledStmt)
+		if !ok {
+			return s
+		}
+		s = ls.Stmt
+	}
 }
 
 // execStmtList runs stmts in order within env and is the single place that
@@ -1172,8 +1191,8 @@ func (vm *Interpreter) execStmtList(stmts []ast.Stmt, env *Env) (controlFlow, er
 // whether any of them do.
 func declaredNames(stmts []ast.Stmt) []string {
 	var names []string
-	for _, s := range stmts {
-		switch s := s.(type) {
+	for _, raw := range stmts {
+		switch s := unwrapLabel(raw).(type) {
 		case *ast.AssignStmt:
 			if s.Tok == token.DEFINE {
 				for _, l := range s.Lhs {

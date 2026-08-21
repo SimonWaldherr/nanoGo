@@ -67,6 +67,14 @@ type Function struct {
 
 	RecvName string // method receiver var name
 	RecvType string // method receiver type (without "*")
+
+	// Results names this function's named result parameters, e.g. ["result"]
+	// for `func f() (result int)`, or nil for unnamed/no results (Go requires
+	// all-or-nothing naming, so a partial list never occurs). callFunction
+	// declares each of these as a local before running the body; only when
+	// there is exactly one does it also feed back into the function's
+	// actual return value (see callFrame.namedResult).
+	Results []string
 }
 
 // StructVal, SliceVal, MapVal, ChannelVal are dynamic runtime containers.

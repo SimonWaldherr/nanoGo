@@ -659,6 +659,19 @@ type callFrame struct {
 	// decide step-over/into/out, but depth is cheap to keep around for
 	// display in DebugPauseInfo/stack traces without re-walking the chain.
 	depth int
+	// namedResult is the current function's single named result variable
+	// (see Function.Results), or "" if it has none — nanoGo's return value
+	// model only ever carries one logical value, so a function with two or
+	// more named results still gets them declared as ordinary locals (so
+	// referencing them by name works) but does not get this wired up: only
+	// the single-named-result case feeds back into what the function
+	// actually returns. Set once by callFunction; ReturnStmt reads it via
+	// env.frame to know which variable a naked `return` should read, and
+	// to make an explicit `return expr` also update it (so a later defer —
+	// notably one that calls recover() — can still change the value the
+	// caller ultimately receives, exactly as Go's own named-result +
+	// deferred-mutation semantics work).
+	namedResult string
 }
 
 // collectLocalVars gathers every binding visible from env, innermost scope

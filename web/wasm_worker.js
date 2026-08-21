@@ -122,6 +122,45 @@ self.onmessage = async function (ev) {
     }
     return;
   }
+  if (msg && msg.type === 'debug-start') {
+    if (!goReady || typeof self.nanoGoDebugStart !== 'function') {
+      self.postMessage({ type: 'debug-done', error: 'live debugging is not available in this WASM build' });
+      return;
+    }
+    try {
+      self.nanoGoDebugStart(msg.source || '', msg.breakpoints || []);
+    } catch (err) {
+      self.postMessage({ type: 'debug-done', error: String(err) });
+    }
+    return;
+  }
+  if (msg && msg.type === 'debug-command') {
+    // Each command directly calls the matching WASM export. These calls are
+    // synchronous but cheap (a map lookup and a channel send) — the guest
+    // goroutine that's actually parked mid-statement resumes independently,
+    // via the Go scheduler, once the resume channel it's blocked on receives
+    // a value.
+    const fn = {
+      continue: self.nanoGoDebugContinue,
+      'step-into': self.nanoGoDebugStepInto,
+      'step-over': self.nanoGoDebugStepOver,
+      'step-out': self.nanoGoDebugStepOut,
+      pause: self.nanoGoDebugPause,
+      'set-breakpoints': self.nanoGoDebugSetBreakpoints,
+      stop: self.nanoGoDebugStop
+    }[msg.command];
+    if (typeof fn !== 'function') {
+      self.postMessage({ type: 'debug-command-result', command: msg.command, ok: false, error: 'unknown or unavailable debug command' });
+      return;
+    }
+    try {
+      const ok = msg.command === 'set-breakpoints' ? fn(msg.breakpoints || []) : fn(msg.token || 0);
+      self.postMessage({ type: 'debug-command-result', command: msg.command, ok: !!ok });
+    } catch (err) {
+      self.postMessage({ type: 'debug-command-result', command: msg.command, ok: false, error: String(err) });
+    }
+    return;
+  }
   if (msg && msg.type === 'workspace-run') {
     if (!goReady || typeof self.nanoGoRunWorkspace !== 'function') {
       self.postMessage({ type: 'workspace-done', error: 'multi-file workspace execution is not available in this WASM build' });

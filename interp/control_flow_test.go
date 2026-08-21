@@ -46,6 +46,77 @@ loop:
 	}
 }
 
+func TestGotoRestartAllowsRedeclaration(t *testing.T) {
+	// A := between a label and the goto that jumps back to it must be
+	// allowed to redeclare on each pass, exactly as it would if the
+	// restarted region got a fresh scope per iteration (like a real loop
+	// body does).
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	i := 0
+Loop:
+	x := i
+	i++
+	if i < 3 {
+		goto Loop
+	}
+	fmt.Println("final x:", x)
+}
+`)
+	want := "final x: 2\n"
+	if out != want {
+		t.Errorf("want %q, got %q", want, out)
+	}
+}
+
+func TestDanglingLabelBeforeClosingBrace(t *testing.T) {
+	// `done:` with nothing after it parses as a LabeledStmt wrapping an
+	// EmptyStmt — the common goto-to-exit idiom's target.
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	for i := 0; i < 3; i++ {
+		if i == 1 {
+			goto done
+		}
+		fmt.Println(i)
+	}
+done:
+}
+`)
+	want := "0\n"
+	if out != want {
+		t.Errorf("want %q, got %q", want, out)
+	}
+}
+
+func TestLabeledDeclarationInsideLoopBody(t *testing.T) {
+	// A label on a := inside a for-loop body (unused as a goto target here)
+	// must not stop that loop body from getting a fresh scope per
+	// iteration — the label itself carries no scoping meaning.
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	for i := 0; i < 3; i++ {
+	Retry:
+		y := i * 2
+		if y < 0 {
+			goto Retry
+		}
+		fmt.Println(y)
+	}
+}
+`)
+	want := "0\n2\n4\n"
+	if out != want {
+		t.Errorf("want %q, got %q", want, out)
+	}
+}
+
 func TestGotoOutOfNestedFor(t *testing.T) {
 	out := runAndCapture(t, `
 package main

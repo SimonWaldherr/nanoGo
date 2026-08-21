@@ -166,7 +166,26 @@ func (ps *PackageScope) BuildFunction(d *ast.FuncDecl) *Function {
 			}
 		}
 	}
+	fn.Results = namedResults(d.Type.Results)
 	return fn
+}
+
+// namedResults returns the result parameter names declared in results, or
+// nil if they're unnamed — Go requires all-or-nothing naming, so any Field
+// with no Names means none of them are named.
+func namedResults(results *ast.FieldList) []string {
+	if results == nil {
+		return nil
+	}
+	var names []string
+	for _, f := range results.List {
+		for _, n := range f.Names {
+			if n.Name != "_" {
+				names = append(names, n.Name)
+			}
+		}
+	}
+	return names
 }
 
 // EvalDecls performs phase 2: evaluates package-level const/var initializers
