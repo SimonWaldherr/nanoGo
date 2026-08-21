@@ -107,6 +107,9 @@ func (ps *PackageScope) CollectDecls(file *ast.File, fset *token.FileSet) error 
 					}
 					vm.types[td.Name] = td
 					ps.declaredTypes[td.Name] = true
+				case *ast.InterfaceType:
+					vm.types[ts.Name.Name] = &TypeDef{Name: ts.Name.Name, Kind: "interface", InterfaceMethods: interfaceMethodNames(tt)}
+					ps.declaredTypes[ts.Name.Name] = true
 				default:
 					underlying := typeString(tt)
 					if isBuiltinType(underlying) {

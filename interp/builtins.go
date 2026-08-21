@@ -84,6 +84,14 @@ func zeroValue(typ string) any {
 		return ""
 	case "struct{}", "nil":
 		return nil
+	case "any", "interface{}", "error":
+		// The zero value of any interface type — including the predeclared
+		// `any` and `error` — is nil, never a struct. Without this case
+		// these fell through to the struct fallback below (treating the
+		// unrecognized name "any"/"error" as if it were a user struct
+		// type), which meant e.g. `var err error` started out as a
+		// non-nil placeholder instead of nil.
+		return nil
 	default:
 		if strings.HasPrefix(typ, "*") {
 			return (*StructVal)(nil)
@@ -106,8 +114,15 @@ func zeroValue(typ string) any {
 // Their dynamic value is the underlying scalar, while the source retains the
 // named type for declarations and conversions.
 func (vm *Interpreter) zeroValueForType(typ string) any {
-	if td := vm.types[typ]; td != nil && td.Kind == "alias" {
-		return zeroValue(td.Underlying)
+	if td := vm.types[typ]; td != nil {
+		if td.Kind == "alias" {
+			return zeroValue(td.Underlying)
+		}
+		if td.Kind == "interface" {
+			// A named interface's zero value is nil, same as "any"/"error"
+			// below — there is no implementation to default-construct.
+			return nil
+		}
 	}
 	return zeroValue(typ)
 }

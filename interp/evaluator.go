@@ -101,6 +101,12 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 							}
 						}
 						vm.types[td.Name] = td
+					case *ast.InterfaceType:
+						// No implementation to store here — see
+						// TypeDef.InterfaceMethods — so a type assertion
+						// against this name checks a candidate value's own
+						// TypeDef.Methods instead (evalTypeAssert).
+						vm.types[ts.Name.Name] = &TypeDef{Name: ts.Name.Name, Kind: "interface", InterfaceMethods: interfaceMethodNames(tt)}
 					default:
 						underlying := typeString(tt)
 						if isBuiltinType(underlying) {
@@ -513,6 +519,21 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 					return nil, err
 				}
 				return nil, &panicError{value: v}
+			case "recover":
+				// Matches Go's "recover must be called directly by a
+				// deferred function": env.frame.caller is only the
+				// panicking frame when THIS call is itself running as one
+				// of that frame's deferred calls (see callFunction and the
+				// DeferStmt case) — a helper function called from within
+				// the deferred function has its own, non-panicking caller,
+				// so recover() there correctly sees nothing to recover.
+				if cur := env.frame; cur != nil && cur.caller != nil && cur.caller.panicking {
+					v := cur.caller.panicVal
+					cur.caller.panicking = false
+					cur.caller.panicVal = nil
+					return v, nil
+				}
+				return nil, nil
 			}
 		}
 
@@ -876,6 +897,20 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 	case *ast.ParenExpr:
 		return vm.evalExpr(ex.X, env)
 
+	case *ast.TypeAssertExpr:
+		// ex.Type is nil only for the bare `x.(type)` guard of a type-switch
+		// statement, which never reaches here: nanoGo has no TypeSwitchStmt
+		// evaluator case, so that AST shape is never evaluated as a plain
+		// expression.
+		v, dyn, ok, err := vm.evalTypeAssert(ex, env)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, &panicError{value: interfaceConversionMessage(vm, ex.Type, dyn)}
+		}
+		return v, nil
+
 	case *ast.FuncLit:
 		fn := &Function{Name: "<anon>", Body: ex.Body, Env: env}
 		if ex.Type.Params != nil {
@@ -1043,11 +1078,18 @@ const (
 	controlBreak
 	controlContinue
 	controlFallthrough
+	controlGoto
 )
 
+// label carries the target of a labeled break/continue (matched against a
+// loop/switch/select's own label, see evalForStmt et al.) or, for
+// controlGoto, the name of the label being jumped to (matched against
+// *ast.LabeledStmt entries by execStmtList). It is empty for the common
+// unlabeled case.
 type controlFlow struct {
-	kind controlKind
-	val  any
+	kind  controlKind
+	val   any
+	label string
 }
 
 // blockNeedsOwnScope reports whether any top-level statement in block can
@@ -1077,6 +1119,101 @@ func blockNeedsOwnScope(block *ast.BlockStmt) bool {
 	return false
 }
 
+// execStmtList runs stmts in order within env and is the single place that
+// understands goto: Go only allows a goto to target a label in the same or
+// an enclosing block, so resolving one is a matter of each statement list
+// checking, on its own top-level statements, whether it defines the label a
+// stray controlGoto is looking for. If it does, execution restarts at that
+// label's index (this also covers backward jumps and re-entering a loop
+// from before it); if not, the controlGoto is handed to the caller
+// unchanged so an enclosing execStmtList (or callFunction, for the
+// outermost function-body list) gets the same chance.
+//
+// findLabel only runs on the goto path, so a statement list with no gotos
+// pays nothing beyond the plain sequential loop it already needed.
+func (vm *Interpreter) execStmtList(stmts []ast.Stmt, env *Env) (controlFlow, error) {
+	i := 0
+	for i < len(stmts) {
+		c, err := vm.evalStmt(stmts[i], env)
+		if err != nil {
+			return controlFlow{}, err
+		}
+		if c.kind == controlGoto {
+			if idx, ok := findLabel(stmts, c.label); ok {
+				// The restarted region (from the label to wherever
+				// execution goes next, so conservatively everything from
+				// here to the end of this list) reuses env rather than
+				// getting a fresh scope the way a real loop iteration
+				// would (see blockNeedsOwnScope) — so any name it
+				// redeclares via := or var/const must first forget its
+				// previous binding, or validateShortDecl sees it as
+				// already bound and rejects the legitimate redeclaration.
+				for _, name := range declaredNames(stmts[idx:]) {
+					vm.undeclare(name, env)
+				}
+				i = idx
+				continue
+			}
+			return c, nil
+		}
+		switch c.kind {
+		case controlReturn, controlBreak, controlContinue, controlFallthrough:
+			return c, nil
+		}
+		i++
+	}
+	return controlFlow{}, nil
+}
+
+// declaredNames collects the names that stmts would bind directly via :=
+// or var/const — the same statement kinds and scope blockNeedsOwnScope
+// inspects (top-level only; a nested block's own declarations are none of
+// this list's concern), but returning what they declare instead of just
+// whether any of them do.
+func declaredNames(stmts []ast.Stmt) []string {
+	var names []string
+	for _, s := range stmts {
+		switch s := s.(type) {
+		case *ast.AssignStmt:
+			if s.Tok == token.DEFINE {
+				for _, l := range s.Lhs {
+					if id, ok := l.(*ast.Ident); ok && id.Name != "_" {
+						names = append(names, id.Name)
+					}
+				}
+			}
+		case *ast.DeclStmt:
+			gd, ok := s.Decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, n := range vs.Names {
+					if n.Name != "_" {
+						names = append(names, n.Name)
+					}
+				}
+			}
+		}
+	}
+	return names
+}
+
+// findLabel returns the index within stmts of the *ast.LabeledStmt named
+// label, if stmts declares one directly (not inside a nested block).
+func findLabel(stmts []ast.Stmt, label string) (int, bool) {
+	for i, s := range stmts {
+		if ls, ok := s.(*ast.LabeledStmt); ok && ls.Label.Name == label {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
 // evalStmt mirrors evalExpr's location tagging (see its comment): the first
 // (innermost) statement whose evaluation fails wins the position tag as the
 // error bubbles up through enclosing statements' own evalStmt calls.
@@ -1102,6 +1239,11 @@ func (vm *Interpreter) evalStmt(s ast.Stmt, env *Env) (controlFlow, error) {
 	}
 	if p := vm.lineProfile.Load(); p != nil {
 		p.hit(vm.traceLocation(s.Pos()).Line)
+	}
+	if dc := vm.debugController.Load(); dc != nil {
+		if err := dc.checkpoint(vm, s, env); err != nil {
+			return controlFlow{}, err
+		}
 	}
 	cf, err := vm.evalStmtNode(s, env)
 	if err != nil {
@@ -1237,6 +1379,20 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 					} else {
 						rightVals = []any{v, nil}
 					}
+					goto RHS_DONE
+				}
+			}
+			// Special case: v, ok := x.(T)
+			// The comma-ok form never panics on a failed assertion — that
+			// only happens for the single-result form, handled directly in
+			// evalExprNode's *ast.TypeAssertExpr case.
+			if len(st.Lhs) == 2 && len(st.Rhs) == 1 {
+				if tae, isAssert := r.(*ast.TypeAssertExpr); isAssert {
+					v, _, ok2, err := vm.evalTypeAssert(tae, env)
+					if err != nil {
+						return controlFlow{}, err
+					}
+					rightVals = []any{v, ok2}
 					goto RHS_DONE
 				}
 			}
@@ -1466,17 +1622,29 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		if blockNeedsOwnScope(st) {
 			local = NewEnv(env)
 		}
-		for _, s2 := range st.List {
-			c, err := vm.evalStmt(s2, local)
-			if err != nil {
-				return controlFlow{}, err
-			}
-			switch c.kind {
-			case controlReturn, controlBreak, controlContinue, controlFallthrough:
-				return c, nil
-			}
+		return vm.execStmtList(st.List, local)
+
+	case *ast.LabeledStmt:
+		// Stacked labels on the same loop (`A:\nB:\nfor {...}`) are valid Go
+		// but vanishingly rare in practice: only the innermost label ends up
+		// recognized by evalForStmt et al. for break/continue in that case.
+		// goto is unaffected either way — execStmtList's findLabel matches
+		// any *ast.LabeledStmt in the list regardless of nesting depth.
+		switch inner := st.Stmt.(type) {
+		case *ast.ForStmt:
+			return vm.evalForStmt(inner, env, st.Label.Name)
+		case *ast.RangeStmt:
+			return vm.evalRangeStmt(inner, env, st.Label.Name)
+		case *ast.SwitchStmt:
+			return vm.evalSwitchStmt(inner, env, st.Label.Name)
+		case *ast.SelectStmt:
+			return vm.evalSelectStmt(inner, env, st.Label.Name)
+		default:
+			// A label on a plain statement is only meaningful as a goto
+			// target; execStmtList already finds it by scanning the
+			// enclosing list, so evaluating it here just runs the statement.
+			return vm.evalStmt(st.Stmt, env)
 		}
-		return controlFlow{}, nil
 
 	case *ast.IfStmt:
 		if st.Init != nil {
@@ -1496,276 +1664,13 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		return controlFlow{}, nil
 
 	case *ast.ForStmt:
-		local := NewEnv(env)
-		if st.Init != nil {
-			if _, err := vm.evalStmt(st.Init, local); err != nil {
-				return controlFlow{}, err
-			}
-		}
-		for {
-			cond := true
-			if st.Cond != nil {
-				v, err := vm.evalExpr(st.Cond, local)
-				if err != nil {
-					return controlFlow{}, err
-				}
-				cond = ToBool(v)
-			}
-			if !cond {
-				break
-			}
-			c, err := vm.evalStmt(st.Body, local)
-			if err != nil {
-				return controlFlow{}, err
-			}
-			switch c.kind {
-			case controlBreak:
-				return controlFlow{}, nil
-			case controlReturn:
-				return c, nil
-			case controlContinue: /* continue */
-			}
-			if st.Post != nil {
-				if _, err := vm.evalStmt(st.Post, local); err != nil {
-					return controlFlow{}, err
-				}
-			}
-		}
-		return controlFlow{}, nil
+		return vm.evalForStmt(st, env, "")
 
 	case *ast.RangeStmt:
-		local := NewEnv(env)
-		x, err := vm.evalExpr(st.X, local)
-		if err != nil {
-			return controlFlow{}, err
-		}
-		switch s := x.(type) {
-		case *SliceVal:
-			for i := 0; i < len(s.Data); i++ {
-				if st.Key != nil {
-					if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
-						vm.set(id.Name, i, local)
-						if vm.trackingVariables() {
-							vm.recordVariable(id.Name, i, id, local)
-						}
-					}
-				}
-				if st.Value != nil {
-					if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" {
-						vm.set(id.Name, s.Data[i], local)
-						if vm.trackingVariables() {
-							vm.recordVariable(id.Name, s.Data[i], id, local)
-						}
-					}
-				}
-				c, err := vm.evalStmt(st.Body, local)
-				if err != nil {
-					return controlFlow{}, err
-				}
-				switch c.kind {
-				case controlBreak:
-					return controlFlow{}, nil
-				case controlReturn:
-					return c, nil
-				case controlContinue:
-				}
-			}
-		case *MapVal:
-			for _, hk := range keysOfMap(s) {
-				key := s.Keys[hk]
-				val := s.Data[hk]
-				if st.Key != nil {
-					if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
-						vm.set(id.Name, key, local)
-						if vm.trackingVariables() {
-							vm.recordVariable(id.Name, key, id, local)
-						}
-					}
-				}
-				if st.Value != nil {
-					if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" {
-						vm.set(id.Name, val, local)
-						if vm.trackingVariables() {
-							vm.recordVariable(id.Name, val, id, local)
-						}
-					}
-				}
-				c, err := vm.evalStmt(st.Body, local)
-				if err != nil {
-					return controlFlow{}, err
-				}
-				switch c.kind {
-				case controlBreak:
-					return controlFlow{}, nil
-				case controlReturn:
-					return c, nil
-				case controlContinue:
-				}
-			}
-		case string:
-			// Go ranges over UTF-8 strings by byte offset and decoded rune, not
-			// by individual bytes. This matters for the Unicode-heavy display
-			// and serial protocols commonly used by TinyGo targets as well.
-			for i, r := range s {
-				if st.Key != nil {
-					if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
-						vm.set(id.Name, i, local)
-						if vm.trackingVariables() {
-							vm.recordVariable(id.Name, i, id, local)
-						}
-					}
-				}
-				if st.Value != nil {
-					if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" {
-						vm.set(id.Name, int(r), local)
-						if vm.trackingVariables() {
-							vm.recordVariable(id.Name, int(r), id, local)
-						}
-					}
-				}
-				c, err := vm.evalStmt(st.Body, local)
-				if err != nil {
-					return controlFlow{}, err
-				}
-				switch c.kind {
-				case controlBreak:
-					return controlFlow{}, nil
-				case controlReturn:
-					return c, nil
-				case controlContinue:
-				}
-			}
-		case int:
-			// Go 1.22 added `for i := range n`. It is a compact, allocation-free
-			// loop form that maps well to firmware-style TinyGo code.
-			for i := 0; i < s; i++ {
-				if st.Key != nil {
-					if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
-						vm.set(id.Name, i, local)
-						if vm.trackingVariables() {
-							vm.recordVariable(id.Name, i, id, local)
-						}
-					}
-				}
-				c, err := vm.evalStmt(st.Body, local)
-				if err != nil {
-					return controlFlow{}, err
-				}
-				switch c.kind {
-				case controlBreak:
-					return controlFlow{}, nil
-				case controlReturn:
-					return c, nil
-				case controlContinue:
-				}
-			}
-		case *ChannelVal:
-			for {
-				v, open, err := s.Receive(vm.Context())
-				if err != nil {
-					return controlFlow{}, err
-				}
-				if !open {
-					break
-				}
-				if st.Key != nil {
-					if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
-						vm.set(id.Name, v, local)
-						if vm.trackingVariables() {
-							vm.recordVariable(id.Name, v, id, local)
-						}
-					}
-				}
-				c, err := vm.evalStmt(st.Body, local)
-				if err != nil {
-					return controlFlow{}, err
-				}
-				switch c.kind {
-				case controlBreak:
-					return controlFlow{}, nil
-				case controlReturn:
-					return c, nil
-				case controlContinue:
-				}
-			}
-		default:
-			return controlFlow{}, NewRuntimeError("range over unsupported type")
-		}
-		return controlFlow{}, nil
+		return vm.evalRangeStmt(st, env, "")
 
 	case *ast.SwitchStmt:
-		local := NewEnv(env)
-		if st.Init != nil {
-			if _, err := vm.evalStmt(st.Init, local); err != nil {
-				return controlFlow{}, err
-			}
-		}
-		var tag any
-		var err error
-		if st.Tag != nil {
-			tag, err = vm.evalExpr(st.Tag, local)
-			if err != nil {
-				return controlFlow{}, err
-			}
-		}
-		// A default clause is considered only after every explicit case, even
-		// when it appears before a matching case in source order.
-		defaultIndex := -1
-		matched := false
-		for i, clause := range st.Body.List {
-			cc := clause.(*ast.CaseClause)
-			if !matched {
-				if cc.List == nil {
-					defaultIndex = i
-					continue
-				}
-				for _, ce := range cc.List {
-					val, err := vm.evalExpr(ce, local)
-					if err != nil {
-						return controlFlow{}, err
-					}
-					if (st.Tag == nil && ToBool(val)) || (st.Tag != nil && equals(tag, val)) {
-						matched = true
-						break
-					}
-				}
-				if !matched {
-					continue
-				}
-			}
-
-			c, err := vm.evalStmt(&ast.BlockStmt{List: cc.Body}, local)
-			if err != nil {
-				return controlFlow{}, err
-			}
-			switch c.kind {
-			case controlFallthrough:
-				if i == len(st.Body.List)-1 {
-					return controlFlow{}, NewRuntimeError("cannot fallthrough final case")
-				}
-				// Keep matched true: the following body runs without evaluating
-				// its case expression, exactly as Go's fallthrough specifies.
-				continue
-			case controlBreak:
-				// break exits this switch, rather than leaking to an enclosing for.
-				return controlFlow{}, nil
-			case controlReturn, controlContinue:
-				return c, nil
-			default:
-				return controlFlow{}, nil
-			}
-		}
-		if !matched && defaultIndex >= 0 {
-			c, err := vm.evalStmt(&ast.BlockStmt{List: st.Body.List[defaultIndex].(*ast.CaseClause).Body}, local)
-			if err != nil {
-				return controlFlow{}, err
-			}
-			if c.kind == controlBreak {
-				return controlFlow{}, nil
-			}
-			return c, nil
-		}
-		return controlFlow{}, nil
+		return vm.evalSwitchStmt(st, env, "")
 
 	case *ast.DeferStmt:
 		// Capture callable and its arguments NOW, but execute on function return/panic.
@@ -1778,169 +1683,22 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			return controlFlow{}, NewRuntimeError("defer outside of function")
 		}
 		frame.defers = append(frame.defers, func() {
-			_, _ = vm.callFunction(fn, env, recv, args)
+			// callFunction never lets a panic escape natively (see its own
+			// defer/recover): a deferred call that itself panics without
+			// recovering comes back as a *panicError here, which becomes
+			// (or replaces) frame's active panic — exactly like a panic
+			// raised by a deferred function in real Go.
+			if _, derr := vm.callFunction(fn, env, recv, args); derr != nil {
+				if pe, ok := derr.(*panicError); ok {
+					frame.panicking = true
+					frame.panicVal = pe.value
+				}
+			}
 		})
 		return controlFlow{}, nil
 
 	case *ast.SelectStmt:
-		var rcases []reflect.SelectCase
-		type selectChoice struct {
-			clause     *ast.CommClause
-			closed     bool
-			sendClosed bool
-			cancel     bool
-		}
-		var choices []selectChoice
-		appendCase := func(rcase reflect.SelectCase, choice selectChoice) {
-			rcases = append(rcases, rcase)
-			choices = append(choices, choice)
-		}
-		for _, s2 := range st.Body.List {
-			cc, ok := s2.(*ast.CommClause)
-			if !ok {
-				continue
-			}
-			if cc.Comm == nil {
-				appendCase(reflect.SelectCase{Dir: reflect.SelectDefault}, selectChoice{clause: cc})
-				continue
-			}
-			switch comm := cc.Comm.(type) {
-			case *ast.ExprStmt:
-				// <-ch (receive and discard)
-				ue, ok2 := comm.X.(*ast.UnaryExpr)
-				if !ok2 || ue.Op != token.ARROW {
-					return controlFlow{}, NewRuntimeError("invalid select case expression")
-				}
-				chv, err := vm.evalExpr(ue.X, env)
-				if err != nil {
-					return controlFlow{}, err
-				}
-				ch, ok3 := chv.(*ChannelVal)
-				if !ok3 {
-					return controlFlow{}, NewRuntimeError("receive on non-channel in select")
-				}
-				if ch.direction == channelSendOnly {
-					return controlFlow{}, NewRuntimeError("receive on send-only host channel")
-				}
-				appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.C)}, selectChoice{clause: cc})
-				if ch.done != nil {
-					appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.done)}, selectChoice{clause: cc, closed: true})
-				}
-			case *ast.AssignStmt:
-				// v := <-ch  or  v, ok := <-ch
-				if len(comm.Rhs) != 1 {
-					return controlFlow{}, NewRuntimeError("invalid select assign case")
-				}
-				ue, ok2 := comm.Rhs[0].(*ast.UnaryExpr)
-				if !ok2 || ue.Op != token.ARROW {
-					return controlFlow{}, NewRuntimeError("invalid select assign case: expected <-ch")
-				}
-				chv, err := vm.evalExpr(ue.X, env)
-				if err != nil {
-					return controlFlow{}, err
-				}
-				ch, ok3 := chv.(*ChannelVal)
-				if !ok3 {
-					return controlFlow{}, NewRuntimeError("receive on non-channel in select")
-				}
-				if ch.direction == channelSendOnly {
-					return controlFlow{}, NewRuntimeError("receive on send-only host channel")
-				}
-				appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.C)}, selectChoice{clause: cc})
-				if ch.done != nil {
-					appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.done)}, selectChoice{clause: cc, closed: true})
-				}
-			case *ast.SendStmt:
-				// ch <- v
-				chv, err := vm.evalExpr(comm.Chan, env)
-				if err != nil {
-					return controlFlow{}, err
-				}
-				val, err := vm.evalExpr(comm.Value, env)
-				if err != nil {
-					return controlFlow{}, err
-				}
-				ch, ok2 := chv.(*ChannelVal)
-				if !ok2 {
-					return controlFlow{}, NewRuntimeError("send on non-channel in select")
-				}
-				if ch.direction == channelReceiveOnly {
-					return controlFlow{}, NewRuntimeError("send on receive-only host channel")
-				}
-				v := val // capture for reflect
-				appendCase(reflect.SelectCase{
-					Dir:  reflect.SelectSend,
-					Chan: reflect.ValueOf(ch.C),
-					Send: reflect.ValueOf(&v).Elem(), // wrap as interface{} for chan any
-				}, selectChoice{clause: cc})
-				if ch.done != nil {
-					appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.done)}, selectChoice{clause: cc, sendClosed: true})
-				}
-			default:
-				return controlFlow{}, NewRuntimeError(fmt.Sprintf("unsupported select comm: %T", comm))
-			}
-		}
-		if len(rcases) == 0 {
-			return controlFlow{}, nil
-		}
-		// Cancellation is an additional select arm, so a program blocked in
-		// select observes a deadline or Kill immediately.
-		appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(vm.Context().Done())}, selectChoice{cancel: true})
-		chosen, recvVal, recvOK, selectErr := safeReflectSelect(rcases)
-		if selectErr != nil {
-			return controlFlow{}, selectErr
-		}
-		choice := choices[chosen]
-		if choice.cancel {
-			return controlFlow{}, vm.executionError()
-		}
-		if choice.sendClosed {
-			return controlFlow{}, NewRuntimeError("send on closed host channel")
-		}
-		cc := choice.clause
-		if choice.closed {
-			recvVal = reflect.Value{}
-			recvOK = false
-		}
-		caseEnv := NewEnv(env)
-		// Bind received value(s) if the chosen case was a receive assignment.
-		if assign, ok := cc.Comm.(*ast.AssignStmt); ok {
-			var rv any
-			if recvVal.IsValid() {
-				rv = recvVal.Interface()
-			}
-			bindVar := func(name string, val any) {
-				if name == "_" {
-					return
-				}
-				if assign.Tok == token.DEFINE {
-					vm.declare(name, val, caseEnv)
-				} else {
-					vm.set(name, val, caseEnv)
-				}
-			}
-			if len(assign.Lhs) >= 1 {
-				if id, ok2 := assign.Lhs[0].(*ast.Ident); ok2 {
-					bindVar(id.Name, rv)
-				}
-			}
-			if len(assign.Lhs) >= 2 {
-				if id, ok2 := assign.Lhs[1].(*ast.Ident); ok2 {
-					bindVar(id.Name, recvOK)
-				}
-			}
-		}
-		for _, s2 := range cc.Body {
-			c, err := vm.evalStmt(s2, caseEnv)
-			if err != nil {
-				return controlFlow{}, err
-			}
-			switch c.kind {
-			case controlReturn, controlBreak, controlContinue:
-				return c, nil
-			}
-		}
-		return controlFlow{}, nil
+		return vm.evalSelectStmt(st, env, "")
 
 	case *ast.GoStmt:
 		fn, recv, args, err := vm.prepareCall(st.Call, env)
@@ -1975,18 +1733,478 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		return controlFlow{kind: controlReturn, val: v}, nil
 
 	case *ast.BranchStmt:
+		label := ""
+		if st.Label != nil {
+			label = st.Label.Name
+		}
 		switch st.Tok {
 		case token.BREAK:
-			return controlFlow{kind: controlBreak}, nil
+			return controlFlow{kind: controlBreak, label: label}, nil
 		case token.CONTINUE:
-			return controlFlow{kind: controlContinue}, nil
+			return controlFlow{kind: controlContinue, label: label}, nil
 		case token.FALLTHROUGH:
 			return controlFlow{kind: controlFallthrough}, nil
+		case token.GOTO:
+			return controlFlow{kind: controlGoto, label: label}, nil
 		}
+		return controlFlow{}, nil
+
+	case *ast.EmptyStmt:
+		// A label with nothing after it — `done:\n}` — parses as a
+		// LabeledStmt wrapping an EmptyStmt (Go's grammar requires a
+		// statement after a label, and an empty one satisfies that). This
+		// is the common goto-to-exit idiom's trailing target, so it must
+		// be a legitimate no-op rather than an error.
 		return controlFlow{}, nil
 
 	default:
 		return controlFlow{}, NewRuntimeError(fmt.Sprintf("unsupported stmt: %T", s))
+	}
+}
+
+// evalForStmt evaluates a (possibly labeled) for statement. label is ""
+// when the loop has no label. A labeled break/continue whose label doesn't
+// match this loop's own must not be treated as targeting it: the loop
+// terminates (as if broken) and re-propagates the same controlFlow so an
+// enclosing loop bearing that label can act on it — see the package
+// comment on controlFlow.label.
+func (vm *Interpreter) evalForStmt(st *ast.ForStmt, env *Env, label string) (controlFlow, error) {
+	local := NewEnv(env)
+	if st.Init != nil {
+		if _, err := vm.evalStmt(st.Init, local); err != nil {
+			return controlFlow{}, err
+		}
+	}
+	for {
+		cond := true
+		if st.Cond != nil {
+			v, err := vm.evalExpr(st.Cond, local)
+			if err != nil {
+				return controlFlow{}, err
+			}
+			cond = ToBool(v)
+		}
+		if !cond {
+			break
+		}
+		c, err := vm.evalStmt(st.Body, local)
+		if err != nil {
+			return controlFlow{}, err
+		}
+		switch c.kind {
+		case controlBreak:
+			if c.label == "" || c.label == label {
+				return controlFlow{}, nil
+			}
+			return c, nil
+		case controlReturn, controlGoto:
+			return c, nil
+		case controlContinue:
+			if c.label != "" && c.label != label {
+				return c, nil
+			}
+			// ours (or unlabeled): fall through to run Post and loop again
+		}
+		if st.Post != nil {
+			if _, err := vm.evalStmt(st.Post, local); err != nil {
+				return controlFlow{}, err
+			}
+		}
+	}
+	return controlFlow{}, nil
+}
+
+// evalRangeStmt evaluates a (possibly labeled) range statement; see
+// evalForStmt for the label semantics, which are identical here.
+func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) (controlFlow, error) {
+	local := NewEnv(env)
+	x, err := vm.evalExpr(st.X, local)
+	if err != nil {
+		return controlFlow{}, err
+	}
+	// handleBody runs the loop body and translates its controlFlow into what
+	// the range loop over any of the container kinds below should do:
+	// "stop=true" means the whole range statement is done evaluating (its
+	// own return value is c/err), "stop=false" means keep ranging.
+	handleBody := func(body *ast.BlockStmt) (c controlFlow, err error, stop bool) {
+		c, err = vm.evalStmt(body, local)
+		if err != nil {
+			return controlFlow{}, err, true
+		}
+		switch c.kind {
+		case controlBreak:
+			if c.label == "" || c.label == label {
+				return controlFlow{}, nil, true
+			}
+			return c, nil, true
+		case controlReturn, controlGoto:
+			return c, nil, true
+		case controlContinue:
+			if c.label != "" && c.label != label {
+				return c, nil, true
+			}
+		}
+		return controlFlow{}, nil, false
+	}
+	switch s := x.(type) {
+	case *SliceVal:
+		for i := 0; i < len(s.Data); i++ {
+			if st.Key != nil {
+				if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
+					vm.set(id.Name, i, local)
+					if vm.trackingVariables() {
+						vm.recordVariable(id.Name, i, id, local)
+					}
+				}
+			}
+			if st.Value != nil {
+				if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" {
+					vm.set(id.Name, s.Data[i], local)
+					if vm.trackingVariables() {
+						vm.recordVariable(id.Name, s.Data[i], id, local)
+					}
+				}
+			}
+			if c, err, stop := handleBody(st.Body); stop {
+				return c, err
+			}
+		}
+	case *MapVal:
+		for _, hk := range keysOfMap(s) {
+			key := s.Keys[hk]
+			val := s.Data[hk]
+			if st.Key != nil {
+				if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
+					vm.set(id.Name, key, local)
+					if vm.trackingVariables() {
+						vm.recordVariable(id.Name, key, id, local)
+					}
+				}
+			}
+			if st.Value != nil {
+				if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" {
+					vm.set(id.Name, val, local)
+					if vm.trackingVariables() {
+						vm.recordVariable(id.Name, val, id, local)
+					}
+				}
+			}
+			if c, err, stop := handleBody(st.Body); stop {
+				return c, err
+			}
+		}
+	case string:
+		// Go ranges over UTF-8 strings by byte offset and decoded rune, not
+		// by individual bytes. This matters for the Unicode-heavy display
+		// and serial protocols commonly used by TinyGo targets as well.
+		for i, r := range s {
+			if st.Key != nil {
+				if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
+					vm.set(id.Name, i, local)
+					if vm.trackingVariables() {
+						vm.recordVariable(id.Name, i, id, local)
+					}
+				}
+			}
+			if st.Value != nil {
+				if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" {
+					vm.set(id.Name, int(r), local)
+					if vm.trackingVariables() {
+						vm.recordVariable(id.Name, int(r), id, local)
+					}
+				}
+			}
+			if c, err, stop := handleBody(st.Body); stop {
+				return c, err
+			}
+		}
+	case int:
+		// Go 1.22 added `for i := range n`. It is a compact, allocation-free
+		// loop form that maps well to firmware-style TinyGo code.
+		for i := 0; i < s; i++ {
+			if st.Key != nil {
+				if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
+					vm.set(id.Name, i, local)
+					if vm.trackingVariables() {
+						vm.recordVariable(id.Name, i, id, local)
+					}
+				}
+			}
+			if c, err, stop := handleBody(st.Body); stop {
+				return c, err
+			}
+		}
+	case *ChannelVal:
+		for {
+			v, open, err := s.Receive(vm.Context())
+			if err != nil {
+				return controlFlow{}, err
+			}
+			if !open {
+				break
+			}
+			if st.Key != nil {
+				if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
+					vm.set(id.Name, v, local)
+					if vm.trackingVariables() {
+						vm.recordVariable(id.Name, v, id, local)
+					}
+				}
+			}
+			if c, err, stop := handleBody(st.Body); stop {
+				return c, err
+			}
+		}
+	default:
+		return controlFlow{}, NewRuntimeError("range over unsupported type")
+	}
+	return controlFlow{}, nil
+}
+
+// evalSwitchStmt evaluates a (possibly labeled) switch statement; only
+// break (not continue) can target a switch's own label, matching Go.
+func (vm *Interpreter) evalSwitchStmt(st *ast.SwitchStmt, env *Env, label string) (controlFlow, error) {
+	local := NewEnv(env)
+	if st.Init != nil {
+		if _, err := vm.evalStmt(st.Init, local); err != nil {
+			return controlFlow{}, err
+		}
+	}
+	var tag any
+	var err error
+	if st.Tag != nil {
+		tag, err = vm.evalExpr(st.Tag, local)
+		if err != nil {
+			return controlFlow{}, err
+		}
+	}
+	// A default clause is considered only after every explicit case, even
+	// when it appears before a matching case in source order.
+	defaultIndex := -1
+	matched := false
+	for i, clause := range st.Body.List {
+		cc := clause.(*ast.CaseClause)
+		if !matched {
+			if cc.List == nil {
+				defaultIndex = i
+				continue
+			}
+			for _, ce := range cc.List {
+				val, err := vm.evalExpr(ce, local)
+				if err != nil {
+					return controlFlow{}, err
+				}
+				if (st.Tag == nil && ToBool(val)) || (st.Tag != nil && equals(tag, val)) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		c, err := vm.evalStmt(&ast.BlockStmt{List: cc.Body}, local)
+		if err != nil {
+			return controlFlow{}, err
+		}
+		switch c.kind {
+		case controlFallthrough:
+			if i == len(st.Body.List)-1 {
+				return controlFlow{}, NewRuntimeError("cannot fallthrough final case")
+			}
+			// Keep matched true: the following body runs without evaluating
+			// its case expression, exactly as Go's fallthrough specifies.
+			continue
+		case controlBreak:
+			// break exits this switch, rather than leaking to an enclosing for,
+			// unless it's labeled for some other enclosing statement.
+			if c.label == "" || c.label == label {
+				return controlFlow{}, nil
+			}
+			return c, nil
+		case controlReturn, controlContinue, controlGoto:
+			return c, nil
+		default:
+			return controlFlow{}, nil
+		}
+	}
+	if !matched && defaultIndex >= 0 {
+		c, err := vm.evalStmt(&ast.BlockStmt{List: st.Body.List[defaultIndex].(*ast.CaseClause).Body}, local)
+		if err != nil {
+			return controlFlow{}, err
+		}
+		if c.kind == controlBreak && (c.label == "" || c.label == label) {
+			return controlFlow{}, nil
+		}
+		return c, nil
+	}
+	return controlFlow{}, nil
+}
+
+// evalSelectStmt evaluates a (possibly labeled — label is "" when not)
+// select statement. Split out of evalStmtNode so a *ast.LabeledStmt
+// wrapping a select can pass its label through for `break Label`.
+func (vm *Interpreter) evalSelectStmt(st *ast.SelectStmt, env *Env, label string) (controlFlow, error) {
+	var rcases []reflect.SelectCase
+	type selectChoice struct {
+		clause     *ast.CommClause
+		closed     bool
+		sendClosed bool
+		cancel     bool
+	}
+	var choices []selectChoice
+	appendCase := func(rcase reflect.SelectCase, choice selectChoice) {
+		rcases = append(rcases, rcase)
+		choices = append(choices, choice)
+	}
+	for _, s2 := range st.Body.List {
+		cc, ok := s2.(*ast.CommClause)
+		if !ok {
+			continue
+		}
+		if cc.Comm == nil {
+			appendCase(reflect.SelectCase{Dir: reflect.SelectDefault}, selectChoice{clause: cc})
+			continue
+		}
+		switch comm := cc.Comm.(type) {
+		case *ast.ExprStmt:
+			// <-ch (receive and discard)
+			ue, ok2 := comm.X.(*ast.UnaryExpr)
+			if !ok2 || ue.Op != token.ARROW {
+				return controlFlow{}, NewRuntimeError("invalid select case expression")
+			}
+			chv, err := vm.evalExpr(ue.X, env)
+			if err != nil {
+				return controlFlow{}, err
+			}
+			ch, ok3 := chv.(*ChannelVal)
+			if !ok3 {
+				return controlFlow{}, NewRuntimeError("receive on non-channel in select")
+			}
+			if ch.direction == channelSendOnly {
+				return controlFlow{}, NewRuntimeError("receive on send-only host channel")
+			}
+			appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.C)}, selectChoice{clause: cc})
+			if ch.done != nil {
+				appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.done)}, selectChoice{clause: cc, closed: true})
+			}
+		case *ast.AssignStmt:
+			// v := <-ch  or  v, ok := <-ch
+			if len(comm.Rhs) != 1 {
+				return controlFlow{}, NewRuntimeError("invalid select assign case")
+			}
+			ue, ok2 := comm.Rhs[0].(*ast.UnaryExpr)
+			if !ok2 || ue.Op != token.ARROW {
+				return controlFlow{}, NewRuntimeError("invalid select assign case: expected <-ch")
+			}
+			chv, err := vm.evalExpr(ue.X, env)
+			if err != nil {
+				return controlFlow{}, err
+			}
+			ch, ok3 := chv.(*ChannelVal)
+			if !ok3 {
+				return controlFlow{}, NewRuntimeError("receive on non-channel in select")
+			}
+			if ch.direction == channelSendOnly {
+				return controlFlow{}, NewRuntimeError("receive on send-only host channel")
+			}
+			appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.C)}, selectChoice{clause: cc})
+			if ch.done != nil {
+				appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.done)}, selectChoice{clause: cc, closed: true})
+			}
+		case *ast.SendStmt:
+			// ch <- v
+			chv, err := vm.evalExpr(comm.Chan, env)
+			if err != nil {
+				return controlFlow{}, err
+			}
+			val, err := vm.evalExpr(comm.Value, env)
+			if err != nil {
+				return controlFlow{}, err
+			}
+			ch, ok2 := chv.(*ChannelVal)
+			if !ok2 {
+				return controlFlow{}, NewRuntimeError("send on non-channel in select")
+			}
+			if ch.direction == channelReceiveOnly {
+				return controlFlow{}, NewRuntimeError("send on receive-only host channel")
+			}
+			v := val // capture for reflect
+			appendCase(reflect.SelectCase{
+				Dir:  reflect.SelectSend,
+				Chan: reflect.ValueOf(ch.C),
+				Send: reflect.ValueOf(&v).Elem(), // wrap as interface{} for chan any
+			}, selectChoice{clause: cc})
+			if ch.done != nil {
+				appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.done)}, selectChoice{clause: cc, sendClosed: true})
+			}
+		default:
+			return controlFlow{}, NewRuntimeError(fmt.Sprintf("unsupported select comm: %T", comm))
+		}
+	}
+	if len(rcases) == 0 {
+		return controlFlow{}, nil
+	}
+	// Cancellation is an additional select arm, so a program blocked in
+	// select observes a deadline or Kill immediately.
+	appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(vm.Context().Done())}, selectChoice{cancel: true})
+	chosen, recvVal, recvOK, selectErr := safeReflectSelect(rcases)
+	if selectErr != nil {
+		return controlFlow{}, selectErr
+	}
+	choice := choices[chosen]
+	if choice.cancel {
+		return controlFlow{}, vm.executionError()
+	}
+	if choice.sendClosed {
+		return controlFlow{}, NewRuntimeError("send on closed host channel")
+	}
+	cc := choice.clause
+	if choice.closed {
+		recvVal = reflect.Value{}
+		recvOK = false
+	}
+	caseEnv := NewEnv(env)
+	// Bind received value(s) if the chosen case was a receive assignment.
+	if assign, ok := cc.Comm.(*ast.AssignStmt); ok {
+		var rv any
+		if recvVal.IsValid() {
+			rv = recvVal.Interface()
+		}
+		bindVar := func(name string, val any) {
+			if name == "_" {
+				return
+			}
+			if assign.Tok == token.DEFINE {
+				vm.declare(name, val, caseEnv)
+			} else {
+				vm.set(name, val, caseEnv)
+			}
+		}
+		if len(assign.Lhs) >= 1 {
+			if id, ok2 := assign.Lhs[0].(*ast.Ident); ok2 {
+				bindVar(id.Name, rv)
+			}
+		}
+		if len(assign.Lhs) >= 2 {
+			if id, ok2 := assign.Lhs[1].(*ast.Ident); ok2 {
+				bindVar(id.Name, recvOK)
+			}
+		}
+	}
+	c, err := vm.execStmtList(cc.Body, caseEnv)
+	if err != nil {
+		return controlFlow{}, err
+	}
+	switch c.kind {
+	case controlBreak:
+		if c.label == "" || c.label == label {
+			return controlFlow{}, nil
+		}
+		return c, nil
+	default:
+		return c, nil
 	}
 }
 
@@ -2079,18 +2297,45 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 	vm.emitTrace("call_start", fn.Name, "", nil)
 	// Run defers in LIFO order on exit; also handle panic unwinding.
 	// caller: env.frame is the call site's own active frame (nil at the
-	// outermost call), letting debug.Stack() walk this chain later.
-	frame := &callFrame{defers: []func(){}, funcName: fn.Name, caller: env.frame}
+	// outermost call), letting debug.Stack() walk this chain later. It also
+	// doubles as the recover() target check: a deferred call's own frame
+	// has caller set to exactly this frame (see below and the DeferStmt
+	// case), which is what lets recover() tell "called directly by a
+	// deferred function of the panicking frame" apart from "called by
+	// something that function itself called".
+	frameDepth := 0
+	if env.frame != nil {
+		frameDepth = env.frame.depth + 1
+	}
+	frame := &callFrame{funcName: fn.Name, caller: env.frame, depth: frameDepth}
 	defer func() {
-		// Execute defers in reverse order
+		// A guest panic() never reaches here as a native panic — it
+		// propagates as a *panicError return value instead (see below),
+		// which is far cheaper than unwinding the real Go stack for every
+		// user-level panic/recover pair. This recover() is only a backstop
+		// against a genuinely unexpected native panic (an interpreter bug,
+		// or a host builtin that panicked outright): still fold it into the
+		// same frame.panicking bookkeeping so guest defer/recover can
+		// observe and handle it exactly like any other panic, instead of
+		// either crashing the host or silently vanishing as a false
+		// success.
+		if r := recover(); r != nil {
+			frame.panicking = true
+			if pe, ok := r.(*panicError); ok {
+				frame.panicVal = pe.value
+			} else {
+				frame.panicVal = fmt.Sprintf("%v", r)
+			}
+		}
+		// Execute defers in reverse order. Each runs via callFunction,
+		// which never lets a panic escape natively — one that panics
+		// without recovering comes back as a *panicError that becomes (or
+		// replaces) frame's active panic, same as in real Go.
 		for i := len(frame.defers) - 1; i >= 0; i-- {
 			frame.defers[i]()
 		}
-		if r := recover(); r != nil {
-			if pe, ok := r.(*panicError); ok {
-				// Convert to error so callers can see panic
-				err = pe
-			}
+		if frame.panicking {
+			err = &panicError{value: frame.panicVal}
 		}
 		message := "ok"
 		if err != nil {
@@ -2165,21 +2410,26 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 		}
 	}
 
-	for _, st := range fn.Body.(*ast.BlockStmt).List {
-		c, err := vm.evalStmt(st, local)
-		if err != nil {
-			// If err is panicError, re-panic to trigger unwinding of outer defers.
-			if _, ok := err.(*panicError); ok {
-				panic(err)
-			}
-			return nil, err
+	c, bodyErr := vm.execStmtList(fn.Body.(*ast.BlockStmt).List, local)
+	if bodyErr != nil {
+		if pe, ok := bodyErr.(*panicError); ok {
+			// Record the panic on frame and fall through to a normal
+			// return: the deferred closure above runs on any return path,
+			// sees frame.panicking, and re-raises it as err (unless a
+			// guest defer calls recover() and clears it first).
+			frame.panicking = true
+			frame.panicVal = pe.value
+			return nil, nil
 		}
-		switch c.kind {
-		case controlReturn:
-			return c.val, nil
-		case controlBreak, controlContinue:
-			return nil, NewRuntimeError("break/continue outside loop")
-		}
+		return nil, bodyErr
+	}
+	switch c.kind {
+	case controlReturn:
+		return c.val, nil
+	case controlBreak, controlContinue:
+		return nil, NewRuntimeError("break/continue outside loop")
+	case controlGoto:
+		return nil, NewRuntimeError("goto " + c.label + ": label not found")
 	}
 	return nil, nil
 }
@@ -2353,7 +2603,7 @@ func typeOfValue(vm *Interpreter, v any) string {
 	case *SliceVal:
 		return "[]" + x.ElementType
 	case *MapVal:
-		return "map"
+		return "map[" + x.KeyType + "]" + x.ElementType
 	case *ChannelVal:
 		return "chan " + x.ElementType
 	case int:
@@ -2369,6 +2619,115 @@ func typeOfValue(vm *Interpreter, v any) string {
 	default:
 		return fmt.Sprintf("%T", v)
 	}
+}
+
+// evalTypeAssert evaluates the x.(T) expression at the heart of a
+// *ast.TypeAssertExpr. It returns the asserted value (valid only when
+// ok==true) and, always, dyn — the original, unwrapped value of x — so a
+// caller can build an "interface conversion" panic message on failure
+// without evaluating ex.X a second time (which would double any side
+// effect, e.g. x itself being a call expression).
+//
+// nanoGo's dynamic-typing model has no separate "zero value" story for a
+// failed comma-ok assertion (a missing function argument is likewise bound
+// to nil rather than its type's zero value — see callFunction): the
+// asserted value is nil whenever ok is false, matching that existing
+// convention rather than trying to introduce a new one here.
+func (vm *Interpreter) evalTypeAssert(ex *ast.TypeAssertExpr, env *Env) (asserted any, dyn any, ok bool, err error) {
+	dyn, err = vm.evalExpr(ex.X, env)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	// A nil interface value never satisfies any type assertion, including
+	// against an interface type — matches Go.
+	if dyn == nil {
+		return nil, nil, false, nil
+	}
+	switch t := ex.Type.(type) {
+	case *ast.InterfaceType:
+		names := interfaceMethodNames(t)
+		if len(names) == 0 {
+			return dyn, dyn, true, nil // interface{} / inline empty interface
+		}
+		return dyn, dyn, vm.valueSatisfiesMethods(dyn, names), nil
+	case *ast.Ident:
+		switch t.Name {
+		case "any":
+			return dyn, dyn, true, nil
+		case "error":
+			if e, isErr := dyn.(error); isErr {
+				return e, dyn, true, nil
+			}
+			return dyn, dyn, vm.valueSatisfiesMethods(dyn, []string{"Error"}), nil
+		}
+		if td, found := vm.types[t.Name]; found && td.Kind == "interface" {
+			return dyn, dyn, vm.valueSatisfiesMethods(dyn, td.InterfaceMethods), nil
+		}
+	}
+	// Concrete type: compare dynamic type against the asserted type name,
+	// ignoring a leading "*" since nanoGo represents a struct the same way
+	// whether it was declared by value or by pointer (see StructVal).
+	want := strings.TrimPrefix(typeString(ex.Type), "*")
+	if want != "" && typeOfValue(vm, dyn) == want {
+		return dyn, dyn, true, nil
+	}
+	return dyn, dyn, false, nil
+}
+
+// interfaceMethodNames collects the directly-declared method names of an
+// interface type literal. Embedded interfaces (a Field with no Names) are
+// not expanded — a documented simplification, since resolving one requires
+// looking it up by name and nanoGo's grammar allows arbitrary embedding
+// expressions here, not just a plain identifier.
+func interfaceMethodNames(it *ast.InterfaceType) []string {
+	if it.Methods == nil {
+		return nil
+	}
+	var names []string
+	for _, f := range it.Methods.List {
+		names = append(names, namesOf(f)...)
+	}
+	return names
+}
+
+func namesOf(f *ast.Field) []string {
+	names := make([]string, 0, len(f.Names))
+	for _, n := range f.Names {
+		names = append(names, n.Name)
+	}
+	return names
+}
+
+// valueSatisfiesMethods reports whether v's registered type (its dynamic
+// type's TypeDef.Methods) defines every method in names. An unregistered
+// dynamic type (a bare int/string/slice, or a struct type nanoGo never saw
+// a declaration for) satisfies only the empty method set.
+func (vm *Interpreter) valueSatisfiesMethods(v any, names []string) bool {
+	if len(names) == 0 {
+		return true
+	}
+	td := vm.types[typeOfValue(vm, v)]
+	if td == nil || td.Methods == nil {
+		return false
+	}
+	for _, m := range names {
+		if _, has := td.Methods[m]; !has {
+			return false
+		}
+	}
+	return true
+}
+
+// interfaceConversionMessage mirrors the shape of Go's real "interface
+// conversion" panic text closely enough to be recognizable, without
+// claiming exact parity (nanoGo has no static interface-name tracking for
+// the "is" side, so it reports the dynamic type instead).
+func interfaceConversionMessage(vm *Interpreter, target ast.Expr, dyn any) string {
+	want := typeString(target)
+	if dyn == nil {
+		return fmt.Sprintf("interface conversion: interface is nil, not %s", want)
+	}
+	return fmt.Sprintf("interface conversion: interface {} is %s, not %s", typeOfValue(vm, dyn), want)
 }
 
 func equals(a, b any) bool {

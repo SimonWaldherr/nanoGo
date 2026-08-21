@@ -166,6 +166,12 @@ type Interpreter struct {
 	// debugger UIs. The normal interpreter path pays only one nil pointer load
 	// at explicit variable-write sites; hosts enable it per interpreter.
 	variableTracker atomic.Pointer[VariableTracker]
+	// debugController is an opt-in live pause/step session (see debugger.go).
+	// Unlike Tracer/breakpoints (record-only), a statement checkpoint may
+	// actually block the calling goroutine here until a host resumes it, so
+	// a host that attaches one must call Run/RunContext from a goroutine it
+	// can afford to block and issue resume calls from another.
+	debugController atomic.Pointer[DebugController]
 
 	// lastSteps preserves the final step counter of the most recently ended
 	// execution so hosts can report deterministic cost after Run returns
@@ -500,6 +506,33 @@ func (vm *Interpreter) declare(name string, val any, env *Env) {
 	env.mu.Unlock()
 }
 
+// undeclare removes name from env's own bindings directly — it never
+// searches env's parent chain, mirroring declare's scope. execStmtList
+// uses it before a goto restarts execution at an earlier label: a := (or
+// var/const) between that label and the goto forgets its previous binding
+// so it can legally redeclare on the next pass, exactly as it would if the
+// loop got a brand-new Env per iteration (the normal case everywhere else
+// — see blockNeedsOwnScope — which a goto-driven restart bypasses since it
+// reuses the same Env instead of allocating a fresh one).
+func (vm *Interpreter) undeclare(name string, env *Env) {
+	if env.shared {
+		env.mu.Lock()
+		removeIntVar(env, name)
+		delete(env.Vars, name)
+		env.mu.Unlock()
+		return
+	}
+	if exec := vm.activeExecution; exec == nil || !exec.concurrent.Load() {
+		removeIntVar(env, name)
+		delete(env.Vars, name)
+		return
+	}
+	env.mu.Lock()
+	removeIntVar(env, name)
+	delete(env.Vars, name)
+	env.mu.Unlock()
+}
+
 func (vm *Interpreter) declareInt(name string, value int, env *Env) {
 	if env.shared {
 		env.mu.Lock()
@@ -604,10 +637,28 @@ func (r *fieldRef) Set(v any) error { r.s.Fields[r.name] = v; return nil }
 // goroutine other than the one that created it — the only case where that
 // happens is a spawned goroutine's frame pointing back at its launching
 // call's frame, which by then is already fully built.
+//
+// panicking/panicVal implement the guest-visible recover() builtin. A frame
+// is only ever read or written by the single goroutine that owns it (the
+// same one running its defers), so no locking is needed even though the
+// struct is also linked into other goroutines' `caller` chains for
+// debug.Stack(). recover() works by checking env.frame.caller.panicking:
+// that is true only while the CURRENT function is executing as a deferred
+// call of the panicking frame (caller is set to the panicking frame exactly
+// in that case — see callFunction/DeferStmt), which is what makes it match
+// Go's "recover must be called directly by a deferred function" rule
+// without any extra bookkeeping.
 type callFrame struct {
-	defers   []func()
-	funcName string
-	caller   *callFrame
+	defers    []func()
+	funcName  string
+	caller    *callFrame
+	panicking bool
+	panicVal  any
+	// depth is caller.depth+1 (0 for a goroutine's outermost call), set once
+	// at construction. DebugController uses frame *identity* (not depth) to
+	// decide step-over/into/out, but depth is cheap to keep around for
+	// display in DebugPauseInfo/stack traces without re-walking the chain.
+	depth int
 }
 
 // collectLocalVars gathers every binding visible from env, innermost scope

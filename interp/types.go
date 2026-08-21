@@ -42,6 +42,14 @@ type TypeDef struct {
 	Underlying string // scalar representation for a named or alias type
 	Fields     []FieldDef
 	Methods    map[string]*Function
+	// InterfaceMethods names the method set of a Kind=="interface" TypeDef
+	// (nil/empty for the empty interface). It has no *Function bodies —
+	// an interface declares signatures, not implementations — so a type
+	// assertion against it checks a candidate value's own registered
+	// TypeDef.Methods for each of these names instead. Embedded interfaces
+	// in the declaration are not expanded into this list (see the
+	// InterfaceType case in evaluator.go/package_scope.go).
+	InterfaceMethods []string
 }
 
 // Function represents either a user-defined or native function.
