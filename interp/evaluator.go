@@ -712,7 +712,12 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		case *SliceVal:
 			ii := ToInt(i)
 			if ii < 0 || ii >= len(t.Data) {
-				return nil, NewRuntimeError("index out of range")
+				// A real Go index panic is recoverable, so this must go
+				// through the same *panicError channel as a guest panic()
+				// call — unlike "indexing unsupported" below, which
+				// reflects an operation Go's type checker would reject at
+				// compile time and so stays a plain, non-recoverable error.
+				return nil, &panicError{value: fmt.Sprintf("runtime error: index out of range [%d] with length %d", ii, len(t.Data))}
 			}
 			return t.Data[ii], nil
 		case *MapVal:
@@ -721,7 +726,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		case string:
 			idx := ToInt(i)
 			if idx < 0 || idx >= len(t) {
-				return nil, NewRuntimeError("index out of range")
+				return nil, &panicError{value: fmt.Sprintf("runtime error: index out of range [%d] with length %d", idx, len(t))}
 			}
 			return int(t[idx]), nil
 		default:
@@ -755,7 +760,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 				hi = len(s.Data)
 			}
 			if lo < 0 || lo > hi {
-				return nil, NewRuntimeError("invalid slice indices")
+				return nil, &panicError{value: fmt.Sprintf("runtime error: slice bounds out of range [%d:%d]", lo, hi)}
 			}
 			return &SliceVal{ElementType: s.ElementType, Data: s.Data[lo:hi]}, nil
 		case string:
@@ -763,7 +768,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 				hi = len(s)
 			}
 			if lo < 0 || lo > hi {
-				return nil, NewRuntimeError("invalid slice indices")
+				return nil, &panicError{value: fmt.Sprintf("runtime error: slice bounds out of range [%d:%d]", lo, hi)}
 			}
 			return s[lo:hi], nil
 		default:
@@ -1008,9 +1013,11 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 			return left * right, true, nil
 		case token.REM:
 			if right == 0 {
-				err := NewRuntimeError("integer divide by zero")
-				attachRuntimeErrorLocation(err, vm.traceLocation(ex.Pos()))
-				return 0, true, err
+				// A recoverable Go runtime panic, like applyBinaryOp's QUO/REM
+				// cases below — no attachRuntimeErrorLocation call here since
+				// *panicError carries no source location, matching every
+				// other guest panic (a plain panic("msg") has none either).
+				return 0, true, &panicError{value: "runtime error: integer divide by zero"}
 			}
 			return left % right, true, nil
 		case token.SHL:
@@ -2198,7 +2205,7 @@ func (vm *Interpreter) evalSelectStmt(st *ast.SelectStmt, env *Env, label string
 		return controlFlow{}, vm.executionError()
 	}
 	if choice.sendClosed {
-		return controlFlow{}, NewRuntimeError("send on closed host channel")
+		return controlFlow{}, &panicError{value: "send on closed channel"}
 	}
 	cc := choice.clause
 	if choice.closed {
@@ -2307,7 +2314,7 @@ func (vm *Interpreter) resolveRef(l ast.Expr, env *Env) (Ref, error) {
 		case *SliceVal:
 			ii := ToInt(i)
 			if ii < 0 || ii >= len(s.Data) {
-				return nil, NewRuntimeError("index out of range")
+				return nil, &panicError{value: fmt.Sprintf("runtime error: index out of range [%d] with length %d", ii, len(s.Data))}
 			}
 			return &sliceIndexRef{s: s, i: ii}, nil
 		case *MapVal:
@@ -2608,18 +2615,23 @@ func (vm *Interpreter) applyBinaryOp(op token.Token, left, right any) (any, erro
 		return ToInt(left) * ToInt(right), nil
 	case token.QUO:
 		if _, ok := left.(float64); ok || isFloat(right) {
-			if ToFloat(right) == 0 {
-				return nil, NewRuntimeError("division by zero")
-			}
+			// Unlike integer division, float64 division by zero does not
+			// panic in Go — IEEE 754 defines it as ±Inf (or NaN for 0/0),
+			// and Go's / operator on float64 values follows that at
+			// runtime. There was a check here that turned it into an error
+			// instead; that was simply wrong relative to real Go, not a
+			// case of a missing recoverable-panic conversion.
 			return ToFloat(left) / ToFloat(right), nil
 		}
 		if ToInt(right) == 0 {
-			return nil, NewRuntimeError("integer divide by zero")
+			// A recoverable Go runtime panic — see the IndexExpr case
+			// above for why this uses *panicError instead of RuntimeError.
+			return nil, &panicError{value: "runtime error: integer divide by zero"}
 		}
 		return ToInt(left) / ToInt(right), nil
 	case token.REM:
 		if ToInt(right) == 0 {
-			return nil, NewRuntimeError("integer divide by zero")
+			return nil, &panicError{value: "runtime error: integer divide by zero"}
 		}
 		return ToInt(left) % ToInt(right), nil
 	case token.SHL:

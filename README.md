@@ -76,11 +76,13 @@ graph into a clickable [Mermaid](https://mermaid.js.org/) flowchart:
   installation, so a previously opened playground can visualize code offline.
 - **🔴 Live debug** is a real pause, not record/replay: it runs the program on
   its own goroutine and actually parks it mid-statement at a breakpoint or a
-  step target, with Continue/Step into/Step over/Step out/Pause/Stop controls
-  and a live call-stack/local-variables view. It is built on
-  [`interp.DebugController`](#local-debugging-timeline) via `cmd/wasm`'s
+  step target, with Continue/Step into/Step over/Step out/Pause/Stop controls,
+  a live call-stack/local-variables view, and an editable value next to each
+  variable so you can change program state on the fly and see the rest of the
+  run react to it. It is built on
+  [`interp.DebugController`](#live-pausestep-debugging) via `cmd/wasm`'s
   `nanoGoDebugStart`/`nanoGoDebugContinue`/`nanoGoDebugStep*`/`nanoGoDebugPause`/
-  `nanoGoDebugStop` exports.
+  `nanoGoDebugSetVariable`/`nanoGoDebugStop` exports.
 
 ### ✨ Opt-in AI assistant (web playground)
 
@@ -843,6 +845,13 @@ recurses. `Pause()` requests a stop at the very next statement any goroutine
 reaches, with no breakpoint needed; `Detach()` resumes everything in free-run
 mode and makes the controller inert without touching the underlying
 execution — pair it with `Interpreter.Kill` to actually stop the program.
+
+While a goroutine is paused, `dc.SetVariable(info.Token, "i", "42")` assigns
+the result of evaluating a Go expression to an existing local, so a host can
+edit state mid-run rather than only observe it (the web playground's Live
+debug panel exposes this as an editable field next to each variable). It
+rejects an undefined name rather than declaring a new one, and returns the
+same capability-safe display string a `VariableSnapshot` would show.
 
 ### Host runtime trace integration
 

@@ -300,7 +300,9 @@ func builtinClose(ch any) (any, error) {
 }
 
 // Send and Receive make guest channel operations context-aware. Close races
-// are translated to runtime errors instead of letting a guest panic the host.
+// are translated into a *panicError (a recoverable Go runtime panic, exactly
+// like "send on closed channel" in real Go) rather than letting the host's
+// own native panic — from the concurrent close racing this send — escape.
 func (c *ChannelVal) Send(ctx context.Context, value any) (err error) {
 	if c == nil {
 		return NewRuntimeError("send on nil channel")
@@ -313,11 +315,11 @@ func (c *ChannelVal) Send(ctx context.Context, value any) (err error) {
 	done := c.done
 	c.mu.RUnlock()
 	if closed {
-		return NewRuntimeError("send on closed channel")
+		return &panicError{value: "send on closed channel"}
 	}
 	defer func() {
 		if recover() != nil {
-			err = NewRuntimeError("send on closed channel")
+			err = &panicError{value: "send on closed channel"}
 		}
 	}()
 	if done == nil {
@@ -332,7 +334,7 @@ func (c *ChannelVal) Send(ctx context.Context, value any) (err error) {
 	case c.C <- value:
 		return nil
 	case <-done:
-		return NewRuntimeError("send on closed channel")
+		return &panicError{value: "send on closed channel"}
 	case <-ctx.Done():
 		return contextError(ctx)
 	}
@@ -374,7 +376,7 @@ func (c *ChannelVal) Receive(ctx context.Context) (value any, open bool, err err
 
 func (c *ChannelVal) Close() error {
 	if c == nil {
-		return NewRuntimeError("close of nil channel")
+		return &panicError{value: "close of nil channel"}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -382,7 +384,7 @@ func (c *ChannelVal) Close() error {
 		return NewRuntimeError("cannot close host-owned channel")
 	}
 	if c.Closed {
-		return NewRuntimeError("close of closed channel")
+		return &panicError{value: "close of closed channel"}
 	}
 	c.Closed = true
 	close(c.C)
@@ -399,12 +401,12 @@ func (c *ChannelVal) TrySend(value any) (sent bool, err error) {
 	closed := c.Closed
 	c.mu.RUnlock()
 	if closed {
-		return false, NewRuntimeError("send on closed channel")
+		return false, &panicError{value: "send on closed channel"}
 	}
 	defer func() {
 		if recover() != nil {
 			sent = false
-			err = NewRuntimeError("send on closed channel")
+			err = &panicError{value: "send on closed channel"}
 		}
 	}()
 	select {
