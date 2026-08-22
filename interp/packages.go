@@ -150,9 +150,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		if len(args) == 0 {
 			return nil, nil
 		}
-		duration := time.Duration(ToInt(args[0])) * time.Millisecond
-		if duration < 0 {
-			return nil, NewRuntimeError("time.Sleep: negative duration")
+		duration, err := millisecondsDuration(ToInt(args[0]), "time.Sleep")
+		if err != nil {
+			return nil, err
 		}
 		timer := time.NewTimer(duration)
 		defer timer.Stop()
@@ -855,13 +855,33 @@ func (w *nativeWaitGroup) Wait(ctx context.Context) error {
 // ensureNativeWG returns the nativeWaitGroup associated with a StructVal.
 func ensureNativeWG(v any) *nativeWaitGroup {
 	if sv, ok := v.(*StructVal); ok {
+		if state := sv.nativeState.Load(); state != nil {
+			if wg, ok := state.value.(*nativeWaitGroup); ok {
+				return wg
+			}
+		}
+		// A zero-value WaitGroup can be shared by several guest goroutines
+		// before its first Add. Serialize only this one-time map transition;
+		// every later Add/Done/Wait takes the atomic fast path above.
+		sv.nativeMu.Lock()
+		defer sv.nativeMu.Unlock()
+		if state := sv.nativeState.Load(); state != nil {
+			if wg, ok := state.value.(*nativeWaitGroup); ok {
+				return wg
+			}
+		}
 		if wgi, ok := sv.Fields["__native"]; ok {
 			if wg, ok := wgi.(*nativeWaitGroup); ok {
+				sv.nativeState.Store(&structNativeState{value: wg})
 				return wg
 			}
 		}
 		wg := newNativeWaitGroup()
+		if sv.Fields == nil {
+			sv.Fields = make(map[string]any, 1)
+		}
 		sv.Fields["__native"] = wg
+		sv.nativeState.Store(&structNativeState{value: wg})
 		return wg
 	}
 	return newNativeWaitGroup()
@@ -870,6 +890,18 @@ func ensureNativeWG(v any) *nativeWaitGroup {
 type nativeTimer struct {
 	stop chan struct{}
 	once sync.Once
+}
+
+const maxDurationMilliseconds = int64(1<<63-1) / int64(time.Millisecond)
+
+func millisecondsDuration(milliseconds int, operation string) (time.Duration, error) {
+	if milliseconds < 0 {
+		return 0, NewRuntimeError(operation + ": negative duration")
+	}
+	if int64(milliseconds) > maxDurationMilliseconds {
+		return 0, NewRuntimeError(operation + ": duration exceeds maximum")
+	}
+	return time.Duration(milliseconds) * time.Millisecond, nil
 }
 
 func (timer *nativeTimer) Stop() bool {
@@ -885,6 +917,14 @@ func newNativeTimer(ctx context.Context, milliseconds int, repeating bool) (*Str
 	if milliseconds <= 0 {
 		return nil, NewRuntimeError("timer duration must be positive")
 	}
+	operation := "time.NewTimer"
+	if repeating {
+		operation = "time.NewTicker"
+	}
+	duration, err := millisecondsDuration(milliseconds, operation)
+	if err != nil {
+		return nil, err
+	}
 	channel := &ChannelVal{ElementType: "int", C: make(chan any, 1)}
 	timer := &nativeTimer{stop: make(chan struct{})}
 	typeName := "Timer"
@@ -892,13 +932,14 @@ func newNativeTimer(ctx context.Context, milliseconds int, repeating bool) (*Str
 		typeName = "Ticker"
 	}
 	value := &StructVal{TypeName: typeName, Fields: map[string]any{"C": channel, "__nativeTimer": timer}}
-	duration := time.Duration(milliseconds) * time.Millisecond
 
 	go func() {
 		if !repeating {
+			deadline := time.NewTimer(duration)
+			defer deadline.Stop()
 			select {
-			case <-time.After(duration):
-				_, _ = channel.TrySend(int(time.Now().UnixMilli()))
+			case now := <-deadline.C:
+				_, _ = channel.TrySend(int(now.UnixMilli()))
 			case <-timer.stop:
 			case <-ctx.Done():
 			}

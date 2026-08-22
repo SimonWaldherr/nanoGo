@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // RuntimeError is a lightweight error type for runtime faults. Loc is filled
@@ -65,7 +66,15 @@ type Function struct {
 type StructVal struct {
 	TypeName string
 	Fields   map[string]any
+
+	// nativeState mirrors the private __native field once it has been read or
+	// initialized. It makes repeated native-method calls lock-free while
+	// nativeMu prevents two guest goroutines from racing the first map access.
+	nativeMu    sync.Mutex
+	nativeState atomic.Pointer[structNativeState]
 }
+
+type structNativeState struct{ value any }
 
 type SliceVal struct {
 	ElementType string
@@ -133,9 +142,12 @@ func ToNativeValue(v any) any {
 type ChannelVal struct {
 	ElementType string
 	C           chan any
-	Closed      bool
+	// Closed is retained as a compatibility snapshot for hosts that inspect a
+	// channel after closing it. Runtime synchronization uses closed instead;
+	// callers must not mutate or concurrently read this field directly.
+	Closed bool
 
-	mu sync.RWMutex
+	closed atomic.Bool
 	// done is set for host-owned input channels. They are intentionally not
 	// closed by nanoGo code: closing a host transport would let guest code
 	// disrupt host communication.

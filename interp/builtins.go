@@ -96,7 +96,7 @@ func zeroValue(typ string) any {
 			return &MapVal{KeyType: k, ElementType: v, Data: map[string]any{}, Keys: map[string]any{}}
 		}
 		if strings.HasPrefix(typ, "chan ") {
-			return &ChannelVal{ElementType: typ[5:], C: make(chan any), Closed: false}
+			return &ChannelVal{ElementType: typ[5:], C: make(chan any)}
 		}
 		return &StructVal{TypeName: typ, Fields: map[string]any{}}
 	}
@@ -203,9 +203,9 @@ func (vm *Interpreter) builtinMake(typ string, args []any) (any, error) {
 			return nil, NewRuntimeError("make: size exceeds interpreter limit")
 		}
 		if cap == 0 {
-			return &ChannelVal{ElementType: elem, C: make(chan any), Closed: false}, nil
+			return &ChannelVal{ElementType: elem, C: make(chan any)}, nil
 		}
-		return &ChannelVal{ElementType: elem, C: make(chan any, cap), Closed: false}, nil
+		return &ChannelVal{ElementType: elem, C: make(chan any, cap)}, nil
 	}
 	return nil, NewRuntimeError("make: unsupported type")
 }
@@ -293,11 +293,11 @@ func (c *ChannelVal) Send(ctx context.Context, value any) (err error) {
 	if c.direction == channelReceiveOnly {
 		return NewRuntimeError("send on receive-only host channel")
 	}
-	c.mu.RLock()
-	closed := c.Closed
+	if c.closed.Load() {
+		return NewRuntimeError("send on closed channel")
+	}
 	done := c.done
-	c.mu.RUnlock()
-	if closed {
+	if channelDone(done) {
 		return NewRuntimeError("send on closed channel")
 	}
 	defer func() {
@@ -330,15 +330,24 @@ func (c *ChannelVal) Receive(ctx context.Context) (value any, open bool, err err
 	if c.direction == channelSendOnly {
 		return nil, false, NewRuntimeError("receive on send-only host channel")
 	}
-	c.mu.RLock()
 	done := c.done
-	c.mu.RUnlock()
 	if done == nil {
 		select {
 		case value, open = <-c.C:
 			return value, open, nil
 		case <-ctx.Done():
 			return nil, false, contextError(ctx)
+		}
+	}
+	if channelDone(done) {
+		// A HostChannel keeps its transport open and signals closure on done,
+		// so queued host values must be drained explicitly before reporting a
+		// closed receive.
+		select {
+		case value = <-c.C:
+			return value, true, nil
+		default:
+			return nil, false, nil
 		}
 	}
 	select {
@@ -361,12 +370,10 @@ func (c *ChannelVal) Close() error {
 	if c == nil {
 		return NewRuntimeError("close of nil channel")
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.hostOwned {
 		return NewRuntimeError("cannot close host-owned channel")
 	}
-	if c.Closed {
+	if !c.closed.CompareAndSwap(false, true) {
 		return NewRuntimeError("close of closed channel")
 	}
 	c.Closed = true
@@ -380,10 +387,7 @@ func (c *ChannelVal) TrySend(value any) (sent bool, err error) {
 	if c == nil {
 		return false, NewRuntimeError("send on nil channel")
 	}
-	c.mu.RLock()
-	closed := c.Closed
-	c.mu.RUnlock()
-	if closed {
+	if c.closed.Load() {
 		return false, NewRuntimeError("send on closed channel")
 	}
 	defer func() {
@@ -405,6 +409,21 @@ func contextError(ctx context.Context) error {
 		return err
 	}
 	return context.Canceled
+}
+
+// channelDone reports a HostChannel endpoint's closure without allocating or
+// blocking. It is intentionally used as a preflight check; the following
+// select still handles a close that races this check.
+func channelDone(done <-chan struct{}) bool {
+	if done == nil {
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }
 
 // Simple type conversion calls: string([]byte), float64(int), etc.

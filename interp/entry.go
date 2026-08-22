@@ -25,8 +25,9 @@ func (vm *Interpreter) WithExecution(ctx context.Context, fset *token.FileSet, f
 	exec.fset = fset
 	vm.emitTrace("run_start", "program", "", nil)
 	defer func() {
-		exec.cancel()
+		exec.finish()
 		exec.wg.Wait()
+		err = exec.finalError(err)
 		message := "ok"
 		if err != nil {
 			message = err.Error()

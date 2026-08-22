@@ -49,6 +49,9 @@ func (c *HostChannel) Send(ctx context.Context, value any) error {
 	if c == nil {
 		return ErrHostChannelClosed
 	}
+	if channelDone(c.inputDone) {
+		return ErrHostChannelClosed
+	}
 	v, err := bridgeToGuest(value)
 	if err != nil {
 		return err
@@ -74,10 +77,28 @@ func (c *HostChannel) Receive(ctx context.Context) (any, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Prefer already-queued output over the separate closure signal. Unlike a
+	// raw closed Go channel, HostChannel leaves outbound open to avoid a host
+	// send/close panic, so draining buffered values is explicit.
+	select {
+	case value := <-c.outbound:
+		return bridgeToHost(value)
+	default:
+	}
+	if channelDone(c.outputDone) {
+		return nil, ErrHostChannelClosed
+	}
 	select {
 	case value := <-c.outbound:
 		return bridgeToHost(value)
 	case <-c.outputDone:
+		// A value that was queued just before CloseOutput won the race must
+		// still be observable before the endpoint reports closed.
+		select {
+		case value := <-c.outbound:
+			return bridgeToHost(value)
+		default:
+		}
 		return nil, ErrHostChannelClosed
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -92,7 +113,8 @@ func (c *HostChannel) CloseInput() {
 	}
 }
 
-// CloseOutput stops guest -> host traffic and unblocks a guest sender.
+// CloseOutput stops guest -> host traffic and unblocks a guest sender. Values
+// accepted into the output buffer before closure remain readable by Receive.
 func (c *HostChannel) CloseOutput() {
 	if c != nil {
 		c.outputOnce.Do(func() { close(c.outputDone) })

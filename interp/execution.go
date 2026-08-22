@@ -2,6 +2,7 @@ package interp
 
 import (
 	"context"
+	"errors"
 	"go/ast"
 	"go/token"
 	"strconv"
@@ -45,13 +46,24 @@ type execution struct {
 	litCache map[*ast.BasicLit]int
 
 	killed     atomic.Bool
-	cancelled  atomic.Bool // mirrors ctx.Done() without a channel op on the hot path — see beginExecution
+	cancelled  atomic.Bool // mirrors parent cancellation without a channel op on the hot path — see beginExecution
 	limitCause atomic.Uint32
 	steps      atomic.Uint64
 	goroutines atomic.Int64
 	concurrent atomic.Bool
 	wg         sync.WaitGroup
+
+	// stopParentWatch unregisters the parent cancellation callback installed
+	// by beginExecution. context.AfterFunc does not reserve a goroutine while
+	// an execution is healthy, unlike a goroutine parked on ctx.Done().
+	stopParentWatch func() bool
+	failure         atomic.Pointer[executionFailure]
 }
+
+// executionFailure is immutable after publication. Keeping the error behind
+// an atomic pointer lets evaluator checkpoints observe a worker failure
+// without taking a lock on the hot path.
+type executionFailure struct{ err error }
 
 const (
 	limitNone uint32 = iota
@@ -62,12 +74,11 @@ const (
 // err reports why execution should stop, or nil to continue. It runs on
 // every single evaluator checkpoint (evalExpr and evalStmt both call it via
 // executionError/checkpoint), so cancellation is read from the plain atomic
-// bool a background goroutine already maintains (see beginExecution) rather
-// than via `select { case <-e.ctx.Done(): ... default: }` here: a select
-// still has to synchronize on the channel's internal lock even when it
-// hits the default case, and profiling showed that cost was significant
-// when paid on every node of a running program instead of exactly once per
-// cancellation.
+// bool maintained by a context callback (see beginExecution) rather than via
+// `select { case <-e.ctx.Done(): ... default: }` here: a select still has to
+// synchronize on the channel's internal lock even when it hits the default
+// case, and profiling showed that cost was significant when paid on every
+// node of a running program instead of exactly once per cancellation.
 func (e *execution) err() error {
 	switch e.limitCause.Load() {
 	case limitSteps:
@@ -81,6 +92,9 @@ func (e *execution) err() error {
 	// immediately still reports ErrKilled (not context.Canceled).
 	if e.killed.Load() {
 		return ErrKilled
+	}
+	if failure := e.failure.Load(); failure != nil {
+		return failure.err
 	}
 	if e.cancelled.Load() {
 		return e.ctx.Err()
@@ -106,11 +120,10 @@ func (e *execution) reserveGoroutine() error {
 	if err := e.err(); err != nil {
 		return err
 	}
-	if e.limits.MaxGoroutines <= 0 {
-		e.concurrent.Store(true)
-		return nil
-	}
-	if e.goroutines.Add(1) <= int64(e.limits.MaxGoroutines) {
+	active := e.goroutines.Add(1)
+	if e.limits.MaxGoroutines <= 0 || active <= int64(e.limits.MaxGoroutines) {
+		// Publish before the Go statement launches the child. The child and
+		// its parent therefore both take Env locks for their whole overlap.
 		e.concurrent.Store(true)
 		return nil
 	}
@@ -120,8 +133,10 @@ func (e *execution) reserveGoroutine() error {
 }
 
 func (e *execution) releaseGoroutine() {
-	if e.limits.MaxGoroutines > 0 {
-		e.goroutines.Add(-1)
+	if e.goroutines.Add(-1) == 0 {
+		// Once the final guest child has returned only the root evaluator is
+		// left, so Env operations can recover their lock-free fast path.
+		e.concurrent.Store(false)
 	}
 }
 
@@ -135,6 +150,44 @@ func (e *execution) kill() {
 	e.cancel()
 }
 
+// recordWorkerError publishes the first real guest-goroutine failure and
+// cancels sibling work. Context errors that arrive after an execution has
+// already been cancelled are expected teardown, not a new program failure.
+func (e *execution) recordWorkerError(err error) {
+	if err == nil || e.ctx.Err() != nil {
+		return
+	}
+	if e.failure.CompareAndSwap(nil, &executionFailure{err: err}) {
+		e.cancel()
+	}
+}
+
+// finalError keeps a root error when it is more specific, but surfaces a
+// worker failure that woke the root through context cancellation or that
+// happened just as the root returned successfully.
+func (e *execution) finalError(err error) error {
+	failure := e.failure.Load()
+	if failure == nil {
+		return err
+	}
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return failure.err
+	}
+	return err
+}
+
+// finish cancels all remaining guest work when the root invocation returns.
+// Store cancelled after cancellation so evaluator-only busy loops observe the
+// teardown as well as channel and select waits. This is especially important
+// for Run(), whose background parent has no cancellation callback.
+func (e *execution) finish() {
+	if e.stopParentWatch != nil {
+		e.stopParentWatch()
+	}
+	e.cancel()
+	e.cancelled.Store(true)
+}
+
 func (vm *Interpreter) beginExecution(parent context.Context) (*execution, error) {
 	if parent == nil {
 		parent = context.Background()
@@ -146,24 +199,16 @@ func (vm *Interpreter) beginExecution(parent context.Context) (*execution, error
 	}
 	ctx, cancel := context.WithCancel(parent)
 	e := &execution{ctx: ctx, cancel: cancel, limits: vm.Limits}
-	// A background context cannot be cancelled by its parent. Avoid creating
-	// a short-lived watcher goroutine for that overwhelmingly common Run()
-	// path: limits and Kill already report through their own atomics, while
-	// blocked guest operations receive ctx directly. A cancellable parent
-	// (deadline, WithCancel, ...) still gets the watcher so evaluator
-	// checkpoints return the parent's precise cancellation error promptly.
+	// A background context cannot be cancelled by its parent. For a
+	// cancellable parent, AfterFunc registers an efficient callback without
+	// starting a parked goroutine for every RunContext call. The callback
+	// cancels the child itself before publishing the flag, so err() never sees
+	// a true flag paired with a still-live child context.
 	if parent.Done() != nil {
-		// This is the one place this execution's ctx.Done() channel is waited
-		// on: cheaply (a parked goroutine, not a busy poll) and exactly once,
-		// flipping e.cancelled for err()'s hot-path atomic read. This goroutine
-		// always exits promptly — RunContext/WithExecution's defer calls
-		// e.cancel() unconditionally, including on ordinary successful
-		// completion, which closes Done() and unblocks it — so it never leaks
-		// or outlives the execution it belongs to.
-		go func() {
-			<-ctx.Done()
+		e.stopParentWatch = context.AfterFunc(parent, func() {
+			cancel()
 			e.cancelled.Store(true)
-		}()
+		})
 	}
 	vm.execution.Store(e)
 	vm.activeExecution = e
@@ -193,6 +238,19 @@ func (vm *Interpreter) executionError() error {
 		return nil
 	}
 	return e.checkpoint()
+}
+
+// cancellationError is used after a context wait has already unblocked. It
+// preserves an interpreter-specific stop reason (limit, Kill, worker failure)
+// when it has been published; otherwise it returns the context's precise
+// cancellation error even if its lightweight callback has not run yet.
+func (vm *Interpreter) cancellationError() error {
+	if e := vm.activeExecution; e != nil {
+		if err := e.err(); err != nil {
+			return err
+		}
+	}
+	return contextError(vm.Context())
 }
 
 // Kill cooperatively stops the currently running program. It interrupts

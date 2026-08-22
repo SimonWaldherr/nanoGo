@@ -320,16 +320,11 @@ func lookupValueInEnv(env *Env, name string) (any, bool) {
 }
 
 // get, set, and declare all check vm.activeExecution's concurrent flag
-// before deciding whether to lock: it starts false and is set exactly once,
-// permanently, the moment the guest program's first `go` statement actually
-// spawns a goroutine (see execution.reserveGoroutine) — a happens-before
-// edge guaranteed by Go's memory model for the `go` statement itself, so by
-// the time any second goroutine could possibly touch an Env, every
-// goroutine (including the original one) already observes concurrent as
-// true. Until that first spawn, exactly one goroutine ever touches any Env
-// in this execution, so every RWMutex lock/unlock on that path is pure
-// overhead — this mirrors getInt/setInt/declareInt's existing fast path,
-// generalized to the any-valued case.
+// before deciding whether to lock. execution.reserveGoroutine publishes true
+// before it launches a child, and releaseGoroutine clears it only after the
+// final child returns. That gives every overlapping parent/child access the
+// required synchronization while letting a root evaluator regain the
+// lock-free path after it has joined all of its worker goroutines.
 func (vm *Interpreter) get(name string, env *Env) (any, bool) {
 	exec := vm.activeExecution
 	for e := env; e != nil; e = e.Parent {

@@ -42,11 +42,28 @@ func newTestState() *testState { return &testState{} }
 
 func ensureTestState(v any) *testState {
 	if sv, ok := v.(*StructVal); ok {
+		if state := sv.nativeState.Load(); state != nil {
+			if ts, ok := state.value.(*testState); ok {
+				return ts
+			}
+		}
+		sv.nativeMu.Lock()
+		defer sv.nativeMu.Unlock()
+		if state := sv.nativeState.Load(); state != nil {
+			if ts, ok := state.value.(*testState); ok {
+				return ts
+			}
+		}
 		if ts, ok := sv.Fields["__native"].(*testState); ok {
+			sv.nativeState.Store(&structNativeState{value: ts})
 			return ts
 		}
 		ts := newTestState()
+		if sv.Fields == nil {
+			sv.Fields = make(map[string]any, 1)
+		}
 		sv.Fields["__native"] = ts
+		sv.nativeState.Store(&structNativeState{value: ts})
 		return ts
 	}
 	return newTestState()
@@ -168,11 +185,28 @@ func (b *benchState) Elapsed() time.Duration {
 
 func ensureBenchState(v any) *benchState {
 	if sv, ok := v.(*StructVal); ok {
+		if state := sv.nativeState.Load(); state != nil {
+			if bs, ok := state.value.(*benchState); ok {
+				return bs
+			}
+		}
+		sv.nativeMu.Lock()
+		defer sv.nativeMu.Unlock()
+		if state := sv.nativeState.Load(); state != nil {
+			if bs, ok := state.value.(*benchState); ok {
+				return bs
+			}
+		}
 		if bs, ok := sv.Fields["__native"].(*benchState); ok {
+			sv.nativeState.Store(&structNativeState{value: bs})
 			return bs
 		}
 		bs := newBenchState()
+		if sv.Fields == nil {
+			sv.Fields = make(map[string]any, 1)
+		}
 		sv.Fields["__native"] = bs
+		sv.nativeState.Store(&structNativeState{value: bs})
 		return bs
 	}
 	return newBenchState()

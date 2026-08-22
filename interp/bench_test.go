@@ -78,6 +78,25 @@ func main() {
 	}
 }
 
+// BenchmarkChannelBufferedRoundTrip isolates the runtime overhead of the
+// ChannelVal send/receive path used by guest channels. Keep this separate from
+// evaluator benchmarks so channel synchronization changes can be compared
+// without parser or AST-dispatch noise.
+func BenchmarkChannelBufferedRoundTrip(b *testing.B) {
+	ch := &ChannelVal{ElementType: "int", C: make(chan any, 1)}
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := ch.Send(ctx, i); err != nil {
+			b.Fatalf("Send: %v", err)
+		}
+		if _, open, err := ch.Receive(ctx); err != nil || !open {
+			b.Fatalf("Receive: value open=%v err=%v", open, err)
+		}
+	}
+}
+
 // BenchmarkVFSReadWrite measures VFS.WriteFile/ReadFile throughput, the hot
 // path behind every os.* and fs.* guest file operation.
 func BenchmarkVFSReadWrite(b *testing.B) {

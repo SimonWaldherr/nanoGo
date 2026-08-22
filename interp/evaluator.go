@@ -30,8 +30,9 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 	defer func() {
 		// A guest goroutine must not outlive its host invocation. All evaluator
 		// and channel waits observe this cancellation and unwind cooperatively.
-		exec.cancel()
+		exec.finish()
 		exec.wg.Wait()
+		err = exec.finalError(err)
 		message := "ok"
 		if err != nil {
 			message = err.Error()
@@ -1786,6 +1787,7 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		var rcases []reflect.SelectCase
 		type selectChoice struct {
 			clause     *ast.CommClause
+			channel    *ChannelVal
 			closed     bool
 			sendClosed bool
 			cancel     bool
@@ -1824,7 +1826,7 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				}
 				appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.C)}, selectChoice{clause: cc})
 				if ch.done != nil {
-					appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.done)}, selectChoice{clause: cc, closed: true})
+					appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.done)}, selectChoice{clause: cc, channel: ch, closed: true})
 				}
 			case *ast.AssignStmt:
 				// v := <-ch  or  v, ok := <-ch
@@ -1848,7 +1850,7 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				}
 				appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.C)}, selectChoice{clause: cc})
 				if ch.done != nil {
-					appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.done)}, selectChoice{clause: cc, closed: true})
+					appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.done)}, selectChoice{clause: cc, channel: ch, closed: true})
 				}
 			case *ast.SendStmt:
 				// ch <- v
@@ -1867,6 +1869,9 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				if ch.direction == channelReceiveOnly {
 					return controlFlow{}, NewRuntimeError("send on receive-only host channel")
 				}
+				if channelDone(ch.done) {
+					return controlFlow{}, NewRuntimeError("send on closed host channel")
+				}
 				v := val // capture for reflect
 				appendCase(reflect.SelectCase{
 					Dir:  reflect.SelectSend,
@@ -1881,7 +1886,10 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			}
 		}
 		if len(rcases) == 0 {
-			return controlFlow{}, nil
+			// Go's empty select blocks forever. A cancellable execution still
+			// needs a way out so deadlines and Kill do not leak the host call.
+			<-vm.Context().Done()
+			return controlFlow{}, vm.cancellationError()
 		}
 		// Cancellation is an additional select arm, so a program blocked in
 		// select observes a deadline or Kill immediately.
@@ -1892,15 +1900,25 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		}
 		choice := choices[chosen]
 		if choice.cancel {
-			return controlFlow{}, vm.executionError()
+			return controlFlow{}, vm.cancellationError()
 		}
 		if choice.sendClosed {
 			return controlFlow{}, NewRuntimeError("send on closed host channel")
 		}
 		cc := choice.clause
 		if choice.closed {
-			recvVal = reflect.Value{}
-			recvOK = false
+			// HostChannel models closure with a separate done channel so the
+			// host never races a raw channel close. If both the done arm and a
+			// buffered data arm are ready, reflect.Select may choose done first;
+			// drain one queued value here to retain ordinary Go channel semantics.
+			select {
+			case value := <-choice.channel.C:
+				recvVal = reflect.ValueOf(value)
+				recvOK = true
+			default:
+				recvVal = reflect.Value{}
+				recvOK = false
+			}
 		}
 		caseEnv := NewEnv(env)
 		// Bind received value(s) if the chosen case was a receive assignment.
@@ -1960,7 +1978,8 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			defer exec.releaseGoroutine()
 			vm.emitTrace("goroutine_start", fn.Name, "", st)
 			defer vm.emitTrace("goroutine_end", fn.Name, "", st)
-			_, _ = vm.callFunction(fn, vm.globals, recv, args)
+			_, workerErr := vm.callFunction(fn, vm.globals, recv, args)
+			exec.recordWorkerError(workerErr)
 		}()
 		return controlFlow{}, nil
 

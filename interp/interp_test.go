@@ -474,6 +474,33 @@ func main() {
 	}
 }
 
+func TestEnsureNativeWaitGroupInitializesOnceConcurrently(t *testing.T) {
+	value := &StructVal{TypeName: "WaitGroup", Fields: map[string]any{}}
+	const workers = 32
+	start := make(chan struct{})
+	instances := make([]*nativeWaitGroup, workers)
+	var workersWG sync.WaitGroup
+	for i := range instances {
+		workersWG.Add(1)
+		go func(i int) {
+			defer workersWG.Done()
+			<-start
+			instances[i] = ensureNativeWG(value)
+		}(i)
+	}
+	close(start)
+	workersWG.Wait()
+	first := instances[0]
+	if first == nil {
+		t.Fatal("ensureNativeWG returned nil")
+	}
+	for i, instance := range instances[1:] {
+		if instance != first {
+			t.Fatalf("worker %d received a different WaitGroup backing object", i+1)
+		}
+	}
+}
+
 func TestStringPackage(t *testing.T) {
 	out := runAndCapture(t, `
 package main
@@ -1687,6 +1714,69 @@ func main() { ch := make(chan int); <-ch }`)
 	}
 }
 
+func TestRunContextInterruptsEmptySelect(t *testing.T) {
+	vm, _ := newTestVM()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	err := vm.RunContext(ctx, `package main
+func main() { select {} }`)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunContext error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestTimerRejectsDurationOverflowBeforeStartingWorker(t *testing.T) {
+	vm, _ := newTestVM()
+	err := vm.Run(`package main
+import "time"
+func main() { time.NewTicker(9223372036854775807) }`)
+	if err == nil || !strings.Contains(err.Error(), "duration exceeds maximum") {
+		t.Fatalf("Run error = %v, want duration-overflow failure", err)
+	}
+}
+
+func TestRunStopsBackgroundWorkerWhenMainReturns(t *testing.T) {
+	vm, _ := newTestVM()
+	// Disable limits so this test proves root teardown stops an evaluator-only
+	// busy loop rather than eventually relying on the step limit.
+	vm.Limits = ExecutionLimits{}
+	done := make(chan error, 1)
+	go func() {
+		done <- vm.Run(`package main
+func main() {
+    go func() { for { } }()
+}`)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run error = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not cancel the background guest goroutine")
+	}
+}
+
+func TestGuestGoroutineFailureCancelsAndPropagates(t *testing.T) {
+	vm, _ := newTestVM()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := vm.RunContext(ctx, `package main
+func main() {
+    started := make(chan int)
+    block := make(chan int)
+    go func() {
+        started <- 1
+        panic("worker boom")
+    }()
+    <-started
+    <-block
+}`)
+	if err == nil || !strings.Contains(err.Error(), "worker boom") {
+		t.Fatalf("RunContext error = %v, want worker panic", err)
+	}
+}
+
 func TestKillStopsRunningProgram(t *testing.T) {
 	vm, _ := newTestVM()
 	done := make(chan error, 1)
@@ -1783,6 +1873,88 @@ func main() {
 	}
 	if value != "closed" {
 		t.Fatalf("bridge close response = %#v, want closed", value)
+	}
+}
+
+func TestHostChannelRejectsSendAfterInputClose(t *testing.T) {
+	bridge := NewHostChannel(1)
+	bridge.CloseInput()
+	if err := bridge.Send(context.Background(), "ignored"); !errors.Is(err, ErrHostChannelClosed) {
+		t.Fatalf("bridge.Send after CloseInput = %v, want ErrHostChannelClosed", err)
+	}
+}
+
+func TestHostChannelRejectsGuestSendAfterOutputClose(t *testing.T) {
+	vm, _ := newTestVM()
+	bridge := NewHostChannel(1)
+	if err := vm.BindHostChannel("hostIn", "hostOut", bridge); err != nil {
+		t.Fatalf("BindHostChannel: %v", err)
+	}
+	bridge.CloseOutput()
+	err := vm.Run(`package main
+func main() { hostOut <- "ignored" }`)
+	if err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("Run error = %v, want closed-output failure", err)
+	}
+}
+
+func TestHostChannelSelectDrainsBufferedInputBeforeClose(t *testing.T) {
+	vm, _ := newTestVM()
+	bridge := NewHostChannel(1)
+	if err := vm.BindHostChannel("hostIn", "hostOut", bridge); err != nil {
+		t.Fatalf("BindHostChannel: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bridge.Send(ctx, "queued"); err != nil {
+		t.Fatalf("bridge.Send: %v", err)
+	}
+	bridge.CloseInput()
+	if err := vm.Run(`package main
+func main() {
+    select {
+    case value, open := <-hostIn:
+        if open { hostOut <- value } else { hostOut <- "closed" }
+    }
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	value, err := bridge.Receive(ctx)
+	if err != nil {
+		t.Fatalf("bridge.Receive: %v", err)
+	}
+	if value != "queued" {
+		t.Fatalf("select received %#v, want queued buffered value", value)
+	}
+}
+
+func TestHostChannelOutputCloseDrainsBufferedMessages(t *testing.T) {
+	vm, _ := newTestVM()
+	bridge := NewHostChannel(2)
+	if err := vm.BindHostChannel("hostIn", "hostOut", bridge); err != nil {
+		t.Fatalf("BindHostChannel: %v", err)
+	}
+	if err := vm.Run(`package main
+func main() {
+    hostOut <- "first"
+    hostOut <- "second"
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	bridge.CloseOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for _, want := range []string{"first", "second"} {
+		value, err := bridge.Receive(ctx)
+		if err != nil {
+			t.Fatalf("bridge.Receive: %v", err)
+		}
+		if value != want {
+			t.Fatalf("bridge output = %#v, want %q", value, want)
+		}
+	}
+	if _, err := bridge.Receive(ctx); !errors.Is(err, ErrHostChannelClosed) {
+		t.Fatalf("bridge.Receive after drain = %v, want ErrHostChannelClosed", err)
 	}
 }
 
@@ -1883,6 +2055,20 @@ func main() {
 }`)
 	if !errors.Is(err, ErrGoroutineLimit) {
 		t.Fatalf("Run error = %v, want ErrGoroutineLimit", err)
+	}
+}
+
+func TestExecutionRestoresSingleGoroutineFastPath(t *testing.T) {
+	exec := &execution{limits: ExecutionLimits{}}
+	if err := exec.reserveGoroutine(); err != nil {
+		t.Fatalf("reserveGoroutine: %v", err)
+	}
+	if !exec.concurrent.Load() {
+		t.Fatal("concurrent flag = false while worker is active")
+	}
+	exec.releaseGoroutine()
+	if exec.concurrent.Load() {
+		t.Fatal("concurrent flag stayed true after the final worker returned")
 	}
 }
 
