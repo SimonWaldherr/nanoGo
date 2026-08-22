@@ -43,6 +43,14 @@ type TypeDef struct {
 	Underlying string // scalar representation for a named or alias type
 	Fields     []FieldDef
 	Methods    map[string]*Function
+	// InterfaceMethods names the method set of a Kind=="interface" TypeDef
+	// (nil/empty for the empty interface). It has no *Function bodies —
+	// an interface declares signatures, not implementations — so a type
+	// assertion against it checks a candidate value's own registered
+	// TypeDef.Methods for each of these names instead. Embedded interfaces
+	// in the declaration are not expanded into this list (see the
+	// InterfaceType case in evaluator.go/package_scope.go).
+	InterfaceMethods []string
 }
 
 // Function represents either a user-defined or native function.
@@ -60,6 +68,14 @@ type Function struct {
 
 	RecvName string // method receiver var name
 	RecvType string // method receiver type (without "*")
+
+	// Results names this function's named result parameters, e.g. ["result"]
+	// for `func f() (result int)`, or nil for unnamed/no results (Go requires
+	// all-or-nothing naming, so a partial list never occurs). callFunction
+	// declares each of these as a local before running the body; only when
+	// there is exactly one does it also feed back into the function's
+	// actual return value (see callFrame.namedResult).
+	Results []string
 }
 
 // StructVal, SliceVal, MapVal, ChannelVal are dynamic runtime containers.

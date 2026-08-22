@@ -8,6 +8,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"syscall/js"
 	"time"
 
@@ -18,6 +19,20 @@ import (
 
 // activeCanvas holds the currently bound canvas from the host page.
 var activeCanvas runtime.CanvasBinding
+
+// activeDebug is the single live pause/step session the playground supports
+// at a time (one worker, one user). Starting a new one detaches and kills
+// whatever was previously running so a stale paused goroutine never leaks
+// past a page reload of the editor's "Debug run" button.
+var (
+	debugMu     sync.Mutex
+	activeDebug *debugSession
+)
+
+type debugSession struct {
+	vm *interp.Interpreter
+	dc *interp.DebugController
+}
 
 // newPlaygroundVM builds an interpreter configured exactly like the
 // playground expects: private in-memory VFS, HTTP allowed (still subject to
@@ -721,6 +736,7 @@ func jsNanoGoVersion(this js.Value, args []js.Value) any {
 		"hasWorkspace":      true,
 		"hasModuleCheck":    true,
 		"hasWorkspaceTests": true,
+		"hasLiveDebug":      true,
 		"workspace": map[string]any{
 			"multiFile":           true,
 			"localImports":        true,
@@ -735,6 +751,190 @@ func jsNanoGoVersion(this js.Value, args []js.Value) any {
 	}
 	b, _ := json.Marshal(info)
 	return string(b)
+}
+
+// postHostEvent forwards a JSON-encoded payload to the JS host through the
+// same nanoGoPostMessage hook the runtime package uses for console/canvas
+// messages (see runtime.sendMessage). Debug events carry nested
+// objects/arrays (Location, Vars, Stack), which that helper's flat
+// string/bool/number mapping can't represent, so this sends the payload
+// pre-marshalled and lets the JS side JSON.parse it.
+func postHostEvent(kind string, payload any) {
+	hook := js.Global().Get("nanoGoPostMessage")
+	if !hook.Truthy() {
+		return
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	obj := js.Global().Get("Object").New()
+	obj.Set("type", kind)
+	obj.Set("json", string(b))
+	hook.Invoke(obj)
+}
+
+// jsNanoGoDebugStart begins a live, pausable run of source in the
+// background and returns immediately — unlike nanoGoRun, which blocks the
+// worker's message loop until the whole program finishes. Running on its
+// own goroutine is what lets the worker keep servicing
+// nanoGoDebugContinue/Step*/Pause/Stop calls while the guest program is
+// parked mid-statement (see interp.DebugController's doc comment on why
+// that's safe: Go's js/wasm scheduler yields to the JS event loop whenever
+// every goroutine is blocked, and resumes this one when a control message
+// calls back into the resume channel it's waiting on).
+//
+// Any previously active debug session is detached and killed first, so
+// starting a new debug run always begins from a clean slate. Arguments:
+// source string, an optional breakpoint-lines array.
+func jsNanoGoDebugStart(this js.Value, args []js.Value) any {
+	if len(args) < 1 {
+		runtime.ConsoleError("nanoGoDebugStart: missing source")
+		return nil
+	}
+	source := args[0].String()
+	var breakpointLines []int
+	if len(args) >= 2 {
+		breakpointLines = breakpointLinesFromJS(args[1])
+	}
+
+	vm := newPlaygroundVM()
+	dc := interp.NewDebugController()
+	dc.SetBreakpoints(breakpointLines)
+	dc.OnPause(func(info interp.DebugPauseInfo) {
+		postHostEvent("debug-pause", info)
+	})
+	vm.SetDebugController(dc)
+
+	debugMu.Lock()
+	previous := activeDebug
+	activeDebug = &debugSession{vm: vm, dc: dc}
+	debugMu.Unlock()
+	if previous != nil {
+		previous.dc.Detach()
+		previous.vm.Kill()
+	}
+
+	go func() {
+		start := time.Now()
+		err := vm.Run(source)
+		activeCanvas.Flush()
+		result := map[string]any{
+			"elapsedMs": float64(time.Since(start).Microseconds()) / 1000,
+			"steps":     vm.LastStepCount(),
+		}
+		if err != nil {
+			result["error"] = err.Error()
+		}
+		postHostEvent("debug-done", result)
+	}()
+	return nil
+}
+
+// debugResumeArgs reads the (token) argument common to every resume call and
+// returns the active session, or ok=false if there isn't one (e.g. the run
+// already finished, or the host raced a stale button click after Stop).
+func debugResumeArgs(args []js.Value) (*debugSession, interp.PauseToken, bool) {
+	debugMu.Lock()
+	session := activeDebug
+	debugMu.Unlock()
+	if session == nil || len(args) < 1 {
+		return nil, 0, false
+	}
+	return session, interp.PauseToken(uint64(args[0].Int())), true
+}
+
+func jsNanoGoDebugContinue(this js.Value, args []js.Value) any {
+	session, token, ok := debugResumeArgs(args)
+	return ok && session.dc.Continue(token)
+}
+
+func jsNanoGoDebugStepInto(this js.Value, args []js.Value) any {
+	session, token, ok := debugResumeArgs(args)
+	return ok && session.dc.StepInto(token)
+}
+
+func jsNanoGoDebugStepOver(this js.Value, args []js.Value) any {
+	session, token, ok := debugResumeArgs(args)
+	return ok && session.dc.StepOver(token)
+}
+
+func jsNanoGoDebugStepOut(this js.Value, args []js.Value) any {
+	session, token, ok := debugResumeArgs(args)
+	return ok && session.dc.StepOut(token)
+}
+
+// jsNanoGoDebugPause requests a stop at the very next statement checkpoint
+// reached by the running program, without needing a breakpoint.
+func jsNanoGoDebugPause(this js.Value, args []js.Value) any {
+	debugMu.Lock()
+	session := activeDebug
+	debugMu.Unlock()
+	if session == nil {
+		return false
+	}
+	session.dc.Pause()
+	return true
+}
+
+// jsNanoGoDebugSetBreakpoints replaces the active session's breakpoint
+// lines (plain, unconditional) without needing a fresh nanoGoDebugStart.
+func jsNanoGoDebugSetBreakpoints(this js.Value, args []js.Value) any {
+	debugMu.Lock()
+	session := activeDebug
+	debugMu.Unlock()
+	if session == nil {
+		return false
+	}
+	var lines []int
+	if len(args) >= 1 {
+		lines = breakpointLinesFromJS(args[0])
+	}
+	session.dc.SetBreakpoints(lines)
+	return true
+}
+
+// jsNanoGoDebugStop detaches and kills the active debug session, resuming
+// any goroutine currently paused so it can unwind rather than leak.
+func jsNanoGoDebugStop(this js.Value, args []js.Value) any {
+	debugMu.Lock()
+	session := activeDebug
+	activeDebug = nil
+	debugMu.Unlock()
+	if session == nil {
+		return false
+	}
+	session.dc.Detach()
+	session.vm.Kill()
+	return true
+}
+
+// jsNanoGoDebugSetVariable assigns a new value to a local variable in the
+// goroutine paused at token, letting a host edit state while stepping
+// through a live debug session. Arguments: token (number), name (string),
+// a Go expression to evaluate as the new value (string). Returns
+// {ok:true, value:"<display string>"} on success or {ok:false, error:"..."}.
+func jsNanoGoDebugSetVariable(this js.Value, args []js.Value) any {
+	result := js.Global().Get("Object").New()
+	debugMu.Lock()
+	session := activeDebug
+	debugMu.Unlock()
+	if session == nil || len(args) < 3 {
+		result.Set("ok", false)
+		result.Set("error", "no active debug session")
+		return result
+	}
+	token := interp.PauseToken(uint64(args[0].Int()))
+	name := args[1].String()
+	value, err := session.dc.SetVariable(token, name, args[2].String())
+	if err != nil {
+		result.Set("ok", false)
+		result.Set("error", err.Error())
+		return result
+	}
+	result.Set("ok", true)
+	result.Set("value", value)
+	return result
 }
 
 // jsNanoGoSetCanvas binds a canvas by element id and optional cell scale.
@@ -776,6 +976,15 @@ func main() {
 	js.Global().Set("nanoGoVersion", js.FuncOf(jsNanoGoVersion))
 	js.Global().Set("nanoGoSetCanvas", js.FuncOf(jsNanoGoSetCanvas))
 	js.Global().Set("nanoGoSetScale", js.FuncOf(jsNanoGoSetScale))
+	js.Global().Set("nanoGoDebugStart", js.FuncOf(jsNanoGoDebugStart))
+	js.Global().Set("nanoGoDebugContinue", js.FuncOf(jsNanoGoDebugContinue))
+	js.Global().Set("nanoGoDebugStepInto", js.FuncOf(jsNanoGoDebugStepInto))
+	js.Global().Set("nanoGoDebugStepOver", js.FuncOf(jsNanoGoDebugStepOver))
+	js.Global().Set("nanoGoDebugStepOut", js.FuncOf(jsNanoGoDebugStepOut))
+	js.Global().Set("nanoGoDebugPause", js.FuncOf(jsNanoGoDebugPause))
+	js.Global().Set("nanoGoDebugSetBreakpoints", js.FuncOf(jsNanoGoDebugSetBreakpoints))
+	js.Global().Set("nanoGoDebugSetVariable", js.FuncOf(jsNanoGoDebugSetVariable))
+	js.Global().Set("nanoGoDebugStop", js.FuncOf(jsNanoGoDebugStop))
 
 	// Signal readiness to the host (worker or main thread). The worker
 	// installs `nanoGoSignalReady` before invoking go.run, so this call

@@ -276,6 +276,35 @@ Select an example from the sidebar to get started! 🚀</div>
             <button id="labReplayNext" class="mini-btn" title="Next call">⏭</button>
             <span id="labReplayInfo" class="inspector-note">No recorded run yet</span>
           </div>
+
+          <!-- Live Debug: a real pause, unlike "Debug run" above (which
+               records a whole run, then replays it). This actually parks
+               the guest goroutine at a breakpoint or step target and only
+               resumes it when a control button is pressed — see
+               interp.DebugController and web/live_debug.js. -->
+          <div class="lab-live-debug">
+            <div class="lab-toolbar">
+              <button id="liveDebugStartBtn" class="mini-btn" title="Run with live pause/step controls, using this file's breakpoints">🔴 Live debug</button>
+              <button id="liveDebugPauseBtn" class="mini-btn" disabled title="Pause at the next statement">⏸ Pause</button>
+              <button id="liveDebugContinueBtn" class="mini-btn" disabled title="Continue">▶ Continue</button>
+              <button id="liveDebugStepIntoBtn" class="mini-btn" disabled title="Step into the next call">↳ Step into</button>
+              <button id="liveDebugStepOverBtn" class="mini-btn" disabled title="Run over the next call without stopping inside it">⤵ Step over</button>
+              <button id="liveDebugStepOutBtn" class="mini-btn" disabled title="Run until the current function returns">⤴ Step out</button>
+              <button id="liveDebugStopBtn" class="mini-btn" disabled title="Stop the live debug session">⏹ Stop</button>
+            </div>
+            <div id="liveDebugStatus" class="inspector-note">Not running</div>
+            <div id="liveDebugInfo" class="lab-live-debug-info" hidden>
+              <div class="lab-live-debug-stack">
+                <strong>Call stack</strong>
+                <pre id="liveDebugStack"></pre>
+              </div>
+              <div class="lab-live-debug-vars">
+                <strong>Local variables</strong>
+                <table id="liveDebugVarsTable"><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody></tbody></table>
+              </div>
+            </div>
+          </div>
+
           <div id="labGraph" class="lab-graph" aria-live="polite">
             <p class="inspector-note">Analyze the current code to build its Mermaid call graph.</p>
           </div>
@@ -1844,6 +1873,22 @@ Select an example from the sidebar to get started! 🚀</div>
                 if (m.result.profile) applyHeatmap(m.result.profile);
               }
               break;
+            case 'debug-pause': {
+              let info = null;
+              try { info = JSON.parse(m.json); } catch (e) { /* ignore malformed payload */ }
+              if (info) document.dispatchEvent(new CustomEvent('nanogo:debug-pause', { detail: info }));
+              break;
+            }
+            case 'debug-done': {
+              let result = null;
+              try { result = JSON.parse(m.json); } catch (e) { /* ignore malformed payload */ }
+              if (!result && m.error) result = { error: m.error };
+              document.dispatchEvent(new CustomEvent('nanogo:debug-done', { detail: result || {} }));
+              break;
+            }
+            case 'debug-command-result':
+              document.dispatchEvent(new CustomEvent('nanogo:debug-command-result', { detail: m }));
+              break;
             case 'done': {
               const elapsed = m.elapsed != null ? m.elapsed : null;
               const stats = m.stats || null;
@@ -1918,6 +1963,28 @@ Select an example from the sidebar to get started! 🚀</div>
         if (heatmapToggle) heatmapToggle.checked = true;
         showOutputPanel('lab');
         runCode();
+      }
+
+      // ---------------- Live debug (real pause/step, see web/live_debug.js) ----------------
+      // Unlike runDebug() above — which records a whole deterministic run and
+      // replays it afterward — this starts the guest program on the worker's
+      // own background goroutine and lets it actually park mid-statement at a
+      // breakpoint or step target. debugCommand() sends the small control
+      // messages (continue/step-into/step-over/step-out/pause/stop) that
+      // resume it; see cmd/wasm's nanoGoDebug* exports and wasm_worker.js's
+      // 'debug-start'/'debug-command' handlers for the other side.
+      function startLiveDebug() {
+        if (!worker) return;
+        clearErrorHighlight();
+        showOutputPanel('lab');
+        const source = getSource();
+        activeRunSource = source;
+        const breakpoints = breakpointLineNumbers();
+        worker.postMessage({ type: 'debug-start', source: source, breakpoints: breakpoints });
+      }
+      function debugCommand(command, extra) {
+        if (!worker) return;
+        worker.postMessage(Object.assign({ type: 'debug-command', command: command }, extra || {}));
       }
 
       // ---------------- Execution inspector ----------------
@@ -3301,6 +3368,8 @@ Select an example from the sidebar to get started! 🚀</div>
         getBreakpoints: breakpointLineNumbers,
         getBreakpointHits: () => Array.from(breakpointHits, ([line, count]) => ({ line, count })),
         runDebug,
+        debugStart: startLiveDebug,
+        debugCommand,
         runWorkspace,
         checkWorkspace: requestWorkspaceCheck,
         getWorkspace: () => ({ modulePath: workspaceModulePath, active: activeFilePath, files: workspaceFileEntries() }),
@@ -3313,6 +3382,7 @@ Select an example from the sidebar to get started! 🚀</div>
     })();
   </script>
   <script src="lab.js?2"></script>
+  <script src="live_debug.js?1"></script>
   <script src="ai.js?1"></script>
 </body>
 </html>

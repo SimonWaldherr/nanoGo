@@ -74,6 +74,15 @@ graph into a clickable [Mermaid](https://mermaid.js.org/) flowchart:
   waiting for UI input.
 - Mermaid loads on demand and is included in the service worker cache after
   installation, so a previously opened playground can visualize code offline.
+- **🔴 Live debug** is a real pause, not record/replay: it runs the program on
+  its own goroutine and actually parks it mid-statement at a breakpoint or a
+  step target, with Continue/Step into/Step over/Step out/Pause/Stop controls,
+  a live call-stack/local-variables view, and an editable value next to each
+  variable so you can change program state on the fly and see the rest of the
+  run react to it. It is built on
+  [`interp.DebugController`](#live-pausestep-debugging) via `cmd/wasm`'s
+  `nanoGoDebugStart`/`nanoGoDebugContinue`/`nanoGoDebugStep*`/`nanoGoDebugPause`/
+  `nanoGoDebugSetVariable`/`nanoGoDebugStop` exports.
 
 ### ✨ Opt-in AI assistant (web playground)
 
@@ -798,6 +807,52 @@ vm.SetTracer(interp.NewTracer(4096))
 `SetBreakpoints` is an atomic, immutable line-set swap and adds no source-line
 lookup cost when no breakpoints are configured.
 
+### Live pause/step debugging
+
+`Tracer`/`SetBreakpoints` above are record-only: a breakpoint hit is logged,
+never blocked. `interp.DebugController` is a second, opt-in mechanism for a
+*live* session — it actually pauses the calling goroutine mid-statement until
+a host resumes it, so it can drive a real Continue/Step into/Step over/Step
+out debugger (this is what the web playground's Lab → **Live debug** panel
+uses, via `cmd/wasm`'s `nanoGoDebugStart`/`nanoGoDebugContinue`/
+`nanoGoDebugStep*` exports):
+
+```go
+dc := interp.NewDebugController()
+dc.SetBreakpoints([]int{12})
+// Or a conditional breakpoint, evaluated in the paused statement's own scope:
+dc.SetConditionalBreakpoint(27, "i == 5")
+dc.OnPause(func(info interp.DebugPauseInfo) {
+    fmt.Println(info.Reason, "at", info.Location, "in", info.Function)
+    fmt.Println(info.Stack)
+    for _, v := range info.Vars {
+        fmt.Println(" ", v.Name, "=", v.Value)
+    }
+    dc.Continue(info.Token) // or StepInto/StepOver/StepOut(info.Token)
+})
+vm.SetDebugController(dc)
+
+// A blocked checkpoint really blocks the calling goroutine, so run on one
+// of your own rather than the one driving OnPause's Continue/Step* calls.
+go func() { _ = vm.RunContext(ctx, source) }()
+```
+
+Because nanoGo supports guest goroutines, more than one can be paused at
+once; each pause gets its own `PauseToken` so a host resumes exactly the one
+it means to. `StepOver`/`StepOut` are frame-identity based (not a numeric
+call-depth count), so they behave correctly even when the stepped function
+recurses. `Pause()` requests a stop at the very next statement any goroutine
+reaches, with no breakpoint needed; `Detach()` resumes everything in free-run
+mode and makes the controller inert without touching the underlying
+execution — pair it with `Interpreter.Kill` to actually stop the program.
+
+While a goroutine is paused, `dc.SetVariable(info.Token, "i", "42")` assigns
+the result of evaluating a Go expression to an existing local, so a host can
+edit state mid-run rather than only observe it (the web playground's Live
+debug panel exposes this as an editable field next to each variable). It
+rejects an undefined name rather than declaring a new one, and returns the
+same capability-safe display string a `VariableSnapshot` would show.
+
 ### Host runtime trace integration
 
 The browser inspector intentionally uses nanoGo's compact `Tracer`: it records
@@ -1268,9 +1323,10 @@ your own workload.
 ## 🗺️ Roadmap
 
 - [ ] **Enhanced Package Support**: More stdlib packages
-- [x] **Debugger Integration (record/replay)**: Source breakpoints, bounded
-  hit events, and trace replay in the browser; live pause/continue remains a
-  future worker protocol.
+- [x] **Debugger Integration**: Source breakpoints (plain and conditional),
+  bounded hit events and trace replay in the browser, plus a live
+  pause/Continue/Step into/Step over/Step out session (`interp.DebugController`,
+  the Lab panel's **Live debug** controls).
 - [ ] **Performance Optimizations**: JIT compilation, bytecode caching
 - [x] **Module System**: Multi-file/multi-package programs loaded from a VFS module (local packages + `go.mod` module path only — no external package downloads); see [interp/loader](interp/loader)
 - [ ] **Advanced Types**: Better interface and generics support

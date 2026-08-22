@@ -84,6 +84,14 @@ func zeroValue(typ string) any {
 		return ""
 	case "struct{}", "nil":
 		return nil
+	case "any", "interface{}", "error":
+		// The zero value of any interface type — including the predeclared
+		// `any` and `error` — is nil, never a struct. Without this case
+		// these fell through to the struct fallback below (treating the
+		// unrecognized name "any"/"error" as if it were a user struct
+		// type), which meant e.g. `var err error` started out as a
+		// non-nil placeholder instead of nil.
+		return nil
 	default:
 		if strings.HasPrefix(typ, "*") {
 			return (*StructVal)(nil)
@@ -106,8 +114,15 @@ func zeroValue(typ string) any {
 // Their dynamic value is the underlying scalar, while the source retains the
 // named type for declarations and conversions.
 func (vm *Interpreter) zeroValueForType(typ string) any {
-	if td := vm.types[typ]; td != nil && td.Kind == "alias" {
-		return zeroValue(td.Underlying)
+	if td := vm.types[typ]; td != nil {
+		if td.Kind == "alias" {
+			return zeroValue(td.Underlying)
+		}
+		if td.Kind == "interface" {
+			// A named interface's zero value is nil, same as "any"/"error"
+			// below — there is no implementation to default-construct.
+			return nil
+		}
 	}
 	return zeroValue(typ)
 }
@@ -285,7 +300,9 @@ func builtinClose(ch any) (any, error) {
 }
 
 // Send and Receive make guest channel operations context-aware. Close races
-// are translated to runtime errors instead of letting a guest panic the host.
+// are translated into a *panicError (a recoverable Go runtime panic, exactly
+// like "send on closed channel" in real Go) rather than letting the host's
+// own native panic — from the concurrent close racing this send — escape.
 func (c *ChannelVal) Send(ctx context.Context, value any) (err error) {
 	if c == nil {
 		return NewRuntimeError("send on nil channel")
@@ -294,15 +311,15 @@ func (c *ChannelVal) Send(ctx context.Context, value any) (err error) {
 		return NewRuntimeError("send on receive-only host channel")
 	}
 	if c.closed.Load() {
-		return NewRuntimeError("send on closed channel")
+		return &panicError{value: "send on closed channel"}
 	}
 	done := c.done
 	if channelDone(done) {
-		return NewRuntimeError("send on closed channel")
+		return &panicError{value: "send on closed channel"}
 	}
 	defer func() {
 		if recover() != nil {
-			err = NewRuntimeError("send on closed channel")
+			err = &panicError{value: "send on closed channel"}
 		}
 	}()
 	if done == nil {
@@ -317,7 +334,7 @@ func (c *ChannelVal) Send(ctx context.Context, value any) (err error) {
 	case c.C <- value:
 		return nil
 	case <-done:
-		return NewRuntimeError("send on closed channel")
+		return &panicError{value: "send on closed channel"}
 	case <-ctx.Done():
 		return contextError(ctx)
 	}
@@ -368,13 +385,13 @@ func (c *ChannelVal) Receive(ctx context.Context) (value any, open bool, err err
 
 func (c *ChannelVal) Close() error {
 	if c == nil {
-		return NewRuntimeError("close of nil channel")
+		return &panicError{value: "close of nil channel"}
 	}
 	if c.hostOwned {
 		return NewRuntimeError("cannot close host-owned channel")
 	}
 	if !c.closed.CompareAndSwap(false, true) {
-		return NewRuntimeError("close of closed channel")
+		return &panicError{value: "close of closed channel"}
 	}
 	c.Closed = true
 	close(c.C)
@@ -388,12 +405,12 @@ func (c *ChannelVal) TrySend(value any) (sent bool, err error) {
 		return false, NewRuntimeError("send on nil channel")
 	}
 	if c.closed.Load() {
-		return false, NewRuntimeError("send on closed channel")
+		return false, &panicError{value: "send on closed channel"}
 	}
 	defer func() {
 		if recover() != nil {
 			sent = false
-			err = NewRuntimeError("send on closed channel")
+			err = &panicError{value: "send on closed channel"}
 		}
 	}()
 	select {
