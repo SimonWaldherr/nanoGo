@@ -621,6 +621,71 @@ type Ref interface {
 	Set(any) error
 }
 
+// lvalueRef is the evaluator's concrete lvalue representation. Assignment
+// used to return the exported Ref interface here, forcing every indexed or
+// field assignment through an interface value (and usually a tiny heap
+// object). Keeping the kind and its payload in one value lets the evaluator
+// dispatch directly while retaining Ref below for compatibility with callers
+// that still need the generic abstraction.
+type lvalueRefKind uint8
+
+const (
+	lvalueVar lvalueRefKind = iota
+	lvalueSliceIndex
+	lvalueMapIndex
+	lvalueField
+)
+
+type lvalueRef struct {
+	kind lvalueRefKind
+	vm   *Interpreter
+	env  *Env
+	name string
+	s    *SliceVal
+	i    int
+	m    *MapVal
+	k    any
+	sv   *StructVal
+}
+
+func (r lvalueRef) get() any {
+	switch r.kind {
+	case lvalueVar:
+		v, _ := r.vm.get(r.name, r.env)
+		return v
+	case lvalueSliceIndex:
+		return r.s.Data[r.i]
+	case lvalueMapIndex:
+		v, _ := r.m.getByKey(r.k)
+		return v
+	case lvalueField:
+		return r.sv.Fields[r.name]
+	default:
+		return nil
+	}
+}
+
+func (r lvalueRef) set(v any) error {
+	switch r.kind {
+	case lvalueVar:
+		r.vm.set(r.name, v, r.env)
+	case lvalueSliceIndex:
+		r.s.Data[r.i] = v
+	case lvalueMapIndex:
+		if v == nil {
+			r.m.deleteByKey(r.k)
+		} else {
+			r.m.setByKey(r.k, v)
+		}
+	case lvalueField:
+		r.sv.Fields[r.name] = v
+	}
+	return nil
+}
+
+func (r lvalueRef) Get() any        { return r.get() }
+func (r lvalueRef) Set(v any) error { return r.set(v) }
+
 type varRef struct {
 	vm   *Interpreter
 	env  *Env

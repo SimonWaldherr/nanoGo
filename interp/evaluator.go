@@ -1444,9 +1444,10 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		// and even for ASSIGN/augmented-assign, a plain identifier target
 		// (the overwhelmingly common case: x = ..., x += ...) goes straight
 		// through vm.get/vm.set instead of allocating a *varRef to wrap
-		// exactly the same two calls behind the Ref interface — resolveRef
+		// exactly the same two calls behind the Ref interface — resolveLvalue
 		// remains the fallback for index/selector lvalues (a[i] = ...,
-		// s.Field = ...), which do need it.
+		// s.Field = ...), which use a concrete value instead of an
+		// interface dispatch on this hot path.
 		switch st.Tok {
 		case token.DEFINE:
 			for i, l := range st.Lhs {
@@ -1483,11 +1484,11 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 					}
 					continue
 				}
-				ref, err := vm.resolveRef(l, env)
+				ref, err := vm.resolveLvalue(l, env)
 				if err != nil {
 					return controlFlow{}, err
 				}
-				if err := ref.Set(v); err != nil {
+				if err := ref.set(v); err != nil {
 					return controlFlow{}, err
 				}
 				if vm.trackingVariables() {
@@ -1538,15 +1539,15 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				}
 				return controlFlow{}, nil
 			}
-			ref, err := vm.resolveRef(st.Lhs[0], env)
+			ref, err := vm.resolveLvalue(st.Lhs[0], env)
 			if err != nil {
 				return controlFlow{}, err
 			}
-			newVal, err := vm.applyBinaryOp(base, ref.Get(), rightVals[0])
+			newVal, err := vm.applyBinaryOp(base, ref.get(), rightVals[0])
 			if err != nil {
 				return controlFlow{}, err
 			}
-			if err := ref.Set(newVal); err != nil {
+			if err := ref.set(newVal); err != nil {
 				return controlFlow{}, err
 			}
 			if vm.trackingVariables() {
@@ -1582,20 +1583,20 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			}
 			return controlFlow{}, nil
 		}
-		ref, err := vm.resolveRef(st.X, env)
+		ref, err := vm.resolveLvalue(st.X, env)
 		if err != nil {
 			return controlFlow{}, err
 		}
-		cur := ToInt(ref.Get())
+		cur := ToInt(ref.get())
 		if st.Tok == token.INC {
-			if err := ref.Set(cur + 1); err != nil {
+			if err := ref.set(cur + 1); err != nil {
 				return controlFlow{}, err
 			}
 			if vm.trackingVariables() {
 				vm.recordAssignedExpression(st.X, cur+1, env)
 			}
 		} else {
-			if err := ref.Set(cur - 1); err != nil {
+			if err := ref.set(cur - 1); err != nil {
 				return controlFlow{}, err
 			}
 			if vm.trackingVariables() {
@@ -2098,7 +2099,23 @@ func (vm *Interpreter) evalSwitchStmt(st *ast.SwitchStmt, env *Env, label string
 // select statement. Split out of evalStmtNode so a *ast.LabeledStmt
 // wrapping a select can pass its label through for `break Label`.
 func (vm *Interpreter) evalSelectStmt(st *ast.SelectStmt, env *Env, label string) (controlFlow, error) {
-	var rcases []reflect.SelectCase
+	// A select with one communication clause is semantically the same as the
+	// corresponding channel operation (plus the execution context's
+	// cancellation). Keep this very common producer/consumer shape off the
+	// reflection path entirely; multi-way selects still use reflect.Select for
+	// its fair choice semantics.
+	if len(st.Body.List) == 1 {
+		if cc, ok := st.Body.List[0].(*ast.CommClause); ok && cc.Comm != nil {
+			if cf, handled, err := vm.evalSingleSelectClause(cc, env, label); handled {
+				return cf, err
+			}
+		}
+	}
+	// Each guest select normally has a small, fixed number of clauses. Reserve
+	// enough room for one host-closure arm per communication plus cancellation
+	// up front so reflect.Select setup does not repeatedly grow two slices.
+	caseCap := len(st.Body.List)*2 + 1
+	rcases := make([]reflect.SelectCase, 0, caseCap)
 	type selectChoice struct {
 		clause     *ast.CommClause
 		channel    *ChannelVal
@@ -2106,7 +2123,7 @@ func (vm *Interpreter) evalSelectStmt(st *ast.SelectStmt, env *Env, label string
 		sendClosed bool
 		cancel     bool
 	}
-	var choices []selectChoice
+	choices := make([]selectChoice, 0, caseCap)
 	appendCase := func(rcase reflect.SelectCase, choice selectChoice) {
 		rcases = append(rcases, rcase)
 		choices = append(choices, choice)
@@ -2206,8 +2223,13 @@ func (vm *Interpreter) evalSelectStmt(st *ast.SelectStmt, env *Env, label string
 		return controlFlow{}, vm.cancellationError()
 	}
 	// Cancellation is an additional select arm, so a program blocked in
-	// select observes a deadline or Kill immediately.
-	appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(vm.Context().Done())}, selectChoice{cancel: true})
+	// select observes a deadline or Kill immediately. A background context has
+	// no Done channel; omitting that disabled reflect arm makes the common
+	// non-cancellable path cheaper and avoids a ValueOf(nil) conversion.
+	ctxDone := vm.Context().Done()
+	if ctxDone != nil {
+		appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ctxDone)}, selectChoice{cancel: true})
+	}
 	chosen, recvVal, recvOK, selectErr := safeReflectSelect(rcases)
 	if selectErr != nil {
 		return controlFlow{}, selectErr
@@ -2276,6 +2298,115 @@ func (vm *Interpreter) evalSelectStmt(st *ast.SelectStmt, env *Env, label string
 	}
 }
 
+// evalSingleSelectClause executes a one-arm select without reflect.Select.
+// handled is false for unsupported syntax so the generic evaluator can keep
+// producing its established diagnostics.
+func (vm *Interpreter) evalSingleSelectClause(cc *ast.CommClause, env *Env, label string) (cf controlFlow, handled bool, err error) {
+	var recvVal any
+	var recvOK bool
+	switch comm := cc.Comm.(type) {
+	case *ast.ExprStmt:
+		ue, ok := comm.X.(*ast.UnaryExpr)
+		if !ok || ue.Op != token.ARROW {
+			return controlFlow{}, false, nil
+		}
+		chv, err := vm.evalExpr(ue.X, env)
+		if err != nil {
+			return controlFlow{}, true, err
+		}
+		ch, ok := chv.(*ChannelVal)
+		if !ok || ch == nil {
+			return controlFlow{}, true, NewRuntimeError("receive on non-channel in select")
+		}
+		if ch.direction == channelSendOnly {
+			return controlFlow{}, true, NewRuntimeError("receive on send-only host channel")
+		}
+		_, _, err = ch.Receive(vm.Context())
+		if err != nil {
+			return controlFlow{}, true, err
+		}
+	case *ast.AssignStmt:
+		if len(comm.Rhs) != 1 {
+			return controlFlow{}, false, nil
+		}
+		ue, ok := comm.Rhs[0].(*ast.UnaryExpr)
+		if !ok || ue.Op != token.ARROW {
+			return controlFlow{}, false, nil
+		}
+		chv, err := vm.evalExpr(ue.X, env)
+		if err != nil {
+			return controlFlow{}, true, err
+		}
+		ch, ok := chv.(*ChannelVal)
+		if !ok || ch == nil {
+			return controlFlow{}, true, NewRuntimeError("receive on non-channel in select")
+		}
+		if ch.direction == channelSendOnly {
+			return controlFlow{}, true, NewRuntimeError("receive on send-only host channel")
+		}
+		recvVal, recvOK, err = ch.Receive(vm.Context())
+		if err != nil {
+			return controlFlow{}, true, err
+		}
+	case *ast.SendStmt:
+		chv, err := vm.evalExpr(comm.Chan, env)
+		if err != nil {
+			return controlFlow{}, true, err
+		}
+		val, err := vm.evalExpr(comm.Value, env)
+		if err != nil {
+			return controlFlow{}, true, err
+		}
+		ch, ok := chv.(*ChannelVal)
+		if !ok || ch == nil {
+			return controlFlow{}, true, NewRuntimeError("send on non-channel in select")
+		}
+		if ch.direction == channelReceiveOnly {
+			return controlFlow{}, true, NewRuntimeError("send on receive-only host channel")
+		}
+		if channelDone(ch.done) {
+			return controlFlow{}, true, NewRuntimeError("send on closed host channel")
+		}
+		if err := ch.Send(vm.Context(), val); err != nil {
+			return controlFlow{}, true, err
+		}
+	default:
+		return controlFlow{}, false, nil
+	}
+
+	caseEnv := NewEnv(env)
+	if assign, ok := cc.Comm.(*ast.AssignStmt); ok {
+		bind := func(name string, value any) {
+			if name == "_" {
+				return
+			}
+			if assign.Tok == token.DEFINE {
+				vm.declare(name, value, caseEnv)
+			} else {
+				vm.set(name, value, caseEnv)
+			}
+		}
+		if len(assign.Lhs) >= 1 {
+			if id, ok := assign.Lhs[0].(*ast.Ident); ok {
+				bind(id.Name, recvVal)
+			}
+		}
+		if len(assign.Lhs) >= 2 {
+			if id, ok := assign.Lhs[1].(*ast.Ident); ok {
+				bind(id.Name, recvOK)
+			}
+		}
+	}
+	c, err := vm.execStmtList(cc.Body, caseEnv)
+	if err != nil {
+		return controlFlow{}, true, err
+	}
+	if c.kind == controlBreak && (c.label == "" || c.label == label) {
+		return controlFlow{}, true, nil
+	}
+	return c, true, nil
+}
+
 // validateShortDecl implements the scope-sensitive rules for :=. The parser
 // accepts constructs such as `x := 1; x := 2`; Go's type checker rejects the
 // second one because it introduces no new variable, so nanoGo must reject it
@@ -2310,44 +2441,54 @@ func (vm *Interpreter) validateShortDecl(lhs []ast.Expr, env *Env) error {
 	return nil
 }
 
-func (vm *Interpreter) resolveRef(l ast.Expr, env *Env) (Ref, error) {
+func (vm *Interpreter) resolveLvalue(l ast.Expr, env *Env) (lvalueRef, error) {
 	switch ee := l.(type) {
 	case *ast.Ident:
-		return &varRef{vm: vm, env: env, name: ee.Name}, nil
+		return lvalueRef{kind: lvalueVar, vm: vm, env: env, name: ee.Name}, nil
 	case *ast.IndexExpr:
 		x, err := vm.evalExpr(ee.X, env)
 		if err != nil {
-			return nil, err
+			return lvalueRef{}, err
 		}
 		i, err := vm.evalExpr(ee.Index, env)
 		if err != nil {
-			return nil, err
+			return lvalueRef{}, err
 		}
 		switch s := x.(type) {
 		case *SliceVal:
 			ii := ToInt(i)
 			if ii < 0 || ii >= len(s.Data) {
-				return nil, &panicError{value: fmt.Sprintf("runtime error: index out of range [%d] with length %d", ii, len(s.Data))}
+				return lvalueRef{}, &panicError{value: fmt.Sprintf("runtime error: index out of range [%d] with length %d", ii, len(s.Data))}
 			}
-			return &sliceIndexRef{s: s, i: ii}, nil
+			return lvalueRef{kind: lvalueSliceIndex, s: s, i: ii}, nil
 		case *MapVal:
-			return &mapIndexRef{m: s, k: i}, nil
+			return lvalueRef{kind: lvalueMapIndex, m: s, k: i}, nil
 		default:
-			return nil, NewRuntimeError("index assign unsupported")
+			return lvalueRef{}, NewRuntimeError("index assign unsupported")
 		}
 	case *ast.SelectorExpr:
 		recv, err := vm.evalExpr(ee.X, env)
 		if err != nil {
-			return nil, err
+			return lvalueRef{}, err
 		}
 		sv, ok := recv.(*StructVal)
 		if !ok {
-			return nil, NewRuntimeError("selector assign unsupported")
+			return lvalueRef{}, NewRuntimeError("selector assign unsupported")
 		}
-		return &fieldRef{s: sv, name: ee.Sel.Name}, nil
+		return lvalueRef{kind: lvalueField, sv: sv, name: ee.Sel.Name}, nil
 	default:
-		return nil, NewRuntimeError("invalid lvalue")
+		return lvalueRef{}, NewRuntimeError("invalid lvalue")
 	}
+}
+
+// resolveRef preserves the generic helper for package users and older
+// integrations; evaluator assignment paths use resolveLvalue directly.
+func (vm *Interpreter) resolveRef(l ast.Expr, env *Env) (Ref, error) {
+	ref, err := vm.resolveLvalue(l, env)
+	if err != nil {
+		return nil, err
+	}
+	return ref, nil
 }
 
 func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []any) (ret any, err error) {
@@ -2650,6 +2791,9 @@ func analyzeFunctionMetadata(body *ast.BlockStmt) (frameFree bool, needsFrames b
 		case *ast.FuncLit:
 			// Nested function literals have separate activation records.
 			// Their bodies do not affect this function's frame-free safety.
+			// The literal can nevertheless retain this function's lexical Env,
+			// so its presence makes the current Env ineligible for pooling.
+			reusable = false
 			return false
 		}
 		return true

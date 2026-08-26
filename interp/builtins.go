@@ -307,6 +307,9 @@ func (c *ChannelVal) Send(ctx context.Context, value any) (err error) {
 	if c == nil {
 		return NewRuntimeError("send on nil channel")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if c.direction == channelReceiveOnly {
 		return NewRuntimeError("send on receive-only host channel")
 	}
@@ -317,16 +320,25 @@ func (c *ChannelVal) Send(ctx context.Context, value any) (err error) {
 	if channelDone(done) {
 		return &panicError{value: "send on closed channel"}
 	}
+	ctxDone := ctx.Done()
 	defer func() {
 		if recover() != nil {
 			err = &panicError{value: "send on closed channel"}
 		}
 	}()
+	// The overwhelmingly common guest channel path has no host-closure
+	// sentinel and runs under context.Background(). Avoid constructing a
+	// select frame for that case; the direct send is both allocation-free and
+	// substantially cheaper than select's channel bookkeeping.
+	if done == nil && ctxDone == nil {
+		c.C <- value
+		return nil
+	}
 	if done == nil {
 		select {
 		case c.C <- value:
 			return nil
-		case <-ctx.Done():
+		case <-ctxDone:
 			return contextError(ctx)
 		}
 	}
@@ -335,7 +347,7 @@ func (c *ChannelVal) Send(ctx context.Context, value any) (err error) {
 		return nil
 	case <-done:
 		return &panicError{value: "send on closed channel"}
-	case <-ctx.Done():
+	case <-ctxDone:
 		return contextError(ctx)
 	}
 }
@@ -344,15 +356,26 @@ func (c *ChannelVal) Receive(ctx context.Context) (value any, open bool, err err
 	if c == nil {
 		return nil, false, NewRuntimeError("receive on nil channel")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if c.direction == channelSendOnly {
 		return nil, false, NewRuntimeError("receive on send-only host channel")
 	}
 	done := c.done
+	ctxDone := ctx.Done()
+	// Match Send's zero-overhead path for ordinary guest channels. A receive
+	// from a closed Go channel already supplies the correct comma-ok result,
+	// so no closed flag or select is needed here.
+	if done == nil && ctxDone == nil {
+		value, open = <-c.C
+		return value, open, nil
+	}
 	if done == nil {
 		select {
 		case value, open = <-c.C:
 			return value, open, nil
-		case <-ctx.Done():
+		case <-ctxDone:
 			return nil, false, contextError(ctx)
 		}
 	}
@@ -378,7 +401,7 @@ func (c *ChannelVal) Receive(ctx context.Context) (value any, open bool, err err
 		default:
 			return nil, false, nil
 		}
-	case <-ctx.Done():
+	case <-ctxDone:
 		return nil, false, contextError(ctx)
 	}
 }

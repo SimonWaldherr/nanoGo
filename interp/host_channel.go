@@ -59,12 +59,21 @@ func (c *HostChannel) Send(ctx context.Context, value any) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctxDone := ctx.Done()
+	if ctxDone == nil {
+		select {
+		case c.inbound <- v:
+			return nil
+		case <-c.inputDone:
+			return ErrHostChannelClosed
+		}
+	}
 	select {
 	case c.inbound <- v:
 		return nil
 	case <-c.inputDone:
 		return ErrHostChannelClosed
-	case <-ctx.Done():
+	case <-ctxDone:
 		return ctx.Err()
 	}
 }
@@ -88,6 +97,22 @@ func (c *HostChannel) Receive(ctx context.Context) (any, error) {
 	if channelDone(c.outputDone) {
 		return nil, ErrHostChannelClosed
 	}
+	ctxDone := ctx.Done()
+	if ctxDone == nil {
+		select {
+		case value := <-c.outbound:
+			return bridgeToHost(value)
+		case <-c.outputDone:
+			// A value that was queued just before CloseOutput won the race must
+			// still be observable before the endpoint reports closed.
+			select {
+			case value := <-c.outbound:
+				return bridgeToHost(value)
+			default:
+			}
+			return nil, ErrHostChannelClosed
+		}
+	}
 	select {
 	case value := <-c.outbound:
 		return bridgeToHost(value)
@@ -100,7 +125,7 @@ func (c *HostChannel) Receive(ctx context.Context) (any, error) {
 		default:
 		}
 		return nil, ErrHostChannelClosed
-	case <-ctx.Done():
+	case <-ctxDone:
 		return nil, ctx.Err()
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	strlib "strings"
 	"sync"
+	"sync/atomic"
 	"text/template"
 	"time"
 	"unicode/utf8"
@@ -811,15 +812,22 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 // be selected with a context, which would otherwise let guest code make a
 // timed-out execution wait forever.
 type nativeWaitGroup struct {
-	mu   sync.Mutex
-	n    int
-	done chan struct{}
+	mu sync.Mutex
+	n  int
+	// doneState is published atomically whenever Add transitions from zero
+	// to positive. Wait only needs the current generation's channel, so the
+	// uncontended read path no longer takes the mutex on every Wait call.
+	doneState atomic.Pointer[waitGroupDone]
 }
+
+type waitGroupDone struct{ ch chan struct{} }
 
 func newNativeWaitGroup() *nativeWaitGroup {
 	done := make(chan struct{})
 	close(done)
-	return &nativeWaitGroup{done: done}
+	w := &nativeWaitGroup{}
+	w.doneState.Store(&waitGroupDone{ch: done})
+	return w
 }
 
 func (w *nativeWaitGroup) Add(delta int) error {
@@ -831,23 +839,29 @@ func (w *nativeWaitGroup) Add(delta int) error {
 		return NewRuntimeError("sync: negative WaitGroup counter")
 	}
 	if previous == 0 && next > 0 {
-		w.done = make(chan struct{})
+		w.doneState.Store(&waitGroupDone{ch: make(chan struct{})})
 	}
 	w.n = next
 	if previous > 0 && next == 0 {
-		close(w.done)
+		close(w.doneState.Load().ch)
 	}
 	return nil
 }
 
 func (w *nativeWaitGroup) Wait(ctx context.Context) error {
-	w.mu.Lock()
-	done := w.done
-	w.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	done := w.doneState.Load().ch
+	ctxDone := ctx.Done()
+	if ctxDone == nil {
+		<-done
+		return nil
+	}
 	select {
 	case <-done:
 		return nil
-	case <-ctx.Done():
+	case <-ctxDone:
 		return contextError(ctx)
 	}
 }
