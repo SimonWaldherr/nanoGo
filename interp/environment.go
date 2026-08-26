@@ -172,6 +172,15 @@ type Interpreter struct {
 	// a host that attaches one must call Run/RunContext from a goroutine it
 	// can afford to block and issue resume calls from another.
 	debugController atomic.Pointer[DebugController]
+	// fastEnvPool recycles call scopes for frame-free functions that cannot
+	// create closures. Recursive and call-heavy guest code otherwise creates
+	// one heap object per invocation even though each scope dies on return.
+	fastEnvPool sync.Pool
+	// stackFramesRequired becomes true once parsed guest code may inspect the
+	// dynamic call stack (debug.Stack/debug.Vars). It keeps every caller on
+	// the full call path for that interpreter, preserving complete stack
+	// chains even when only a deeply nested callee performs the inspection.
+	stackFramesRequired atomic.Bool
 
 	// lastSteps preserves the final step counter of the most recently ended
 	// execution so hosts can report deterministic cost after Run returns

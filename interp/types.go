@@ -76,6 +76,17 @@ type Function struct {
 	// there is exactly one does it also feed back into the function's
 	// actual return value (see callFrame.namedResult).
 	Results []string
+
+	// frameFree marks parsed guest functions whose bodies never need a
+	// callFrame when diagnostics are disabled. It is deliberately internal and
+	// only set by the parser paths; manually constructed Functions retain the
+	// conservative, fully featured call path.
+	frameFree bool
+
+	// envReusable is narrower than frameFree: it also excludes closures, the
+	// only guest value that can retain a function's lexical environment after
+	// the call returns. That lets the fast path recycle its short-lived Env.
+	envReusable bool
 }
 
 // StructVal, SliceVal, MapVal, ChannelVal are dynamic runtime containers.

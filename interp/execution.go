@@ -45,8 +45,12 @@ type execution struct {
 	// no lock.
 	litCache map[*ast.BasicLit]int
 
-	killed     atomic.Bool
-	cancelled  atomic.Bool // mirrors parent cancellation without a channel op on the hot path — see beginExecution
+	killed    atomic.Bool
+	cancelled atomic.Bool // mirrors parent cancellation without a channel op on the hot path — see beginExecution
+	// stopped is the single healthy-path status read made by err. The detailed
+	// atomics below are consulted only after a stop has been published, avoiding
+	// four independent atomic loads at every evaluator checkpoint.
+	stopped    atomic.Bool
 	limitCause atomic.Uint32
 	steps      atomic.Uint64
 	goroutines atomic.Int64
@@ -73,13 +77,16 @@ const (
 
 // err reports why execution should stop, or nil to continue. It runs on
 // every single evaluator checkpoint (evalExpr and evalStmt both call it via
-// executionError/checkpoint), so cancellation is read from the plain atomic
-// bool maintained by a context callback (see beginExecution) rather than via
+// executionError/checkpoint), so its healthy path reads only the stopped
+// atomic maintained by cancellation and limit publishers rather than using
 // `select { case <-e.ctx.Done(): ... default: }` here: a select still has to
 // synchronize on the channel's internal lock even when it hits the default
 // case, and profiling showed that cost was significant when paid on every
 // node of a running program instead of exactly once per cancellation.
 func (e *execution) err() error {
+	if !e.stopped.Load() {
+		return nil
+	}
 	switch e.limitCause.Load() {
 	case limitSteps:
 		return ErrStepLimit
@@ -142,11 +149,13 @@ func (e *execution) releaseGoroutine() {
 
 func (e *execution) stopForLimit(cause uint32) {
 	e.limitCause.CompareAndSwap(limitNone, cause)
+	e.stopped.Store(true)
 	e.cancel()
 }
 
 func (e *execution) kill() {
 	e.killed.Store(true)
+	e.stopped.Store(true)
 	e.cancel()
 }
 
@@ -158,6 +167,7 @@ func (e *execution) recordWorkerError(err error) {
 		return
 	}
 	if e.failure.CompareAndSwap(nil, &executionFailure{err: err}) {
+		e.stopped.Store(true)
 		e.cancel()
 	}
 }
@@ -186,6 +196,7 @@ func (e *execution) finish() {
 	}
 	e.cancel()
 	e.cancelled.Store(true)
+	e.stopped.Store(true)
 }
 
 func (vm *Interpreter) beginExecution(parent context.Context) (*execution, error) {
@@ -208,6 +219,7 @@ func (vm *Interpreter) beginExecution(parent context.Context) (*execution, error
 		e.stopParentWatch = context.AfterFunc(parent, func() {
 			cancel()
 			e.cancelled.Store(true)
+			e.stopped.Store(true)
 		})
 	}
 	vm.execution.Store(e)

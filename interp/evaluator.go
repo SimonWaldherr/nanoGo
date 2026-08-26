@@ -47,6 +47,9 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 	if err != nil {
 		return err
 	}
+	if sourceMayInspectStack(file) {
+		vm.stackFramesRequired.Store(true)
+	}
 	exec.litCache = buildLitCache(file)
 	if file.Name.Name != "main" {
 		return NewRuntimeError(`only "package main" is supported`)
@@ -142,7 +145,7 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 				}
 			}
 		case *ast.FuncDecl:
-			fn := &Function{Name: d.Name.Name, Body: d.Body, Env: global}
+			fn := &Function{Name: d.Name.Name, Body: d.Body, Env: global, frameFree: frameFreeBody(d.Body), envReusable: reusableEnvBody(d.Body)}
 			// Params
 			if d.Type.Params != nil {
 				for i, f := range d.Type.Params.List {
@@ -919,7 +922,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		return v, nil
 
 	case *ast.FuncLit:
-		fn := &Function{Name: "<anon>", Body: ex.Body, Env: env}
+		fn := &Function{Name: "<anon>", Body: ex.Body, Env: env, frameFree: frameFreeBody(ex.Body), envReusable: reusableEnvBody(ex.Body)}
 		if ex.Type.Params != nil {
 			for _, f := range ex.Type.Params.List {
 				for _, n := range f.Names {
@@ -2359,6 +2362,9 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 	if err := vm.executionError(); err != nil {
 		return nil, err
 	}
+	if vm.canFastCall(fn) {
+		return vm.callFrameFreeFunction(fn, recv, args)
+	}
 	vm.emitTrace("call_start", fn.Name, "", nil)
 	// Run defers in LIFO order on exit; also handle panic unwinding.
 	// caller: env.frame is the call site's own active frame (nil at the
@@ -2530,6 +2536,147 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 		return nil, NewRuntimeError("goto " + c.label + ": label not found")
 	}
 	return nil, nil
+}
+
+// canFastCall identifies the normal production case: a parsed,
+// non-variadic guest function with no defers, recovery, stack inspection,
+// tracing, debugger, or variable tracker attached. Such a call cannot
+// observe a callFrame, so allocating one (and its defer/recover closure)
+// merely adds GC work to recursive and call-heavy programs.
+func (vm *Interpreter) canFastCall(fn *Function) bool {
+	return fn.frameFree &&
+		!fn.IsVariadic &&
+		len(fn.Results) == 0 &&
+		fn.Native == nil &&
+		fn.NativeContext == nil &&
+		vm.tracer.Load() == nil &&
+		!vm.runtimeTraceAnnotations.Load() &&
+		vm.variableTracker.Load() == nil &&
+		vm.debugController.Load() == nil &&
+		!vm.stackFramesRequired.Load()
+}
+
+// callFrameFreeFunction is callFunction's lean user-function path. Its
+// precondition is canFastCall(fn); keeping its binding and control-flow
+// handling explicit leaves the full recover/defer machinery out of the hot
+// path without changing behavior in observable or debuggable modes.
+func (vm *Interpreter) callFrameFreeFunction(fn *Function, recv *any, args []any) (any, error) {
+	var local *Env
+	if fn.envReusable {
+		if pooled := vm.fastEnvPool.Get(); pooled == nil {
+			local = &Env{}
+		} else {
+			local = pooled.(*Env)
+		}
+		local.Parent = fn.Env
+		if fn.Env != nil {
+			local.frame = fn.Env.frame
+		}
+		defer vm.releaseFastEnv(local)
+	} else {
+		local = NewEnv(fn.Env)
+	}
+	argIndex := 0
+	if fn.RecvName != "" && recv != nil {
+		vm.declare(fn.RecvName, *recv, local)
+	}
+	for _, p := range fn.Params {
+		if argIndex >= len(args) {
+			vm.declare(p, nil, local)
+		} else {
+			vm.declare(p, args[argIndex], local)
+		}
+		argIndex++
+	}
+
+	c, err := vm.execStmtList(fn.Body.(*ast.BlockStmt).List, local)
+	if err != nil {
+		return nil, err
+	}
+	switch c.kind {
+	case controlReturn:
+		return c.val, nil
+	case controlBreak, controlContinue:
+		return nil, NewRuntimeError("break/continue outside loop")
+	case controlGoto:
+		return nil, NewRuntimeError("goto " + c.label + ": label not found")
+	}
+	return nil, nil
+}
+
+// releaseFastEnv removes every reference owned by a completed call before
+// making its Env available to a later invocation. envReusable guarantees no
+// closure can still reach it; sync.Pool also keeps this safe when guest
+// goroutines execute independent reusable functions concurrently.
+func (vm *Interpreter) releaseFastEnv(env *Env) {
+	for name := range env.Vars {
+		delete(env.Vars, name)
+	}
+	env.inlineIntVar = intVar{}
+	env.Parent = nil
+	env.frame = nil
+	vm.fastEnvPool.Put(env)
+}
+
+// frameFreeBody returns false when a function's own body can observe or
+// mutate its active call frame.
+func frameFreeBody(body *ast.BlockStmt) bool {
+	frameFree := true
+	ast.Inspect(body, func(node ast.Node) bool {
+		switch n := node.(type) {
+		case *ast.DeferStmt:
+			frameFree = false
+			return false
+		case *ast.CallExpr:
+			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "recover" {
+				frameFree = false
+				return false
+			}
+			if sel, ok := n.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Stack" || sel.Sel.Name == "Vars") {
+				// Conservatively retain a frame for possible debug.Stack/Vars
+				// calls. A non-debug method with either name merely forgoes this
+				// optimization; it cannot change behavior.
+				frameFree = false
+				return false
+			}
+		}
+		return frameFree
+	})
+	return frameFree
+}
+
+// reusableEnvBody rejects function literals because a returned or otherwise
+// escaped closure retains its defining Env beyond the current call. Other
+// frame-free functions have strictly call-scoped environments and can recycle
+// them immediately after execStmtList completes.
+func reusableEnvBody(body *ast.BlockStmt) bool {
+	reusable := true
+	ast.Inspect(body, func(node ast.Node) bool {
+		if _, ok := node.(*ast.FuncLit); ok {
+			reusable = false
+			return false
+		}
+		return reusable
+	})
+	return reusable
+}
+
+// sourceMayInspectStack detects the stack-sensitive debug helpers before
+// execution starts. A frame-free outer function would otherwise disappear
+// from a stack captured by a nested callee, so this intentionally scans
+// function literals as well as declarations.
+func sourceMayInspectStack(node ast.Node) bool {
+	needsFrames := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Stack" || sel.Sel.Name == "Vars") {
+				needsFrames = true
+				return false
+			}
+		}
+		return !needsFrames
+	})
+	return needsFrames
 }
 
 // prepareCall evaluates a CallExpr into callee and concrete argument list without invoking it.
