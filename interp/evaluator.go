@@ -47,9 +47,6 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 	if err != nil {
 		return err
 	}
-	if sourceMayInspectStack(file) {
-		vm.stackFramesRequired.Store(true)
-	}
 	exec.litCache = buildLitCache(file)
 	if file.Name.Name != "main" {
 		return NewRuntimeError(`only "package main" is supported`)
@@ -145,7 +142,14 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 				}
 			}
 		case *ast.FuncDecl:
-			fn := &Function{Name: d.Name.Name, Body: d.Body, Env: global, frameFree: frameFreeBody(d.Body), envReusable: reusableEnvBody(d.Body)}
+			frameFree, needsFrames, envReusable := analyzeFunctionMetadata(d.Body)
+			if needsFrames {
+				vm.stackFramesRequired.Store(true)
+				if exec.fastCallsAllowed {
+					exec.fastCallsAllowed = false
+				}
+			}
+			fn := &Function{Name: d.Name.Name, Body: d.Body, Env: global, frameFree: frameFree, envReusable: envReusable}
 			// Params
 			if d.Type.Params != nil {
 				for i, f := range d.Type.Params.List {
@@ -596,12 +600,13 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 								}
 							}
 						} else {
-							for _, a := range ex.Args {
+							args = make([]any, len(ex.Args))
+							for i, a := range ex.Args {
 								v, err := vm.evalExpr(a, env)
 								if err != nil {
 									return nil, err
 								}
-								args = append(args, v)
+								args[i] = v
 							}
 						}
 						return vm.callFunction(fn, env, nil, args)
@@ -625,7 +630,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			if fn == nil {
 				return nil, NewRuntimeError("method not found: " + recvType + "." + sel.Sel.Name)
 			}
-			args := make([]any, 1, len(ex.Args)+1)
+			args := make([]any, 1+len(ex.Args))
 			args[0] = recv
 			// Evaluate args (support last ... expansion)
 			if ex.Ellipsis != token.NoPos && len(ex.Args) > 0 {
@@ -645,16 +650,16 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 						if err != nil {
 							return nil, err
 						}
-						args = append(args, v)
+						args[i+1] = v
 					}
 				}
 			} else {
-				for _, a := range ex.Args {
+				for i, a := range ex.Args {
 					v, err := vm.evalExpr(a, env)
 					if err != nil {
 						return nil, err
 					}
-					args = append(args, v)
+					args[i+1] = v
 				}
 			}
 			return vm.callFunction(fn, env, &recv, args[1:])
@@ -690,12 +695,13 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 					}
 				}
 			} else {
-				for _, a := range ex.Args {
+				args = make([]any, len(ex.Args))
+				for i, a := range ex.Args {
 					v, err := vm.evalExpr(a, env)
 					if err != nil {
 						return nil, err
 					}
-					args = append(args, v)
+					args[i] = v
 				}
 			}
 			return vm.callFunction(fn, env, nil, args)
@@ -922,7 +928,8 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		return v, nil
 
 	case *ast.FuncLit:
-		fn := &Function{Name: "<anon>", Body: ex.Body, Env: env, frameFree: frameFreeBody(ex.Body), envReusable: reusableEnvBody(ex.Body)}
+		frameFree, _, envReusable := analyzeFunctionMetadata(ex.Body)
+		fn := &Function{Name: "<anon>", Body: ex.Body, Env: env, frameFree: frameFree, envReusable: envReusable}
 		if ex.Type.Params != nil {
 			for _, f := range ex.Type.Params.List {
 				for _, n := range f.Names {
@@ -1338,17 +1345,15 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 						return controlFlow{}, nil
 					}
 				case token.ASSIGN:
-					if _, exists := vm.getInt(id.Name, env); exists {
-						n, intOK, err := vm.tryEvalIntExpr(st.Rhs[0], env, true)
-						if err != nil {
-							return controlFlow{}, err
+					n, intOK, err := vm.tryEvalIntExpr(st.Rhs[0], env, true)
+					if err != nil {
+						return controlFlow{}, err
+					}
+					if intOK && vm.setInt(id.Name, n, env) {
+						if vm.trackingVariables() {
+							vm.recordVariable(id.Name, n, id, env)
 						}
-						if intOK && vm.setInt(id.Name, n, env) {
-							if vm.trackingVariables() {
-								vm.recordVariable(id.Name, n, id, env)
-							}
-							return controlFlow{}, nil
-						}
+						return controlFlow{}, nil
 					}
 				}
 			}
@@ -1552,17 +1557,13 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 
 	case *ast.IncDecStmt:
 		if id, ok := st.X.(*ast.Ident); ok {
-			if cur, ok := vm.getInt(id.Name, env); ok {
-				if st.Tok == token.INC {
-					vm.setInt(id.Name, cur+1, env)
-					if vm.trackingVariables() {
-						vm.recordVariable(id.Name, cur+1, id, env)
-					}
-				} else {
-					vm.setInt(id.Name, cur-1, env)
-					if vm.trackingVariables() {
-						vm.recordVariable(id.Name, cur-1, id, env)
-					}
+			delta := -1
+			if st.Tok == token.INC {
+				delta = 1
+			}
+			if cur, ok := vm.addInt(id.Name, delta, env); ok {
+				if vm.trackingVariables() {
+					vm.recordVariable(id.Name, cur, id, env)
 				}
 				return controlFlow{}, nil
 			}
@@ -1922,8 +1923,7 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 			}
 		}
 	case *MapVal:
-		for _, hk := range keysOfMap(s) {
-			key := s.Keys[hk]
+		for hk, key := range s.Keys {
 			val := s.Data[hk]
 			if st.Key != nil {
 				if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
@@ -2310,14 +2310,6 @@ func (vm *Interpreter) validateShortDecl(lhs []ast.Expr, env *Env) error {
 	return nil
 }
 
-func keysOfMap(m *MapVal) []string {
-	out := make([]string, 0, len(m.Keys))
-	for k := range m.Keys {
-		out = append(out, k)
-	}
-	return out
-}
-
 func (vm *Interpreter) resolveRef(l ast.Expr, env *Env) (Ref, error) {
 	switch ee := l.(type) {
 	case *ast.Ident:
@@ -2544,16 +2536,26 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 // observe a callFrame, so allocating one (and its defer/recover closure)
 // merely adds GC work to recursive and call-heavy programs.
 func (vm *Interpreter) canFastCall(fn *Function) bool {
+	exec := vm.activeExecution
+	if exec != nil {
+		if !exec.fastCallsAllowed {
+			return false
+		}
+	}
+	if exec == nil {
+		if vm.tracer.Load() != nil ||
+			vm.runtimeTraceAnnotations.Load() ||
+			vm.variableTracker.Load() != nil ||
+			vm.debugController.Load() != nil ||
+			vm.stackFramesRequired.Load() {
+			return false
+		}
+	}
 	return fn.frameFree &&
 		!fn.IsVariadic &&
 		len(fn.Results) == 0 &&
 		fn.Native == nil &&
-		fn.NativeContext == nil &&
-		vm.tracer.Load() == nil &&
-		!vm.runtimeTraceAnnotations.Load() &&
-		vm.variableTracker.Load() == nil &&
-		vm.debugController.Load() == nil &&
-		!vm.stackFramesRequired.Load()
+		fn.NativeContext == nil
 }
 
 // callFrameFreeFunction is callFunction's lean user-function path. Its
@@ -2609,39 +2611,56 @@ func (vm *Interpreter) callFrameFreeFunction(fn *Function, recv *any, args []any
 // closure can still reach it; sync.Pool also keeps this safe when guest
 // goroutines execute independent reusable functions concurrently.
 func (vm *Interpreter) releaseFastEnv(env *Env) {
-	for name := range env.Vars {
-		delete(env.Vars, name)
-	}
+	env.Vars = nil
 	env.inlineIntVar = intVar{}
 	env.Parent = nil
 	env.frame = nil
 	vm.fastEnvPool.Put(env)
 }
 
-// frameFreeBody returns false when a function's own body can observe or
-// mutate its active call frame.
-func frameFreeBody(body *ast.BlockStmt) bool {
-	frameFree := true
+// analyzeFunctionMetadata returns function-call optimization metadata:
+// frameFree indicates whether this function can use the fast call path,
+// needsFrames whether debug.Stack/debug.Vars calls appear in this body,
+// and reusable whether the frame can be safely returned to the fast env pool.
+func analyzeFunctionMetadata(body *ast.BlockStmt) (frameFree bool, needsFrames bool, reusable bool) {
+	frameFree = true
+	reusable = true
 	ast.Inspect(body, func(node ast.Node) bool {
+		if needsFrames {
+			// Once stack inspection exists, caller-level metadata is fully
+			// resolved; nested traversal can stop.
+			return false
+		}
 		switch n := node.(type) {
 		case *ast.DeferStmt:
 			frameFree = false
-			return false
+			return true
 		case *ast.CallExpr:
 			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "recover" {
 				frameFree = false
-				return false
+				return true
 			}
 			if sel, ok := n.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Stack" || sel.Sel.Name == "Vars") {
-				// Conservatively retain a frame for possible debug.Stack/Vars
-				// calls. A non-debug method with either name merely forgoes this
-				// optimization; it cannot change behavior.
 				frameFree = false
+				needsFrames = true
+				// No further traversal needed: caller already must force full
+				// frame capture for this run if this executes.
 				return false
 			}
+		case *ast.FuncLit:
+			// Nested function literals have separate activation records.
+			// Their bodies do not affect this function's frame-free safety.
+			return false
 		}
-		return frameFree
+		return true
 	})
+	return
+}
+
+// frameFreeBody returns false when a function's own body can observe or
+// mutate its active call frame.
+func frameFreeBody(body *ast.BlockStmt) bool {
+	frameFree, _, _ := analyzeFunctionMetadata(body)
 	return frameFree
 }
 
@@ -2650,14 +2669,7 @@ func frameFreeBody(body *ast.BlockStmt) bool {
 // frame-free functions have strictly call-scoped environments and can recycle
 // them immediately after execStmtList completes.
 func reusableEnvBody(body *ast.BlockStmt) bool {
-	reusable := true
-	ast.Inspect(body, func(node ast.Node) bool {
-		if _, ok := node.(*ast.FuncLit); ok {
-			reusable = false
-			return false
-		}
-		return reusable
-	})
+	_, _, reusable := analyzeFunctionMetadata(body)
 	return reusable
 }
 
@@ -2697,18 +2709,19 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 					if !ok3 {
 						return nil, nil, nil, NewRuntimeError("member not function")
 					}
-					args := make([]any, 0, len(call.Args))
-					for _, a := range call.Args {
+					args := make([]any, len(call.Args))
+					for i, a := range call.Args {
 						v, err := vm.evalExpr(a, env)
 						if err != nil {
 							return nil, nil, nil, err
 						}
-						args = append(args, v)
+						args[i] = v
 					}
 					return fn, nil, args, nil
 				}
 			}
 		}
+
 		// Method call on struct
 		recv, err := vm.evalExpr(sel.X, env)
 		if err != nil {
@@ -2723,13 +2736,13 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 		if fn == nil {
 			return nil, nil, nil, NewRuntimeError("method not found")
 		}
-		args := make([]any, 0, len(call.Args))
-		for _, a := range call.Args {
+		args := make([]any, len(call.Args))
+		for i, a := range call.Args {
 			v, err := vm.evalExpr(a, env)
 			if err != nil {
 				return nil, nil, nil, err
 			}
-			args = append(args, v)
+			args[i] = v
 		}
 		return fn, &recv, args, nil
 	}
@@ -2742,13 +2755,13 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 	if !ok {
 		return nil, nil, nil, NewRuntimeError("not a function")
 	}
-	args := make([]any, 0, len(call.Args))
-	for _, a := range call.Args {
+	args := make([]any, len(call.Args))
+	for i, a := range call.Args {
 		v, err := vm.evalExpr(a, env)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		args = append(args, v)
+		args[i] = v
 	}
 	return fn, nil, args, nil
 }

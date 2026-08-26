@@ -153,10 +153,14 @@ func (ps *PackageScope) CollectDecls(file *ast.File, fset *token.FileSet) error 
 // ReplaceFunction) uses it directly to build a standalone replacement
 // function parsed on its own, then calls Replace to install it.
 func (ps *PackageScope) BuildFunction(d *ast.FuncDecl) *Function {
-	if sourceMayInspectStack(d.Body) {
+	frameFree, needsFrames, envReusable := analyzeFunctionMetadata(d.Body)
+	if needsFrames {
 		ps.vm.stackFramesRequired.Store(true)
+		if exec := ps.vm.activeExecution; exec != nil {
+			exec.fastCallsAllowed = false
+		}
 	}
-	fn := &Function{Name: d.Name.Name, Body: d.Body, Env: ps.env, frameFree: frameFreeBody(d.Body), envReusable: reusableEnvBody(d.Body)}
+	fn := &Function{Name: d.Name.Name, Body: d.Body, Env: ps.env, frameFree: frameFree, envReusable: envReusable}
 	if d.Type.Params != nil {
 		for i, f := range d.Type.Params.List {
 			for _, n := range f.Names {

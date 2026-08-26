@@ -566,13 +566,12 @@ func (vm *Interpreter) setInt(name string, value int, env *Env) bool {
 	concurrent := exec != nil && exec.concurrent.Load()
 	for e := env; e != nil; e = e.Parent {
 		if e.shared || concurrent {
-			e.mu.RLock()
+			e.mu.Lock()
 			_, ok := lookupIntVar(e, name)
-			e.mu.RUnlock()
 			if !ok {
+				e.mu.Unlock()
 				continue
 			}
-			e.mu.Lock()
 			setOrAppendIntVar(e, name, value)
 			e.mu.Unlock()
 			return true
@@ -583,6 +582,36 @@ func (vm *Interpreter) setInt(name string, value int, env *Env) bool {
 		}
 	}
 	return false
+}
+
+// addInt updates an existing integer binding by delta and returns the new value.
+// It avoids a separate get+set roundtrip for hot loops that only mutate one
+// integer lvalue via ++/--.
+func (vm *Interpreter) addInt(name string, delta int, env *Env) (int, bool) {
+	exec := vm.activeExecution
+	concurrent := exec != nil && exec.concurrent.Load()
+	for e := env; e != nil; e = e.Parent {
+		if e.shared || concurrent {
+			e.mu.Lock()
+			cur, ok := lookupIntVar(e, name)
+			if !ok {
+				e.mu.Unlock()
+				continue
+			}
+			next := cur + delta
+			setOrAppendIntVar(e, name, next)
+			e.mu.Unlock()
+			return next, true
+		}
+		cur, ok := lookupIntVar(e, name)
+		if !ok {
+			continue
+		}
+		next := cur + delta
+		setOrAppendIntVar(e, name, next)
+		return next, true
+	}
+	return 0, false
 }
 
 // --------------- Lvalue references for assignments ---------------

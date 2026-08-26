@@ -50,12 +50,19 @@ type execution struct {
 	// stopped is the single healthy-path status read made by err. The detailed
 	// atomics below are consulted only after a stop has been published, avoiding
 	// four independent atomic loads at every evaluator checkpoint.
-	stopped    atomic.Bool
-	limitCause atomic.Uint32
-	steps      atomic.Uint64
-	goroutines atomic.Int64
-	concurrent atomic.Bool
-	wg         sync.WaitGroup
+	stopped atomic.Bool
+	// fastCallsAllowed is snapshotted at run start so call dispatch can
+	// quickly choose the frame-free path without re-reading global debug/callback
+	// state for every single call.
+	fastCallsAllowed bool
+	// trackVariables indicates whether variable snapshots are configured for this
+	// execution, so hot assignment paths can avoid checking atomics.
+	trackVariables bool
+	limitCause     atomic.Uint32
+	steps          atomic.Uint64
+	goroutines     atomic.Int64
+	concurrent     atomic.Bool
+	wg             sync.WaitGroup
 
 	// stopParentWatch unregisters the parent cancellation callback installed
 	// by beginExecution. context.AfterFunc does not reserve a goroutine while
@@ -209,7 +216,17 @@ func (vm *Interpreter) beginExecution(parent context.Context) (*execution, error
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	e := &execution{ctx: ctx, cancel: cancel, limits: vm.Limits}
+	e := &execution{
+		ctx:    ctx,
+		cancel: cancel,
+		limits: vm.Limits,
+		fastCallsAllowed: vm.tracer.Load() == nil &&
+			!vm.runtimeTraceAnnotations.Load() &&
+			vm.variableTracker.Load() == nil &&
+			vm.debugController.Load() == nil &&
+			!vm.stackFramesRequired.Load(),
+		trackVariables: vm.variableTracker.Load() != nil,
+	}
 	// A background context cannot be cancelled by its parent. For a
 	// cancellable parent, AfterFunc registers an efficient callback without
 	// starting a parked goroutine for every RunContext call. The callback

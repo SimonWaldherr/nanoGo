@@ -84,6 +84,9 @@ func (t *VariableTracker) record(snapshot VariableSnapshot) {
 // assignment/increment/loop-variable/function-call-argument paths when no
 // tracker is configured (the default).
 func (vm *Interpreter) trackingVariables() bool {
+	if exec := vm.activeExecution; exec != nil {
+		return exec.trackVariables
+	}
 	return vm.variableTracker.Load() != nil
 }
 
