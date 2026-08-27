@@ -354,6 +354,71 @@ func main() {
 	}
 }
 
+func TestDebugLogpointReportsValueWithoutPausing(t *testing.T) {
+	dc := NewDebugController()
+	if err := dc.SetLogpoint(6, "x * 10"); err != nil {
+		t.Fatalf("SetLogpoint: %v", err)
+	}
+	if got := dc.Logpoints()[6]; got != "x * 10" {
+		t.Fatalf("Logpoints()[6] = %q, want x * 10", got)
+	}
+	logs := make(chan DebugLogInfo, 1)
+	dc.OnLog(func(info DebugLogInfo) { logs <- info })
+	vm, _ := newTestVM()
+	vm.SetDebugController(dc)
+	if err := vm.Run(`package main
+import "fmt"
+func main() {
+	x := 1
+	x++
+	fmt.Println(x)
+}`); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	select {
+	case info := <-logs:
+		if info.Location.Line != 6 || info.Expression != "x * 10" || info.Value != "20" {
+			t.Fatalf("log = %+v, want line 6 expression x * 10 value 20", info)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for logpoint")
+	}
+	dc.ClearLogpoint(6)
+	if len(dc.Logpoints()) != 0 {
+		t.Fatal("ClearLogpoint left a configured logpoint")
+	}
+}
+
+func TestDebugPausedReturnsSnapshot(t *testing.T) {
+	dc := NewDebugController()
+	dc.SetBreakpoints([]int{6})
+	pauses, done, _ := runDebugged(t, dc, `
+package main
+import "fmt"
+func main() {
+	i := 7
+	fmt.Println(i)
+}
+`)
+	info := mustPause(t, pauses)
+	pending := dc.Paused()
+	if len(pending) != 1 || pending[0].Token != info.Token {
+		t.Fatalf("Paused() = %+v, want token %d", pending, info.Token)
+	}
+	if v, ok := varValue(pending[0].Vars, "i"); !ok || v != "7" {
+		t.Fatalf("Paused i = %q (ok=%v), want 7", v, ok)
+	}
+	if !dc.Continue(info.Token) {
+		t.Fatal("Continue reported not pending")
+	}
+	if got := dc.Paused(); len(got) != 0 {
+		t.Fatalf("Paused after Continue = %+v, want none", got)
+	}
+	if err := mustFinish(t, done); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+}
+
 func TestDebugDetachResumesAndStopsPausing(t *testing.T) {
 	dc := NewDebugController()
 	dc.SetBreakpoints([]int{6})

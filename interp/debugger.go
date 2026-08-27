@@ -66,9 +66,25 @@ type DebugPauseInfo struct {
 	Watch  string `json:"watch,omitempty"`
 }
 
+// DebugLogInfo is emitted by a configured logpoint without stopping the
+// guest goroutine. Expression and Value use the same capability-safe display
+// format as DebugPauseInfo.Vars.
+type DebugLogInfo struct {
+	Location   SourceLocation `json:"location"`
+	Function   string         `json:"function"`
+	Depth      int            `json:"depth"`
+	Expression string         `json:"expression"`
+	Value      string         `json:"value"`
+}
+
 type debugBreakpoint struct {
 	cond    ast.Expr
 	condSrc string
+}
+
+type debugLogpoint struct {
+	expr    ast.Expr
+	exprSrc string
 }
 
 type debugWatch struct {
@@ -101,6 +117,8 @@ type debugWatch struct {
 type DebugController struct {
 	bpMu        sync.RWMutex
 	breakpoints map[int]debugBreakpoint
+	logpoints   map[int]debugLogpoint
+	logActive   atomic.Bool
 	watchMu     sync.RWMutex
 	watches     map[string]debugWatch
 	watchEpoch  *execution
@@ -119,6 +137,8 @@ type DebugController struct {
 
 	onPauseMu sync.RWMutex
 	onPause   func(DebugPauseInfo)
+	onLogMu   sync.RWMutex
+	onLog     func(DebugLogInfo)
 }
 
 // pendingPause is what checkpoint registers for one paused goroutine: the
@@ -129,9 +149,10 @@ type DebugController struct {
 // lookup and removal of a token's entry is what makes those safe to
 // interleave with the resume, not any lock on env itself.
 type pendingPause struct {
-	ch  chan StepMode
-	vm  *Interpreter
-	env *Env
+	ch   chan StepMode
+	vm   *Interpreter
+	env  *Env
+	info DebugPauseInfo
 }
 
 // NewDebugController creates a debug session with no breakpoints, in free
@@ -140,6 +161,7 @@ type pendingPause struct {
 func NewDebugController() *DebugController {
 	return &DebugController{
 		breakpoints: make(map[int]debugBreakpoint),
+		logpoints:   make(map[int]debugLogpoint),
 		watches:     make(map[string]debugWatch),
 		watchValues: make(map[any]map[string]string),
 		pending:     make(map[PauseToken]*pendingPause),
@@ -168,6 +190,16 @@ func (dc *DebugController) OnPause(fn func(DebugPauseInfo)) {
 	dc.onPauseMu.Lock()
 	dc.onPause = fn
 	dc.onPauseMu.Unlock()
+}
+
+// OnLog installs a callback for logpoint samples. It is invoked synchronously
+// on the guest goroutine and must return promptly; use a buffered channel or
+// hand off to another goroutine for expensive processing. A nil callback
+// disables delivery while leaving configured logpoints intact.
+func (dc *DebugController) OnLog(fn func(DebugLogInfo)) {
+	dc.onLogMu.Lock()
+	dc.onLog = fn
+	dc.onLogMu.Unlock()
 }
 
 // SetBreakpoints installs plain (unconditional) source-line breakpoints,
@@ -235,6 +267,74 @@ func (dc *DebugController) breakpointAt(line int) (debugBreakpoint, bool) {
 	bp, ok := dc.breakpoints[line]
 	dc.bpMu.RUnlock()
 	return bp, ok
+}
+
+// SetLogpoint configures an expression sample at line. Unlike a breakpoint,
+// a logpoint never pauses execution: it reports the expression's current
+// value to OnLog whenever that line is reached. Logpoint evaluation exists
+// only while this DebugController is attached, so normal runs stay untouched.
+func (dc *DebugController) SetLogpoint(line int, expr string) error {
+	if dc == nil {
+		return NewRuntimeError("nanogo: nil debug controller")
+	}
+	if line <= 0 {
+		return NewRuntimeError("SetLogpoint: line must be positive")
+	}
+	if strings.TrimSpace(expr) == "" {
+		return NewRuntimeError("nanogo: logpoint expression must not be empty")
+	}
+	parsed, err := parser.ParseExpr(expr)
+	if err != nil {
+		return fmt.Errorf("nanogo: invalid logpoint expression: %w", err)
+	}
+	dc.bpMu.Lock()
+	if dc.logpoints == nil {
+		dc.logpoints = make(map[int]debugLogpoint)
+	}
+	dc.logpoints[line] = debugLogpoint{expr: parsed, exprSrc: expr}
+	dc.bpMu.Unlock()
+	return nil
+}
+
+// ClearLogpoint removes the sample configured at line.
+func (dc *DebugController) ClearLogpoint(line int) {
+	if dc == nil {
+		return
+	}
+	dc.bpMu.Lock()
+	delete(dc.logpoints, line)
+	dc.bpMu.Unlock()
+}
+
+// ClearLogpoints removes every configured logpoint.
+func (dc *DebugController) ClearLogpoints() {
+	if dc == nil {
+		return
+	}
+	dc.bpMu.Lock()
+	dc.logpoints = make(map[int]debugLogpoint)
+	dc.bpMu.Unlock()
+}
+
+// Logpoints returns a copy of the configured line-to-expression mapping.
+func (dc *DebugController) Logpoints() map[int]string {
+	if dc == nil {
+		return nil
+	}
+	dc.bpMu.RLock()
+	defer dc.bpMu.RUnlock()
+	out := make(map[int]string, len(dc.logpoints))
+	for line, point := range dc.logpoints {
+		out[line] = point.exprSrc
+	}
+	return out
+}
+
+func (dc *DebugController) logpointAt(line int) (debugLogpoint, bool) {
+	dc.bpMu.RLock()
+	point, ok := dc.logpoints[line]
+	dc.bpMu.RUnlock()
+	return point, ok
 }
 
 // SetWatch adds or replaces a data watchpoint. The expression is evaluated at
@@ -334,6 +434,29 @@ func (dc *DebugController) resume(token PauseToken, mode StepMode) bool {
 	}
 	p.ch <- mode
 	return true
+}
+
+// Paused returns a token-sorted snapshot of every guest goroutine currently
+// stopped by this controller. It lets hosts inspect a session by polling as
+// well as through OnPause; returned snapshots are independent copies.
+func (dc *DebugController) Paused() []DebugPauseInfo {
+	if dc == nil {
+		return nil
+	}
+	dc.pendingMu.Lock()
+	if len(dc.pending) == 0 {
+		dc.pendingMu.Unlock()
+		return nil
+	}
+	out := make([]DebugPauseInfo, 0, len(dc.pending))
+	for _, pending := range dc.pending {
+		info := pending.info
+		info.Vars = append([]VariableSnapshot(nil), info.Vars...)
+		out = append(out, info)
+	}
+	dc.pendingMu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Token < out[j].Token })
+	return out
 }
 
 // SetVariable assigns the value of expr — a single Go expression, evaluated
@@ -497,6 +620,41 @@ func (dc *DebugController) changedWatch(vm *Interpreter, env *Env) string {
 	return changed
 }
 
+func (dc *DebugController) emitLogpoint(vm *Interpreter, env *Env, frame *callFrame, loc SourceLocation, point debugLogpoint) {
+	// A logpoint expression can call guest code. Skip nested samples until the
+	// outer expression has completed, avoiding recursive instrumentation.
+	if !dc.logActive.CompareAndSwap(false, true) {
+		return
+	}
+	defer dc.logActive.Store(false)
+
+	value, err := vm.evalExpr(point.expr, env)
+	if err != nil {
+		return
+	}
+	function := "program"
+	depth := 0
+	if frame != nil {
+		depth = frame.depth
+		if frame.funcName != "" {
+			function = frame.funcName
+		}
+	}
+	info := DebugLogInfo{
+		Location:   loc,
+		Function:   function,
+		Depth:      depth,
+		Expression: point.exprSrc,
+		Value:      debugValue(value),
+	}
+	dc.onLogMu.RLock()
+	onLog := dc.onLog
+	dc.onLogMu.RUnlock()
+	if onLog != nil {
+		onLog(info)
+	}
+}
+
 // checkpoint is called from evalStmt for every statement. It decides
 // whether to pause the calling goroutine and, if so, blocks it until the
 // host resumes this pause's token or the active execution ends.
@@ -509,6 +667,10 @@ func (dc *DebugController) checkpoint(vm *Interpreter, s ast.Stmt, env *Env) err
 	if env != nil {
 		frame = env.frame
 	}
+	loc := vm.traceLocation(s.Pos())
+	if point, ok := dc.logpointAt(loc.Line); ok {
+		dc.emitLogpoint(vm, env, frame, loc, point)
+	}
 
 	reason := ""
 	watchName := ""
@@ -516,7 +678,6 @@ func (dc *DebugController) checkpoint(vm *Interpreter, s ast.Stmt, env *Env) err
 	case dc.pauseRequested.CompareAndSwap(true, false):
 		reason = "pause"
 	default:
-		loc := vm.traceLocation(s.Pos())
 		if bp, ok := dc.breakpointAt(loc.Line); ok {
 			if bp.cond == nil {
 				reason = "breakpoint"
@@ -552,7 +713,6 @@ func (dc *DebugController) checkpoint(vm *Interpreter, s ast.Stmt, env *Env) err
 		return nil
 	}
 
-	loc := vm.traceLocation(s.Pos())
 	function := "program"
 	if frame != nil && frame.funcName != "" {
 		function = frame.funcName
@@ -573,7 +733,7 @@ func (dc *DebugController) checkpoint(vm *Interpreter, s ast.Stmt, env *Env) err
 
 	token := PauseToken(dc.nextToken.Add(1))
 	info.Token = token
-	p := &pendingPause{ch: make(chan StepMode, 1), vm: vm, env: env}
+	p := &pendingPause{ch: make(chan StepMode, 1), vm: vm, env: env, info: info}
 	dc.pendingMu.Lock()
 	dc.pending[token] = p
 	dc.pendingMu.Unlock()
