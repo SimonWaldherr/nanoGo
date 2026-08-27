@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -59,14 +60,20 @@ type DebugPauseInfo struct {
 	Depth    int                `json:"depth"`
 	Stack    string             `json:"stack"`
 	Vars     []VariableSnapshot `json:"vars"`
-	// Reason is "breakpoint", "pause", "step-into", "step-over", or
-	// "step-out" — whichever caused this particular checkpoint to stop.
+	// Reason is "breakpoint", "pause", "step-into", "step-over",
+	// "step-out", or "watchpoint" — whichever caused this checkpoint to stop.
 	Reason string `json:"reason"`
+	Watch  string `json:"watch,omitempty"`
 }
 
 type debugBreakpoint struct {
 	cond    ast.Expr
 	condSrc string
+}
+
+type debugWatch struct {
+	expr    ast.Expr
+	exprSrc string
 }
 
 // DebugController drives a live pause/step debugging session against one
@@ -94,6 +101,11 @@ type debugBreakpoint struct {
 type DebugController struct {
 	bpMu        sync.RWMutex
 	breakpoints map[int]debugBreakpoint
+	watchMu     sync.RWMutex
+	watches     map[string]debugWatch
+	watchEpoch  *execution
+	watchValues map[any]map[string]string
+	watchActive atomic.Bool
 
 	pauseRequested atomic.Bool
 	detached       atomic.Bool
@@ -128,6 +140,8 @@ type pendingPause struct {
 func NewDebugController() *DebugController {
 	return &DebugController{
 		breakpoints: make(map[int]debugBreakpoint),
+		watches:     make(map[string]debugWatch),
+		watchValues: make(map[any]map[string]string),
 		pending:     make(map[PauseToken]*pendingPause),
 	}
 }
@@ -223,6 +237,69 @@ func (dc *DebugController) breakpointAt(line int) (debugBreakpoint, bool) {
 	return bp, ok
 }
 
+// SetWatch adds or replaces a data watchpoint. The expression is evaluated at
+// statement checkpoints while this controller is attached; execution pauses
+// when its displayed value changes. Watchpoints are debugger-only work and do
+// not add checks or state to a normal run without a DebugController.
+func (dc *DebugController) SetWatch(name, expr string) error {
+	if dc == nil {
+		return NewRuntimeError("nanogo: nil debug controller")
+	}
+	if strings.TrimSpace(name) == "" {
+		return NewRuntimeError("nanogo: watch name must not be empty")
+	}
+	if strings.TrimSpace(expr) == "" {
+		return NewRuntimeError("nanogo: watch expression must not be empty")
+	}
+	parsed, err := parser.ParseExpr(expr)
+	if err != nil {
+		return fmt.Errorf("nanogo: invalid watch expression: %w", err)
+	}
+	dc.watchMu.Lock()
+	if dc.watches == nil {
+		dc.watches = make(map[string]debugWatch)
+	}
+	if dc.watchValues == nil {
+		dc.watchValues = make(map[any]map[string]string)
+	}
+	dc.watches[name] = debugWatch{expr: parsed, exprSrc: expr}
+	// Replacing a watch establishes a fresh baseline on its next checkpoint,
+	// rather than comparing values from the previous expression.
+	for _, values := range dc.watchValues {
+		delete(values, name)
+	}
+	dc.watchMu.Unlock()
+	return nil
+}
+
+// ClearWatch removes one watchpoint. It is safe to call while the program is
+// running; the next checkpoint sees the updated watchpoint set.
+func (dc *DebugController) ClearWatch(name string) {
+	if dc == nil {
+		return
+	}
+	dc.watchMu.Lock()
+	delete(dc.watches, name)
+	for _, values := range dc.watchValues {
+		delete(values, name)
+	}
+	dc.watchMu.Unlock()
+}
+
+// Watches returns the configured watchpoint expressions keyed by host name.
+func (dc *DebugController) Watches() map[string]string {
+	if dc == nil {
+		return nil
+	}
+	dc.watchMu.RLock()
+	defer dc.watchMu.RUnlock()
+	out := make(map[string]string, len(dc.watches))
+	for name, watch := range dc.watches {
+		out[name] = watch.exprSrc
+	}
+	return out
+}
+
 // Pause requests a stop at the very next statement checkpoint reached by
 // any guest goroutine, regardless of breakpoints or step mode.
 func (dc *DebugController) Pause() {
@@ -292,6 +369,29 @@ func (dc *DebugController) SetVariable(token PauseToken, name, expr string) (str
 	return debugValue(value), nil
 }
 
+// Evaluate evaluates an expression in the paused goroutine's scope and
+// returns the same capability-safe display representation used by Vars.
+// Like SetVariable, it is valid only while token remains paused. Evaluation
+// does not assign a value, but expressions that call guest/native functions
+// may still have those functions' normal side effects.
+func (dc *DebugController) Evaluate(token PauseToken, expr string) (string, error) {
+	dc.pendingMu.Lock()
+	p, ok := dc.pending[token]
+	dc.pendingMu.Unlock()
+	if !ok {
+		return "", NewRuntimeError("nanogo: no goroutine is paused at that token")
+	}
+	valueExpr, err := parser.ParseExpr(expr)
+	if err != nil {
+		return "", fmt.Errorf("nanogo: invalid evaluation expression: %w", err)
+	}
+	value, err := p.vm.evalExpr(valueExpr, p.env)
+	if err != nil {
+		return "", err
+	}
+	return debugValue(value), nil
+}
+
 // Continue resumes the goroutine paused at token in free-run mode. It
 // reports false if token is not (or no longer) paused.
 func (dc *DebugController) Continue(token PauseToken) bool { return dc.resume(token, DebugRun) }
@@ -331,6 +431,72 @@ func sameLineage(a, b *callFrame) bool {
 	return frameChainContains(a, b) || frameChainContains(b, a)
 }
 
+type debugWatchEntry struct {
+	name  string
+	watch debugWatch
+}
+
+// changedWatch evaluates configured watches only while a debugger is active.
+// Values are tracked per activation frame (or per Env for frame-free calls),
+// so independent guest goroutines do not overwrite one another's baselines.
+func (dc *DebugController) changedWatch(vm *Interpreter, env *Env) string {
+	// Watch expressions may call guest functions, whose statements reach this
+	// same checkpoint recursively. Suppress nested watch evaluation while the
+	// outer sample is active; the outer expression still observes the result.
+	if !dc.watchActive.CompareAndSwap(false, true) {
+		return ""
+	}
+	defer dc.watchActive.Store(false)
+
+	epoch := vm.activeExecution
+	key := any(env)
+	if env != nil && env.frame != nil {
+		key = env.frame
+	}
+
+	dc.watchMu.Lock()
+	if dc.watchEpoch != epoch {
+		dc.watchEpoch = epoch
+		dc.watchValues = make(map[any]map[string]string)
+	}
+	if dc.watchValues == nil {
+		dc.watchValues = make(map[any]map[string]string)
+	}
+	if len(dc.watches) == 0 {
+		dc.watchMu.Unlock()
+		return ""
+	}
+	entries := make([]debugWatchEntry, 0, len(dc.watches))
+	for name, watch := range dc.watches {
+		entries = append(entries, debugWatchEntry{name: name, watch: watch})
+	}
+	dc.watchMu.Unlock()
+
+	var changed string
+	for _, entry := range entries {
+		value, err := vm.evalExpr(entry.watch.expr, env)
+		if err != nil {
+			// A watch can be out of scope on one frame. Keep its old baseline
+			// until it becomes evaluable again instead of stopping execution.
+			continue
+		}
+		rendered := debugValue(value)
+		dc.watchMu.Lock()
+		values := dc.watchValues[key]
+		if values == nil {
+			values = make(map[string]string, len(entries))
+			dc.watchValues[key] = values
+		}
+		previous, initialized := values[entry.name]
+		values[entry.name] = rendered
+		dc.watchMu.Unlock()
+		if initialized && previous != rendered && changed == "" {
+			changed = entry.name
+		}
+	}
+	return changed
+}
+
 // checkpoint is called from evalStmt for every statement. It decides
 // whether to pause the calling goroutine and, if so, blocks it until the
 // host resumes this pause's token or the active execution ends.
@@ -345,6 +511,7 @@ func (dc *DebugController) checkpoint(vm *Interpreter, s ast.Stmt, env *Env) err
 	}
 
 	reason := ""
+	watchName := ""
 	switch {
 	case dc.pauseRequested.CompareAndSwap(true, false):
 		reason = "pause"
@@ -376,6 +543,12 @@ func (dc *DebugController) checkpoint(vm *Interpreter, s ast.Stmt, env *Env) err
 		}
 	}
 	if reason == "" {
+		watchName = dc.changedWatch(vm, env)
+		if watchName != "" {
+			reason = "watchpoint"
+		}
+	}
+	if reason == "" {
 		return nil
 	}
 
@@ -395,6 +568,7 @@ func (dc *DebugController) checkpoint(vm *Interpreter, s ast.Stmt, env *Env) err
 		Stack:    callStackString(frame),
 		Vars:     vm.collectPauseVars(env, function),
 		Reason:   reason,
+		Watch:    watchName,
 	}
 
 	token := PauseToken(dc.nextToken.Add(1))

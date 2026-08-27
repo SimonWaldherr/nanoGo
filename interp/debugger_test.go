@@ -306,6 +306,54 @@ func main() {
 	}
 }
 
+func TestDebugWatchpointAndEvaluate(t *testing.T) {
+	dc := NewDebugController()
+	if err := dc.SetWatch("counter", "x"); err != nil {
+		t.Fatalf("SetWatch: %v", err)
+	}
+	if got := dc.Watches()["counter"]; got != "x" {
+		t.Fatalf("Watches()[counter] = %q, want x", got)
+	}
+	pauses, done, _ := runDebugged(t, dc, `
+package main
+import "fmt"
+func main() {
+	x := 0
+	x++
+	fmt.Println(x)
+	x++
+	fmt.Println(x)
+}
+`)
+	first := mustPause(t, pauses)
+	if first.Reason != "watchpoint" || first.Watch != "counter" {
+		t.Fatalf("first pause = %+v, want counter watchpoint", first)
+	}
+	if value, err := dc.Evaluate(first.Token, "x * 2"); err != nil || value != "2" {
+		t.Fatalf("Evaluate = %q, %v; want 2", value, err)
+	}
+	if !dc.Continue(first.Token) {
+		t.Fatal("Continue(first) reported not pending")
+	}
+	second := mustPause(t, pauses)
+	if second.Reason != "watchpoint" || second.Watch != "counter" {
+		t.Fatalf("second pause = %+v, want counter watchpoint", second)
+	}
+	if v, ok := varValue(second.Vars, "x"); !ok || v != "2" {
+		t.Fatalf("second x = %q (ok=%v), want 2", v, ok)
+	}
+	dc.ClearWatch("counter")
+	if len(dc.Watches()) != 0 {
+		t.Fatal("ClearWatch left a configured watch")
+	}
+	if !dc.Continue(second.Token) {
+		t.Fatal("Continue(second) reported not pending")
+	}
+	if err := mustFinish(t, done); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+}
+
 func TestDebugDetachResumesAndStopsPausing(t *testing.T) {
 	dc := NewDebugController()
 	dc.SetBreakpoints([]int{6})
