@@ -63,7 +63,9 @@ test-race:
 vet:
 	# cmd/wasm and runtime are js/wasm-only; vet the native packages here and
 	# validate the browser side separately through build-wasm and vet-wasm.
-	go vet ./interp ./interp/loader ./interp/index ./cmd/cli ./cmd/mcp ./cmd/repl
+	# examples/ is included so a runnable example that stops compiling is
+	# caught here rather than by whoever next follows the README.
+	go vet ./interp ./interp/loader ./interp/index ./cmd/cli ./cmd/mcp ./cmd/repl ./examples/...
 
 # Vet the js/wasm-only packages that `vet` cannot build for the host.
 vet-wasm:

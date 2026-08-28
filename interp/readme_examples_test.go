@@ -50,7 +50,7 @@ func readmeGoExamples(t *testing.T) []string {
 
 func TestReadmeGoExamples(t *testing.T) {
 	examples := readmeGoExamples(t)
-	if len(examples) != 7 {
+	if len(examples) != 8 {
 		t.Fatalf("README has %d Go examples; add expectations for each one", len(examples))
 	}
 
@@ -106,6 +106,13 @@ func TestReadmeGoExamples(t *testing.T) {
 				}
 			case 6:
 				if got != "work\ncleanup 2\ncleanup 1\n" {
+					t.Errorf("unexpected output: %q", got)
+				}
+			case 7:
+				// Text Templates section: the range action emits one line per
+				// row (each ending in the template's own newline), and
+				// fmt.Println adds one more after the whole string.
+				if got != "bolt=12\nnut=0 (empty)\n\n" {
 					t.Errorf("unexpected output: %q", got)
 				}
 			}

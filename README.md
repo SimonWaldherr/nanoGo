@@ -936,6 +936,69 @@ stdlib compatibility. `path` provides `Base`, `Clean`, `Dir`, `Ext`, `IsAbs`,
 and `Join`; `unicode/utf8` provides `RuneCountInString`, `RuneLen`,
 `ValidRune`, and `ValidString`, plus `RuneError`, `RuneSelf`, and `UTFMax`.
 
+### Text Templates
+
+`text/template.RenderString(text, data)` is nanoGo's entire template surface.
+It expands `text` with `data` and returns the result plus an error:
+
+```go
+package main
+
+import (
+    "fmt"
+    "text/template"
+)
+
+type Row struct {
+    Name string
+    Qty  int
+}
+
+func main() {
+    rows := []Row{Row{Name: "bolt", Qty: 12}, Row{Name: "nut", Qty: 0}}
+    out, err := template.RenderString(
+        "{{range .}}{{.Name}}={{.Qty}}{{if eq .Qty 0}} (empty){{end}}\n{{end}}", rows)
+    if err != nil {
+        fmt.Println("render error:", err)
+        return
+    }
+    fmt.Println(out)
+}
+```
+
+It is backed by Go's real `text/template`, so the usual actions all work:
+`{{.Field}}`, `{{range}}` (including `{{range $i, $v := .}}`), `{{if}}`/
+`{{else}}`, `{{with}}`, `{{len}}`, `{{printf}}`, and comparison functions such
+as `eq`/`gt`. Guest structs, slices, and maps are converted to plain Go values
+before execution, so any of them can be the data argument.
+
+Two things to know when writing templates in nanoGo:
+
+- **This is `text/template`, not `html/template`.** It performs no HTML
+  escaping, so do not build markup out of untrusted data with it.
+- **Two subset limits affect the data you pass**, not the template itself:
+  types used as template data must be declared at package level (nanoGo has
+  no function-local `type` declarations), and slice elements must spell out
+  their type — `[]Row{Row{...}, Row{...}}` rather than Go's elided
+  `[]Row{{...}, {...}}`.
+
+Parsed templates are cached per interpreter, so executing one template text
+in a loop — a row of a report, a generated file per entity — parses it once
+rather than on every call.
+
+Runnable examples: [examples/templates](examples/templates) renders a report
+from struct, slice, and map data; [examples/template_codegen](examples/template_codegen)
+uses templates as a code generator, writing the results into the VFS for the
+host to read back.
+
+```bash
+go run ./examples/templates
+go run ./examples/template_codegen
+```
+
+The browser playground ships the same material as the **Template Report** and
+**Template + DOM** examples.
+
 ### Multi-Package Programs & Tooling
 
 Beyond a single `package main` file, nanoGo can load a small multi-file,

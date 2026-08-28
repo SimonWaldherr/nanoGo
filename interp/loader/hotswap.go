@@ -33,7 +33,7 @@ func ReplaceFunction(vm *interp.Interpreter, prog *Program, pkgName, name, newSo
 	}
 
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, name+".go", "package "+pkgName+"\n"+newSource, 0)
+	file, err := parser.ParseFile(fset, name+".go", "package "+pkgName+"\n"+newSource, parser.SkipObjectResolution)
 	if err != nil {
 		return fmt.Errorf("nanogo/loader: ReplaceFunction: %s.%s: %w", pkgName, name, err)
 	}

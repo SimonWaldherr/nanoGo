@@ -336,7 +336,21 @@ func handleResourcesRead(rawParams json.RawMessage) (any, *jsonRPCError) {
 
 // ── tools/list ────────────────────────────────────────────────────────────────
 
+// toolsListResult is the tools/list payload. It is identical for every
+// client and every call — the descriptions and JSON schemas below are
+// compile-time constants — so it is built once instead of reallocating some
+// 150 maps and slices per request. The HTTP transport serves concurrent
+// clients from this same value, which is safe only because it is treated as
+// immutable after construction: nothing may mutate the returned maps, and a
+// future per-client variation has to build its own copy rather than editing
+// this one.
+var toolsListResult = sync.OnceValue(buildToolsListResult)
+
 func handleToolsList() (any, *jsonRPCError) {
+	return toolsListResult(), nil
+}
+
+func buildToolsListResult() any {
 	tools := []mcpTool{
 		{
 			Name:        "run_code",
@@ -464,7 +478,7 @@ func handleToolsList() (any, *jsonRPCError) {
 			}, "path"),
 		},
 	}
-	return map[string]any{"tools": tools}, nil
+	return map[string]any{"tools": tools}
 }
 
 // prop builds a simple JSON-Schema property descriptor.

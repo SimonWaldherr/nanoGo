@@ -65,6 +65,7 @@ func (p *LineProfile) Reset() {
 // evaluation from the point it's called — install it before Run/RunContext.
 func (vm *Interpreter) SetLineProfile(profile *LineProfile) {
 	vm.lineProfile.Store(profile)
+	vm.refreshStmtHooks()
 }
 
 // LineProfileActive returns the currently installed line profiler, or nil

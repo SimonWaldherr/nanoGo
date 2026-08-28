@@ -54,7 +54,16 @@ func (vm *Interpreter) WithExecution(ctx context.Context, fset *token.FileSet, f
 // active execution it runs unbounded, matching vm.Context()'s existing
 // fallback-to-Background behavior when idle.
 func (vm *Interpreter) Invoke(fn *Function, args []any) (any, error) {
-	return vm.callFunction(fn, fn.Env, nil, args)
+	v, err := vm.callFunction(fn, fn.Env, nil, args)
+	// Settle the step counter at this host-visible boundary so a StepCount
+	// call between invocations sees an exact figure rather than one still
+	// carrying the evaluator's outstanding block reservation. Hosts that
+	// measure per-iteration cost (interp/loader's RunFunctionBench) read it
+	// exactly here.
+	if e := vm.activeExecution; e != nil {
+		e.refundSteps()
+	}
+	return v, err
 }
 
 // CallEntry runs fn under a fresh execution scope: cancellation, step and

@@ -78,6 +78,129 @@ func main() {
 	}
 }
 
+// guestWorkloads are whole guest programs, each dominated by one distinct
+// part of the evaluator, so a change can be attributed instead of just
+// observed. BenchmarkFibRecursive and BenchmarkEvalExprArithmetic above cover
+// call dispatch and the bare statement loop; these cover the container,
+// string, struct, map and nested-loop paths that real guest code spends its
+// time in and that those two miss entirely.
+//
+// Sizes are chosen so each program runs long enough to dominate parse and
+// setup cost while still leaving `go test -bench` responsive. They are guest
+// source, so they exercise the same Run path a host or the playground uses —
+// unlike interp/loader's BenchmarkSum, which measures a guest program's step
+// count rather than the host implementation's throughput.
+var guestWorkloads = []struct {
+	name string
+	src  string
+}{
+	{
+		// Slice growth and indexed reads: builtinAppend, SliceVal indexing,
+		// and the `i < len(s)` loop header.
+		name: "SliceAppendIndex",
+		src: `
+package main
+func main() {
+	s := []int{}
+	for i := 0; i < 40000; i++ { s = append(s, i*3) }
+	t := 0
+	for i := 0; i < len(s); i++ { t = t + s[i] }
+	_ = t
+}`,
+	},
+	{
+		// Struct literal construction plus a value-receiver method call per
+		// iteration: composite literals, field access, and method dispatch.
+		name: "StructMethodCalls",
+		src: `
+package main
+type P struct { X int; Y int }
+func (p P) Sum() int { return p.X + p.Y }
+func main() {
+	t := 0
+	for i := 0; i < 30000; i++ {
+		p := P{X: i, Y: i * 2}
+		t = t + p.Sum()
+	}
+	_ = t
+}`,
+	},
+	{
+		// Read-modify-write on one map entry: MapVal.hash plus the map
+		// index lvalue path.
+		name: "MapReadModifyWrite",
+		src: `
+package main
+func main() {
+	m := map[string]int{}
+	for i := 0; i < 20000; i++ { m["k"] = m["k"] + i }
+	_ = m["k"]
+}`,
+	},
+	{
+		// String building and stdlib string calls, which route through the
+		// curated strings package rather than the evaluator's own operators.
+		name: "StringBuildAndSearch",
+		src: `
+package main
+import "strings"
+func main() {
+	acc := ""
+	for i := 0; i < 4000; i++ { acc = acc + "x" }
+	_ = strings.Contains(acc, "xxx")
+	n := 0
+	for i := 0; i < 4000; i++ { if strings.HasPrefix(acc, "x") { n++ } }
+	_ = n
+}`,
+	},
+	{
+		// A nested loop over an indexed container with a comparison and a
+		// swap per inner step — the shape most sensitive to how cheaply
+		// a[i] participates in integer expressions.
+		name: "NestedLoopSort",
+		src: `
+package main
+func main() {
+	n := 220
+	a := []int{}
+	for i := 0; i < n; i++ { a = append(a, (n-i)*7919%n) }
+	for i := 0; i < n; i++ {
+		for j := 0; j < n-1-i; j++ {
+			if a[j] > a[j+1] { t := a[j]; a[j] = a[j+1]; a[j+1] = t }
+		}
+	}
+	_ = a[0]
+}`,
+	},
+}
+
+// BenchmarkGuestWorkloads runs each program in guestWorkloads as its own
+// sub-benchmark, so `go test ./interp -run '^$' -bench=GuestWorkloads -benchmem`
+// reports one line per evaluator area and
+// `-bench=GuestWorkloads/StructMethodCalls` isolates a single one.
+//
+// A fresh interpreter per iteration keeps repeated runs from accumulating
+// declarations in one shared globals scope, which would otherwise make later
+// iterations measure a different (larger) environment than the first.
+func BenchmarkGuestWorkloads(b *testing.B) {
+	for _, w := range guestWorkloads {
+		b.Run(w.name, func(b *testing.B) {
+			vm, _ := newTestVM()
+			if err := vm.Run(w.src); err != nil {
+				b.Fatalf("Run: %v", err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				vm, _ := newTestVM()
+				if err := vm.Run(w.src); err != nil {
+					b.Fatalf("Run: %v", err)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkChannelBufferedRoundTrip isolates the runtime overhead of the
 // ChannelVal send/receive path used by guest channels. Keep this separate from
 // evaluator benchmarks so channel synchronization changes can be compared
@@ -226,6 +349,74 @@ func (p Point) Sum() int {
 		})
 		if err != nil {
 			b.Fatalf("load: %v", err)
+		}
+	}
+}
+
+// BenchmarkTemplateRenderRepeated renders one template many times with
+// different data — the shape any report, table, or page generator has.
+// text/template.RenderString is nanoGo's whole template surface, and it
+// parses its first argument on every call, so this is where a parse cache
+// shows up.
+func BenchmarkTemplateRenderRepeated(b *testing.B) {
+	const src = `
+package main
+import "text/template"
+func main() {
+	out := ""
+	for i := 0; i < 200; i++ {
+		s, _ := template.RenderString("{{.Name}} has {{.Count}} items\n",
+			map[string]interface{}{"Name": "row", "Count": i})
+		out = out + s
+	}
+	_ = out
+}
+`
+	vm, _ := newTestVM()
+	if err := vm.Run(src); err != nil {
+		b.Fatalf("Run: %v", err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		vm, _ := newTestVM()
+		if err := vm.Run(src); err != nil {
+			b.Fatalf("Run: %v", err)
+		}
+	}
+}
+
+// BenchmarkTemplateRenderDistinct renders a different template text on every
+// iteration. It is the counterpart to BenchmarkTemplateRenderRepeated: a
+// cache must not make the never-repeated case worse, and it must not grow
+// without bound when guest code builds template text dynamically.
+func BenchmarkTemplateRenderDistinct(b *testing.B) {
+	const src = `
+package main
+import (
+	"strconv"
+	"text/template"
+)
+func main() {
+	out := ""
+	for i := 0; i < 200; i++ {
+		s, _ := template.RenderString("row "+strconv.Itoa(i)+": {{.Name}}\n",
+			map[string]interface{}{"Name": "x"})
+		out = out + s
+	}
+	_ = out
+}
+`
+	vm, _ := newTestVM()
+	if err := vm.Run(src); err != nil {
+		b.Fatalf("Run: %v", err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		vm, _ := newTestVM()
+		if err := vm.Run(src); err != nil {
+			b.Fatalf("Run: %v", err)
 		}
 	}
 }

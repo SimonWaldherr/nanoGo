@@ -59,10 +59,24 @@ type execution struct {
 	// execution, so hot assignment paths can avoid checking atomics.
 	trackVariables bool
 	limitCause     atomic.Uint32
-	steps          atomic.Uint64
-	goroutines     atomic.Int64
-	concurrent     atomic.Bool
-	wg             sync.WaitGroup
+	// steps is the authoritative checkpoint counter, but it is charged a
+	// whole stepBlock at a time while the execution is single-goroutine (see
+	// chargeStep). Between block boundaries it therefore runs ahead of what
+	// has actually been consumed by exactly stepsLeft; refundSteps settles
+	// that difference at every point where the number is observed or where
+	// ownership of stepsLeft changes hands.
+	steps atomic.Uint64
+	// stepsLeft is the unconsumed remainder of the block most recently
+	// reserved from steps. It is a plain field, not an atomic: a block is
+	// only ever reserved and drawn down while exactly one goroutine is
+	// running guest code, which is the same invariant (and the same
+	// concurrent flag) that already lets Env lookups skip locking — see
+	// Interpreter.get. reserveGoroutine hands the remainder back before a
+	// second goroutine can exist, so no two goroutines ever touch it.
+	stepsLeft  uint64
+	goroutines atomic.Int64
+	concurrent atomic.Bool
+	wg         sync.WaitGroup
 
 	// stopParentWatch unregisters the parent cancellation callback installed
 	// by beginExecution. context.AfterFunc does not reserve a goroutine while
@@ -116,19 +130,113 @@ func (e *execution) err() error {
 	return nil
 }
 
+// stepBlock is how many checkpoints a single-goroutine execution reserves
+// from steps in one atomic operation. Charging every checkpoint individually
+// cost a locked read-modify-write per visited AST node, which profiling
+// showed to be the largest single item in the interpreter's own CPU profile
+// (~17% of total runtime on both the arithmetic-loop and the recursive-call
+// benchmark). Drawing a block down through an ordinary field turns the common
+// case into a load/decrement/store while chargeStep keeps the *observable*
+// behavior identical: the limit still fires on exactly the same checkpoint it
+// did before, because an over-reservation is trimmed back to MaxSteps rather
+// than granted (see chargeStep), and refundSteps returns whatever remains
+// unconsumed before the counter is read.
+const stepBlock = 256
+
 func (e *execution) checkpoint() error {
-	if err := e.err(); err != nil {
-		return err
+	if e.stopped.Load() {
+		if err := e.err(); err != nil {
+			return err
+		}
+	}
+	if e.stepsLeft > 0 {
+		e.stepsLeft--
+		return nil
+	}
+	return e.chargeStep()
+}
+
+// chargeStep is checkpoint's slow path: the step limit is disabled, this
+// execution has gone concurrent, or the reserved block just ran out.
+func (e *execution) chargeStep() error {
+	max := e.limits.MaxSteps
+	if e.concurrent.Load() {
+		// Several guest goroutines are running, so stepsLeft — which has a
+		// single owner by construction — must not be written here at all.
+		// Charge each checkpoint directly instead: that also keeps the limit
+		// from depending on how work happened to be distributed between the
+		// goroutines, which a per-goroutine private block would.
+		if max == 0 {
+			return nil
+		}
+		if e.steps.Add(1) <= max {
+			return nil
+		}
+		e.stopForLimit(limitSteps)
+		return ErrStepLimit
+	}
+	// Below here this is the only goroutine running guest code, so it owns
+	// stepsLeft (see the field's comment).
+	if max == 0 {
+		// No limit configured, so nothing is counted — matching the
+		// long-standing behavior that StepCount reports 0 for an execution
+		// running without a step budget. Still hand out a block, purely so
+		// checkpoint keeps taking its inline fast path instead of calling
+		// down here for every node of a trusted, unlimited workload.
+		e.stepsLeft = stepBlock
+		return nil
+	}
+	reserved := e.steps.Add(stepBlock)
+	if reserved > max {
+		// The block overshot the budget. Give back the part that lies beyond
+		// it so steps never reports more than MaxSteps, and grant only the
+		// checkpoints that genuinely still fit.
+		excess := reserved - max
+		if excess >= stepBlock {
+			// Nothing of this block fits. Charging one checkpoint per step
+			// would have left the counter at MaxSteps+1 here — the step that
+			// tripped the limit is counted — so land on exactly that, which
+			// is what LastStepCount reports for a run that hit its budget.
+			// steps was necessarily sitting at exactly MaxSteps: this branch
+			// is only reachable once a previous block was trimmed to it.
+			subSteps(&e.steps, stepBlock-1)
+			e.stopForLimit(limitSteps)
+			return ErrStepLimit
+		}
+		subSteps(&e.steps, excess)
+		e.stepsLeft = stepBlock - excess - 1
+		return nil
+	}
+	e.stepsLeft = stepBlock - 1
+	return nil
+}
+
+// refundSteps returns the unconsumed remainder of the current block to steps,
+// making the counter exact again. It must be called before anything reads
+// steps, and before ownership of stepsLeft could pass to another goroutine.
+// Callers must be the goroutine that owns the block: the sole guest goroutine
+// (checkpoint's fast path can only ever run there) or a host between guest
+// calls. While the execution is concurrent stepsLeft is already zero, so this
+// is a no-op rather than a race.
+func (e *execution) refundSteps() {
+	if e.stepsLeft == 0 {
+		return
 	}
 	if e.limits.MaxSteps == 0 {
-		return nil
+		// An unlimited execution's block was never charged to steps (see
+		// chargeStep), so there is nothing to give back — only the local
+		// remainder to clear.
+		e.stepsLeft = 0
+		return
 	}
-	if e.steps.Add(1) <= e.limits.MaxSteps {
-		return nil
-	}
-	e.stopForLimit(limitSteps)
-	return ErrStepLimit
+	subSteps(&e.steps, e.stepsLeft)
+	e.stepsLeft = 0
 }
+
+// subSteps decrements an atomic.Uint64 by n. atomic.Uint64.Add only takes an
+// unsigned delta, so the decrement is expressed as its two's complement,
+// which wraps to exactly the same result.
+func subSteps(counter *atomic.Uint64, n uint64) { counter.Add(^(n - 1)) }
 
 func (e *execution) reserveGoroutine() error {
 	if err := e.err(); err != nil {
@@ -136,6 +244,15 @@ func (e *execution) reserveGoroutine() error {
 	}
 	active := e.goroutines.Add(1)
 	if e.limits.MaxGoroutines <= 0 || active <= int64(e.limits.MaxGoroutines) {
+		if active == 1 {
+			// This is the 0->1 transition, so the caller is still the only
+			// goroutine running guest code and therefore owns the current
+			// step block. Hand the remainder back before a second goroutine
+			// can exist: from here on every checkpoint charges steps
+			// directly, and nothing may touch stepsLeft until the last child
+			// has cleared the concurrent flag again.
+			e.refundSteps()
+		}
 		// Publish before the Go statement launches the child. The child and
 		// its parent therefore both take Env locks for their whole overlap.
 		e.concurrent.Store(true)
@@ -198,6 +315,11 @@ func (e *execution) finalError(err error) error {
 // teardown as well as channel and select waits. This is especially important
 // for Run(), whose background parent has no cancellation callback.
 func (e *execution) finish() {
+	// The root evaluator has returned, so whatever it still held of its step
+	// block is unconsumed. Settle it before endExecution publishes the total
+	// as LastStepCount; guest goroutines that are still winding down charge
+	// steps directly and are unaffected.
+	e.refundSteps()
 	if e.stopParentWatch != nil {
 		e.stopParentWatch()
 	}

@@ -20,13 +20,91 @@ import (
 	"unicode/utf8"
 )
 
-// RegisterBuiltinPackages installs a tiny, curated set of std-like packages:
-// fmt, time, math, encoding/json, sync, regexp, strings, sort, strconv,
-// math/rand, path, unicode/utf8, browser, text/template, http, fs, os,
-// storage, testing, and debug. Each package intentionally exposes only the
-// functions registered below; this is not a full Go standard library.
-func RegisterBuiltinPackages(vm *Interpreter) {
+// builtinPackageBuilders maps every curated import path to the function that
+// constructs that one package on an interpreter. Splitting construction per
+// package is what lets it happen lazily: a host that calls
+// RegisterBuiltinPackages no longer pays for all twenty, only for the ones a
+// guest program actually imports. That matters because the per-interpreter
+// sandbox, not the guest program, dominates the cost of a short run — and
+// hosts like cmd/mcp build a fresh interpreter for every single tool call.
+//
+// Keep this in sync with BuiltinImportPaths (interp/imports.go) and with
+// installImportedPackage's cases; TestEveryBuiltinImportPathResolves pins
+// that they agree.
+// It is filled in by init() rather than written as a composite literal here.
+// Several builders reach guest evaluation (registerTestingPackage runs guest
+// test functions), and evaluation reaches ensureBuiltinPackage, which reads
+// this map — a literal would therefore be an initialization cycle that the
+// compiler rejects. Assigning inside init() breaks the cycle without changing
+// anything observable: init() still runs before any interpreter exists.
+var builtinPackageBuilders map[string]func(*Interpreter)
 
+func init() {
+	builtinPackageBuilders = map[string]func(*Interpreter){
+		"fmt":           registerFmtPackage,
+		"debug":         registerDebugPackage,
+		"time":          registerTimePackage,
+		"math":          registerMathPackage,
+		"math/rand":     registerRandPackage,
+		"encoding/json": registerJSONPackage,
+		// json is a convenience alias for encoding/json; the builder registers
+		// the same *Package object under both names.
+		"json":          registerJSONPackage,
+		"strings":       registerStringsPackage,
+		"sort":          registerSortPackage,
+		"strconv":       registerStrconvPackage,
+		"path":          registerPathPackage,
+		"unicode/utf8":  registerUTF8Package,
+		"sync":          registerSyncPackage,
+		"regexp":        registerRegexpPackage,
+		"browser":       registerBrowserPackage,
+		"text/template": registerTemplatePackage,
+		"http":          registerHTTPPackage,
+		"fs":            registerFSPackage,
+		"storage":       registerStoragePackage,
+		"os":            registerOsPackage,
+		"testing":       registerTestingPackage,
+	}
+}
+
+// RegisterBuiltinPackages makes nanoGo's tiny, curated set of std-like
+// packages available to guest code: fmt, time, math, encoding/json, sync,
+// regexp, strings, sort, strconv, math/rand, path, unicode/utf8, browser,
+// text/template, http, fs, os, storage, testing, and debug. Each package
+// intentionally exposes only the functions registered below; this is not a
+// full Go standard library.
+//
+// The packages themselves are built on first use rather than here, so an
+// interpreter only ever constructs the ones its guest program imports (see
+// builtinPackageBuilders and ensureBuiltinPackage). This is invisible to
+// callers: every path this function enables still resolves, whether the
+// program reaches it through an import statement, through vm.Package, or
+// through interp/loader's module resolution.
+func RegisterBuiltinPackages(vm *Interpreter) {
+	vm.builtinsEnabled = true
+}
+
+// ensureBuiltinPackage builds path's curated package if a host has enabled
+// the builtins and it has not been constructed yet, then reports it. It is
+// the single gate every builtin lookup passes through, so no caller has to
+// know whether a package has been materialized.
+func (vm *Interpreter) ensureBuiltinPackage(path string) (*Package, bool) {
+	if pkg, ok := vm.packages[path]; ok {
+		return pkg, true
+	}
+	if !vm.builtinsEnabled {
+		return nil, false
+	}
+	build, ok := builtinPackageBuilders[path]
+	if !ok {
+		return nil, false
+	}
+	build(vm)
+	pkg, ok := vm.packages[path]
+	return pkg, ok
+}
+
+func registerFmtPackage(vm *Interpreter) {
 	// --- fmt ---
 	fmtPkg := &Package{Name: "fmt", Funcs: map[string]*Function{}}
 	fmtPkg.Funcs["Println"] = &Function{Name: "Println", IsVariadic: true, Native: func(args []any) (any, error) {
@@ -82,7 +160,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return ToString(res), nil
 	}}
 	vm.RegisterPackage("fmt", fmtPkg)
+}
 
+func registerDebugPackage(vm *Interpreter) {
 	// --- debug ---
 	// debug.Q, debug.Mark, debug.Stack, and debug.Vars are intercepted in
 	// evalExpr so they can retain the original expression text or read the
@@ -130,7 +210,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return nil, NewRuntimeError("debug.Assert: " + msg)
 	}}
 	vm.RegisterPackage("debug", debugPkg)
+}
 
+func registerTimePackage(vm *Interpreter) {
 	// --- time ---
 	timerType := &TypeDef{Name: "Timer", Kind: "struct", Fields: []FieldDef{{Name: "C", Type: "chan int"}}, Methods: map[string]*Function{}}
 	tickerType := &TypeDef{Name: "Ticker", Kind: "struct", Fields: []FieldDef{{Name: "C", Type: "chan int"}}, Methods: map[string]*Function{}}
@@ -186,7 +268,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return newNativeTimer(ctx, milliseconds, true)
 	}}
 	vm.RegisterPackage("time", timePkg)
+}
 
+func registerMathPackage(vm *Interpreter) {
 	// --- math ---
 	mathPkg := &Package{Name: "math", Funcs: map[string]*Function{}, Vars: map[string]any{}}
 	mathPkg.Funcs["Sqrt"] = &Function{Name: "Sqrt", Native: func(args []any) (any, error) { return math.Sqrt(ToFloat(args[0])), nil }}
@@ -205,7 +289,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	mathPkg.Vars["Pi"] = math.Pi
 	mathPkg.Vars["E"] = math.E
 	vm.RegisterPackage("math", mathPkg)
+}
 
+func registerRandPackage(vm *Interpreter) {
 	// --- math/rand --- (small facade)
 	randPkg := &Package{Name: "math/rand", Funcs: map[string]*Function{}}
 	randPkg.Funcs["Intn"] = &Function{Name: "Intn", Params: []string{"n"}, Native: func(args []any) (any, error) {
@@ -223,7 +309,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return mrand.Float64(), nil
 	}}
 	vm.RegisterPackage("math/rand", randPkg)
+}
 
+func registerJSONPackage(vm *Interpreter) {
 	// --- encoding/json --- (very small facade)
 	jsonPkg := &Package{Name: "encoding/json", Funcs: map[string]*Function{}}
 	// Marshal(v any) -> string
@@ -248,7 +336,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	}}
 	vm.RegisterPackage("encoding/json", jsonPkg)
 	vm.RegisterPackage("json", jsonPkg) // convenience alias
+}
 
+func registerStringsPackage(vm *Interpreter) {
 	// --- strings --- (subset)
 	stringsPkg := &Package{Name: "strings", Funcs: map[string]*Function{}}
 	stringsPkg.Funcs["Contains"] = &Function{Name: "Contains", Params: []string{"s", "sub"}, Native: func(args []any) (any, error) {
@@ -289,7 +379,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	stringsPkg.Funcs["Index"] = &Function{Name: "Index", Params: []string{"s", "sub"}, Native: func(args []any) (any, error) { return strlib.Index(ToString(args[0]), ToString(args[1])), nil }}
 	stringsPkg.Funcs["Repeat"] = &Function{Name: "Repeat", Params: []string{"s", "count"}, Native: func(args []any) (any, error) { return strlib.Repeat(ToString(args[0]), ToInt(args[1])), nil }}
 	vm.RegisterPackage("strings", stringsPkg)
+}
 
+func registerSortPackage(vm *Interpreter) {
 	// --- sort --- (Ints, Strings, Float64s in-place)
 	sortPkg := &Package{Name: "sort", Funcs: map[string]*Function{}}
 	sortPkg.Funcs["Ints"] = &Function{Name: "Ints", Params: []string{"slice"}, Native: func(args []any) (any, error) {
@@ -317,7 +409,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return nil, nil
 	}}
 	vm.RegisterPackage("sort", sortPkg)
+}
 
+func registerStrconvPackage(vm *Interpreter) {
 	// --- strconv ---
 	strconvPkg := &Package{Name: "strconv", Funcs: map[string]*Function{}}
 	strconvPkg.Funcs["Itoa"] = &Function{Name: "Itoa", Params: []string{"i"}, Native: func(args []any) (any, error) {
@@ -368,7 +462,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return strconv.FormatInt(int64(ToInt(args[0])), ToInt(args[1])), nil
 	}}
 	vm.RegisterPackage("strconv", strconvPkg)
+}
 
+func registerPathPackage(vm *Interpreter) {
 	// --- path ---
 	// path is purely lexical and therefore has the same behavior in native and
 	// browser hosts. It is useful for URLs and virtual-filesystem paths without
@@ -397,7 +493,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return path.Join(parts...), nil
 	}}
 	vm.RegisterPackage("path", pathPkg)
+}
 
+func registerUTF8Package(vm *Interpreter) {
 	// --- unicode/utf8 ---
 	// The string-oriented subset complements strings without exposing host
 	// state. Rune values are represented by nanoGo's integer values.
@@ -419,7 +517,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return utf8.ValidString(ToString(args[0])), nil
 	}}
 	vm.RegisterPackage("unicode/utf8", utf8Pkg)
+}
 
+func registerSyncPackage(vm *Interpreter) {
 	// --- sync.WaitGroup ---
 	// We expose a struct type WaitGroup with methods Add/Done/Wait, backed by Go's sync.WaitGroup.
 	wgType := &TypeDef{Name: "WaitGroup", Kind: "struct", Fields: []FieldDef{}, Methods: map[string]*Function{}}
@@ -439,7 +539,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	}}
 	syncPkg := &Package{Name: "sync", Types: map[string]*TypeDef{"WaitGroup": wgType}}
 	vm.RegisterPackage("sync", syncPkg)
+}
 
+func registerRegexpPackage(vm *Interpreter) {
 	// --- regexp --- (Compile -> *Regexp with methods)
 	regexType := &TypeDef{Name: "Regexp", Kind: "struct", Fields: []FieldDef{}, Methods: map[string]*Function{}}
 	vm.types[regexType.Name] = regexType
@@ -467,7 +569,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return &StructVal{TypeName: "Regexp", Fields: map[string]any{"__native": r}}, nil
 	}}
 	vm.RegisterPackage("regexp", regPkg)
+}
 
+func registerBrowserPackage(vm *Interpreter) {
 	// --- browser ---
 	browserPkg := &Package{Name: "browser", Funcs: map[string]*Function{}}
 	// Console helpers
@@ -705,19 +809,72 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 	}}
 
 	vm.RegisterPackage("browser", browserPkg)
+}
 
+// maxCachedTemplates bounds templateCache. Guest code that builds template
+// text dynamically would otherwise grow the cache without limit, so once it
+// is full the whole map is dropped and refilled rather than evicted entry by
+// entry: templates are cheap to re-parse, and a plain reset keeps the hot
+// path free of any bookkeeping (no LRU list, no access counters) while still
+// adapting when a program moves on to a different set of templates.
+const maxCachedTemplates = 64
+
+// templateCache memoizes parsed templates by their source text. Templates are
+// the one curated package where the same argument is overwhelmingly likely to
+// arrive again and again — rendering a table, a report, or a page means
+// running one template per row — and text/template's parse step costs far
+// more than its execute step. A parsed *template.Template is immutable once
+// built and safe to execute from several goroutines at once, so entries can be
+// shared by every guest goroutine of the interpreter that owns the cache.
+type templateCache struct {
+	mu      sync.RWMutex
+	entries map[string]*template.Template
+}
+
+// parse returns the compiled form of text, building and caching it on first
+// use. A template that fails to parse is not cached: the error is cheap to
+// reproduce, and caching failures would keep bad input alive for the life of
+// the interpreter.
+func (c *templateCache) parse(text string) (*template.Template, error) {
+	c.mu.RLock()
+	cached, ok := c.entries[text]
+	c.mu.RUnlock()
+	if ok {
+		return cached, nil
+	}
+	compiled, err := template.New("tpl").Parse(text)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	if c.entries == nil {
+		c.entries = make(map[string]*template.Template, 8)
+	}
+	if len(c.entries) >= maxCachedTemplates {
+		c.entries = make(map[string]*template.Template, 8)
+	}
+	c.entries[text] = compiled
+	c.mu.Unlock()
+	return compiled, nil
+}
+
+func registerTemplatePackage(vm *Interpreter) {
 	// --- text/template (simple RenderString helper) ---
+	// The cache lives in this closure, so it is per-interpreter: a host that
+	// builds one interpreter per request (cmd/mcp does) gets no cross-request
+	// sharing, which is the conservative choice, while a single program's own
+	// render loop — the case that actually matters — hits it every time.
+	cache := &templateCache{}
 	tplPkg := &Package{Name: "text/template", Funcs: map[string]*Function{}}
 	tplPkg.Funcs["RenderString"] = &Function{Name: "RenderString", Native: func(args []any) (any, error) {
 		if len(args) == 0 {
 			return "", nil
 		}
-		tmpl := ToString(args[0])
 		var data any = nil
 		if len(args) > 1 {
 			data = args[1]
 		}
-		t, err := template.New("tpl").Parse(tmpl)
+		t, err := cache.parse(ToString(args[0]))
 		if err != nil {
 			return "", err
 		}
@@ -729,7 +886,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return buf.String(), nil
 	}}
 	vm.RegisterPackage("text/template", tplPkg)
+}
 
+func registerHTTPPackage(vm *Interpreter) {
 	// --- http (very simple: GetText, PostText) ---
 	httpPkg := &Package{Name: "http", Funcs: map[string]*Function{}}
 	httpPkg.Funcs["GetText"] = &Function{Name: "GetText", Params: []string{"url"}, Native: func(args []any) (any, error) {
@@ -765,7 +924,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return "", NewRuntimeError("HTTP host native not available")
 	}}
 	vm.RegisterPackage("http", httpPkg)
+}
 
+func registerFSPackage(vm *Interpreter) {
 	// --- fs (read-only, host-proxied) ---
 	fsPkg := &Package{Name: "fs", Funcs: map[string]*Function{}}
 	fsPkg.Funcs["ReadFile"] = &Function{Name: "ReadFile", Params: []string{"path"}, Native: func(args []any) (any, error) {
@@ -783,7 +944,9 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return "", NewRuntimeError("host readfile not available")
 	}}
 	vm.RegisterPackage("fs", fsPkg)
+}
 
+func registerStoragePackage(vm *Interpreter) {
 	// --- storage (localStorage: SetItem/GetItem) ---
 	storPkg := &Package{Name: "storage", Funcs: map[string]*Function{}}
 	storPkg.Funcs["SetItem"] = &Function{Name: "SetItem", Params: []string{"key", "value"}, Native: func(args []any) (any, error) {
@@ -800,12 +963,6 @@ func RegisterBuiltinPackages(vm *Interpreter) {
 		return "", nil
 	}}
 	vm.RegisterPackage("storage", storPkg)
-
-	// --- os (backed by VFS) ---
-	registerOsPackage(vm)
-
-	// --- testing (minimal *testing.T subset) ---
-	registerTestingPackage(vm)
 }
 
 // nativeWaitGroup is intentionally context-aware. sync.WaitGroup.Wait cannot
@@ -997,6 +1154,25 @@ func ensureNativeRegexp(v any) *regexp.Regexp {
 	return regexp.MustCompile("$") // matches empty string; fallback
 }
 
+// packageForSelector resolves the left-hand identifier of a pkg.Member
+// expression to a package. It looks in the caller's own scope first, so an
+// import alias and a hot-swapped PackageScope both keep working, and only
+// then materializes a curated builtin that this interpreter has not needed
+// yet — which is what lets `fmt.Println` work with no import statement, the
+// way it did when every builtin was registered up front (see
+// examples/quickstart).
+func (vm *Interpreter) packageForSelector(name string, env *Env) (*Package, bool) {
+	if v, ok := vm.get(name, env); ok {
+		pkg, isPackage := v.(*Package)
+		// A non-package binding shadows the builtin, as it always has: the
+		// name resolved, it just is not a package, so the caller falls
+		// through to its method/field handling rather than reaching past a
+		// local variable to a curated package of the same name.
+		return pkg, isPackage
+	}
+	return vm.ensureBuiltinPackage(name)
+}
+
 // resolvePackageSelector returns a function/type from a package if sel refers to a package member.
 func (vm *Interpreter) resolvePackageSelector(pkg *Package, sel string) (any, bool) {
 	if pkg == nil {
@@ -1023,116 +1199,31 @@ func (vm *Interpreter) resolvePackageSelector(pkg *Package, sel string) (any, bo
 }
 
 // installImportedPackage imports a package by name and binds it to an alias in globals.
+// installImportedPackage binds a curated package to alias in globals,
+// building it first if this interpreter has not needed it yet.
+//
+// An import statement implies the builtins are in play on this interpreter
+// even when the host never called RegisterBuiltinPackages, which is the
+// long-standing behavior for plain Run/RunContext callers — so it enables
+// them rather than refusing. An unrecognized path stays a silent no-op, also
+// as before (see BuiltinImportPaths' note in interp/imports.go).
 func (vm *Interpreter) installImportedPackage(alias, path string) {
-	switch path {
-	case "fmt":
-		if _, ok := vm.packages["fmt"]; !ok {
-			RegisterBuiltinPackages(vm)
-		} // idempotent
-		vm.globals.Vars[alias] = vm.packages["fmt"]
-	case "debug":
-		if _, ok := vm.packages["debug"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.declare(alias, vm.packages["debug"], vm.globals)
-	case "time":
-		if _, ok := vm.packages["time"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["time"]
-	case "math":
-		if _, ok := vm.packages["math"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["math"]
-	case "math/rand":
-		if _, ok := vm.packages["math/rand"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["math/rand"]
-	case "encoding/json":
-		if _, ok := vm.packages["encoding/json"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["encoding/json"]
-	case "json":
-		if _, ok := vm.packages["encoding/json"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["encoding/json"]
-	case "strings":
-		if _, ok := vm.packages["strings"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["strings"]
-	case "sort":
-		if _, ok := vm.packages["sort"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["sort"]
-	case "strconv":
-		if _, ok := vm.packages["strconv"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["strconv"]
-	case "path":
-		if _, ok := vm.packages["path"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["path"]
-	case "unicode/utf8":
-		if _, ok := vm.packages["unicode/utf8"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["unicode/utf8"]
-	case "sync":
-		if _, ok := vm.packages["sync"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["sync"]
-	case "regexp":
-		if _, ok := vm.packages["regexp"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["regexp"]
-	case "browser":
-		if _, ok := vm.packages["browser"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["browser"]
-	case "text/template":
-		if _, ok := vm.packages["text/template"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["text/template"]
-	case "http":
-		if _, ok := vm.packages["http"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["http"]
-	case "storage":
-		if _, ok := vm.packages["storage"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["storage"]
-	case "fs":
-		if _, ok := vm.packages["fs"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["fs"]
-	case "os":
-		if _, ok := vm.packages["os"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["os"]
-	case "testing":
-		if _, ok := vm.packages["testing"]; !ok {
-			RegisterBuiltinPackages(vm)
-		}
-		vm.globals.Vars[alias] = vm.packages["testing"]
-	default:
-		_ = fmt.Sprintf("unknown import: %s", path)
+	if !BuiltinImportPaths[path] {
+		return
 	}
+	vm.builtinsEnabled = true
+	pkg, ok := vm.ensureBuiltinPackage(path)
+	if !ok {
+		return
+	}
+	if path == "debug" {
+		// debug goes through declare so it participates in normal scope
+		// bookkeeping; every other alias is written straight into globals'
+		// pre-allocated map.
+		vm.declare(alias, pkg, vm.globals)
+		return
+	}
+	vm.globals.Vars[alias] = pkg
 }
 
 // registerOsPackage installs a curated "os" package backed by the interpreter's VFS.

@@ -43,6 +43,9 @@ func IsBuiltinImport(path string) bool { return BuiltinImportPaths[path] }
 // import path, e.g. "fmt" or "math/rand"), for hosts building multi-package
 // programs that need to bind a curated package under a local import alias.
 func (vm *Interpreter) Package(path string) (*Package, bool) {
-	p, ok := vm.packages[path]
-	return p, ok
+	// Curated packages are built on first use, so ask for path to be
+	// materialized rather than reading the registry directly — otherwise a
+	// module-aware host (interp/loader's bindImports) would see a builtin as
+	// unregistered purely because nothing had imported it yet.
+	return vm.ensureBuiltinPackage(path)
 }

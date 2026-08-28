@@ -117,13 +117,27 @@ type MapVal struct {
 	Keys                 map[string]any // hashed key -> original key
 }
 
+// hash renders k as this map's internal Data/Keys key. hashKey's type prefix
+// exists only to keep keys of different dynamic types from colliding, which
+// cannot happen once the map's own declared key type is plain string — so a
+// string-keyed map uses the key itself and skips the concatenation, and the
+// allocation behind it, that every read and write used to pay. Whichever form
+// applies is a property of the map, not of the call site, so a given MapVal's
+// entries are always keyed consistently.
+func (m *MapVal) hash(k any) string {
+	if s, ok := k.(string); ok && m.KeyType == "string" {
+		return s
+	}
+	return hashKey(k)
+}
+
 func (m *MapVal) getByKey(k any) (any, bool) {
-	h := hashKey(k)
+	h := m.hash(k)
 	v, ok := m.Data[h]
 	return v, ok
 }
-func (m *MapVal) setByKey(k, v any) { h := hashKey(k); m.Data[h] = v; m.Keys[h] = k }
-func (m *MapVal) deleteByKey(k any) { h := hashKey(k); delete(m.Data, h); delete(m.Keys, h) }
+func (m *MapVal) setByKey(k, v any) { h := m.hash(k); m.Data[h] = v; m.Keys[h] = k }
+func (m *MapVal) deleteByKey(k any) { h := m.hash(k); delete(m.Data, h); delete(m.Keys, h) }
 
 // ToNativeValue converts nanoGo's internal container values into ordinary Go
 // values. Native packages use it before handing data to libraries that do not

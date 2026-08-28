@@ -38,7 +38,7 @@ func (v VetIssue) String() string {
 // self-assignments.
 func VetSource(src string) ([]VetIssue, error) {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "input.go", src, parser.AllErrors)
+	file, err := parser.ParseFile(fset, "input.go", src, parser.AllErrors|parser.SkipObjectResolution)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +148,7 @@ type InspectResult struct {
 func InspectSource(src string) (*InspectResult, error) {
 	fset := token.NewFileSet()
 	start := time.Now()
-	file, err := parser.ParseFile(fset, "input.go", src, parser.ParseComments)
+	file, err := parser.ParseFile(fset, "input.go", src, parser.ParseComments|parser.SkipObjectResolution)
 	parseUs := time.Since(start).Microseconds()
 	if err != nil {
 		return nil, err
@@ -296,7 +296,7 @@ func recvTypeName(fd *ast.FuncDecl) string {
 // without a Resolved target and therefore without a CalledBy edge).
 func AnalyzeCallGraph(src string) (*CallGraphResult, error) {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "input.go", src, 0)
+	file, err := parser.ParseFile(fset, "input.go", src, parser.SkipObjectResolution)
 	if err != nil {
 		return nil, err
 	}

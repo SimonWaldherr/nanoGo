@@ -473,3 +473,93 @@ func main() {
 		t.Errorf("expected middle's defer to still run during unwinding, got %q", buf.String())
 	}
 }
+
+// Go gives an if statement's init, condition, body and else clause an
+// implicit scope of their own. evalSwitchStmt and evalForStmt always did that
+// for their init; the if case did not, which both rejected the idiomatic
+// `if v, err := f(); err != nil` shadowing form and let an init variable
+// outlive its statement. These pin the corrected behavior.
+
+func TestIfInitShadowsAnExistingName(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	v := 1
+	if v := 2; v > 1 {
+		fmt.Println("inner", v)
+	}
+	fmt.Println("outer", v)
+}
+`)
+	for _, want := range []string{"inner 2", "outer 1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in output %q", want, out)
+		}
+	}
+}
+
+// TestIfInitAcceptsBlankPlusExistingName is the exact shape idiomatic error
+// handling takes — `if _, err := f(); err != nil` where err already exists.
+// Without an if-scope this failed with "no new variables on left side of :=",
+// because the blank identifier declares nothing and err was already bound.
+//
+// The second value of `a, b := call()` is the call's error, not a second
+// guest return value (see evalStmtNode's AssignStmt case), so this uses a
+// single-result function, which is what that form actually pairs with.
+func TestIfInitAcceptsBlankPlusExistingName(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func value() int { return 7 }
+func main() {
+	n, err := value()
+	_ = n
+	_ = err
+	if _, err := value(); err == nil {
+		fmt.Println("second call ok")
+	}
+	fmt.Println("done")
+}
+`)
+	if !strings.Contains(out, "second call ok") || !strings.Contains(out, "done") {
+		t.Errorf("unexpected output %q", out)
+	}
+}
+
+func TestIfInitVariableDoesNotEscapeTheStatement(t *testing.T) {
+	vm, _ := newTestVM()
+	err := vm.Run(`
+package main
+func main() {
+	if x := 1; x > 0 {
+	}
+	_ = x
+}
+`)
+	if err == nil {
+		t.Fatal("if-init variable leaked into the enclosing scope")
+	}
+	if !strings.Contains(err.Error(), "undefined: x") {
+		t.Errorf("error = %v, want an undefined-x failure", err)
+	}
+}
+
+func TestIfInitIsVisibleInElseBranch(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	if n := 3; n > 10 {
+		fmt.Println("big", n)
+	} else if n > 2 {
+		fmt.Println("medium", n)
+	} else {
+		fmt.Println("small", n)
+	}
+}
+`)
+	if !strings.Contains(out, "medium 3") {
+		t.Errorf("else-if branch did not see the init variable: %q", out)
+	}
+}

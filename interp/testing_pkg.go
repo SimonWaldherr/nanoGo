@@ -90,7 +90,24 @@ func TestMessages(t any) []string {
 // NewTestT constructs a fresh *testing.T value for a host-side test runner
 // (see interp/loader) to pass into a TestXxx(t *testing.T) function.
 func (vm *Interpreter) NewTestT() any {
+	// The value handed back is only useful because "T"'s method set lives in
+	// vm.types, which registerTestingPackage installs. Curated packages are
+	// built on first use, and a host can reach this method without the guest
+	// ever executing an `import "testing"` (interp/loader's test runner and
+	// PackageScope callers both do), so materialize it here rather than
+	// returning a value whose methods would not resolve.
+	vm.ensureTestingPackage()
 	return &StructVal{TypeName: "T", Fields: map[string]any{"__native": newTestState()}}
+}
+
+// ensureTestingPackage builds the curated testing package if it has not been
+// built yet. Unlike ensureBuiltinPackage it does not consult builtinsEnabled:
+// asking for a *testing.T is itself the opt-in.
+func (vm *Interpreter) ensureTestingPackage() {
+	if _, ok := vm.packages["testing"]; ok {
+		return
+	}
+	registerTestingPackage(vm)
 }
 
 func (vm *Interpreter) recordTestFailure(recv any, format string, args []any, fatal bool) (any, error) {

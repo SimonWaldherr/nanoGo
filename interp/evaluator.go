@@ -42,7 +42,13 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 	}()
 
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "input.go", src, 0)
+	// SkipObjectResolution: nanoGo resolves every name itself, at evaluation
+	// time, through the Env chain — it never reads ast.Object, ast.Scope,
+	// File.Scope or File.Unresolved. Letting go/parser build that graph was
+	// pure overhead on a path every single Run/RunContext call takes, and it
+	// showed up as one of the largest remaining allocation sources for short
+	// programs, where parsing dominates.
+	file, err := parser.ParseFile(fset, "input.go", src, parser.SkipObjectResolution)
 	exec.fset = fset
 	if err != nil {
 		return err
@@ -283,6 +289,15 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		case "nil":
 			return nil, nil
 		}
+		// Resolve a real binding before considering the predeclared type
+		// names. Almost every identifier the evaluator meets is an ordinary
+		// variable, and this order lets those skip isBuiltinType's string
+		// switch entirely. It is also the more faithful reading of Go, where
+		// int/string/... are predeclared identifiers a program is free to
+		// shadow rather than reserved words.
+		if v, ok := vm.get(ex.Name, env); ok {
+			return v, nil
+		}
 		if isBuiltinType(ex.Name) {
 			return &Function{Name: ex.Name, Native: func(args []any) (any, error) {
 				if len(args) == 0 {
@@ -290,9 +305,6 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 				}
 				return builtinConvert(ex.Name, args[0]), nil
 			}}, nil
-		}
-		if v, ok := vm.get(ex.Name, env); ok {
-			return v, nil
 		}
 		if f, ok := vm.funcs[ex.Name]; ok {
 			return f, nil
@@ -310,6 +322,20 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 				}}, nil
 			}
 			return ex.Name, nil
+		}
+		// A curated package is reachable as a bare identifier even without an
+		// import statement: RegisterPackage declares each one into globals,
+		// and registering them all up front used to make every name resolve
+		// from the start (examples/quickstart calls fmt.Println with no
+		// import and relies on exactly this). Building them on first use
+		// instead would have quietly broken that, so resolve the name by
+		// materializing the package.
+		//
+		// This sits last, after funcs/natives/types, so it costs nothing on
+		// any path that already resolves — only a name about to be reported
+		// as undefined reaches here.
+		if pkg, ok := vm.ensureBuiltinPackage(ex.Name); ok {
+			return pkg, nil
 		}
 		return nil, NewRuntimeError("undefined: " + ex.Name)
 
@@ -555,62 +581,60 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 				// packages. For every program reachable via Run/RunContext,
 				// vm.globals is always an ancestor of env, so this is
 				// behavior-preserving there.
-				if p, ok := vm.get(pid.Name, env); ok {
-					if p, ok := p.(*Package); ok {
-						if p.Name == "debug" {
-							switch sel.Sel.Name {
-							case "Q":
-								return vm.traceDebugQ(ex, env)
-							case "Mark":
-								return vm.traceDebugMark(ex, env)
-							case "Stack":
-								return vm.traceDebugStack(ex, env)
-							case "Vars":
-								return vm.traceDebugVars(ex, env)
-							}
+				if p, ok := vm.packageForSelector(pid.Name, env); ok {
+					if p.Name == "debug" {
+						switch sel.Sel.Name {
+						case "Q":
+							return vm.traceDebugQ(ex, env)
+						case "Mark":
+							return vm.traceDebugMark(ex, env)
+						case "Stack":
+							return vm.traceDebugStack(ex, env)
+						case "Vars":
+							return vm.traceDebugVars(ex, env)
 						}
-						member, ok2 := vm.resolvePackageSelector(p, sel.Sel.Name)
-						if !ok2 {
-							return nil, NewRuntimeError("unknown package member: " + pid.Name + "." + sel.Sel.Name)
-						}
-						fn, ok3 := member.(*Function)
-						if !ok3 {
-							return nil, NewRuntimeError("package member is not function")
-						}
-						// Evaluate args (including ... expansion)
-						args := make([]any, 0, len(ex.Args))
-						if ex.Ellipsis != token.NoPos && len(ex.Args) > 0 {
-							for i, a := range ex.Args {
-								if i == len(ex.Args)-1 {
-									v, err := vm.evalExpr(a, env)
-									if err != nil {
-										return nil, err
-									}
-									if sv, ok := v.(*SliceVal); ok {
-										args = append(args, sv.Data...)
-									} else {
-										args = append(args, v)
-									}
-								} else {
-									v, err := vm.evalExpr(a, env)
-									if err != nil {
-										return nil, err
-									}
-									args = append(args, v)
-								}
-							}
-						} else {
-							args = make([]any, len(ex.Args))
-							for i, a := range ex.Args {
+					}
+					member, ok2 := vm.resolvePackageSelector(p, sel.Sel.Name)
+					if !ok2 {
+						return nil, NewRuntimeError("unknown package member: " + pid.Name + "." + sel.Sel.Name)
+					}
+					fn, ok3 := member.(*Function)
+					if !ok3 {
+						return nil, NewRuntimeError("package member is not function")
+					}
+					// Evaluate args (including ... expansion)
+					args := make([]any, 0, len(ex.Args))
+					if ex.Ellipsis != token.NoPos && len(ex.Args) > 0 {
+						for i, a := range ex.Args {
+							if i == len(ex.Args)-1 {
 								v, err := vm.evalExpr(a, env)
 								if err != nil {
 									return nil, err
 								}
-								args[i] = v
+								if sv, ok := v.(*SliceVal); ok {
+									args = append(args, sv.Data...)
+								} else {
+									args = append(args, v)
+								}
+							} else {
+								v, err := vm.evalExpr(a, env)
+								if err != nil {
+									return nil, err
+								}
+								args = append(args, v)
 							}
 						}
-						return vm.callFunction(fn, env, nil, args)
+					} else {
+						args = make([]any, len(ex.Args))
+						for i, a := range ex.Args {
+							v, err := vm.evalExpr(a, env)
+							if err != nil {
+								return nil, err
+							}
+							args[i] = v
+						}
 					}
+					return vm.callFunction(fn, env, nil, args)
 				}
 			}
 		}
@@ -790,14 +814,12 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		if id, ok := ex.X.(*ast.Ident); ok {
 			// See the matching comment in the CallExpr case above: resolve
 			// against the caller's own env, not unconditionally vm.globals.
-			if p, ok := vm.get(id.Name, env); ok {
-				if p, ok := p.(*Package); ok {
-					m, ok2 := vm.resolvePackageSelector(p, ex.Sel.Name)
-					if !ok2 {
-						return nil, NewRuntimeError("unknown package member: " + id.Name + "." + ex.Sel.Name)
-					}
-					return m, nil
+			if p, ok := vm.packageForSelector(id.Name, env); ok {
+				m, ok2 := vm.resolvePackageSelector(p, ex.Sel.Name)
+				if !ok2 {
+					return nil, NewRuntimeError("unknown package member: " + id.Name + "." + ex.Sel.Name)
 				}
+				return m, nil
 			}
 		}
 		// Struct field access is handled when receiver is *StructVal during method calls or via fieldRef in assignments.
@@ -986,6 +1008,75 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 	case *ast.ParenExpr:
 		return vm.tryEvalIntExpr(ex.X, env, true)
 
+	case *ast.IndexExpr:
+		// `a[i]` where a is a plain variable holding a slice/array of ints and
+		// i is itself a statically-integer expression. Both parts are then
+		// free of side effects, which is what makes them safe to evaluate on
+		// this speculative path: when the element turns out not to be an int,
+		// the general evaluator simply evaluates the same expression again and
+		// nothing has happened twice. Without this, every `a[j] > a[j+1]` or
+		// `sum += a[i]` boxed its operands on the heap.
+		id, ok := ex.X.(*ast.Ident)
+		if !ok {
+			return 0, false, nil
+		}
+		// Establish that this really is an indexable slice before evaluating
+		// the index. Doing it the other way round would charge a checkpoint
+		// for the index of every expression that then turns out not to
+		// qualify — a map read like m["k"], say — inflating the step count
+		// of programs this fast path never applies to.
+		container, ok := vm.get(id.Name, env)
+		if !ok {
+			return 0, false, nil
+		}
+		sv, ok := container.(*SliceVal)
+		if !ok {
+			return 0, false, nil
+		}
+		idx, idxOK, err := vm.tryEvalIntExpr(ex.Index, env, true)
+		if err != nil || !idxOK {
+			return 0, false, err
+		}
+		if idx < 0 || idx >= len(sv.Data) {
+			// Out of range: hand it back to the general path, which raises the
+			// proper guest panic rather than duplicating that logic here.
+			return 0, false, nil
+		}
+		n, ok := sv.Data[idx].(int)
+		return n, ok, nil
+
+	case *ast.CallExpr:
+		// len(x)/cap(x) on a plain variable. `for i := 0; i < len(s); i++` is
+		// the single most common loop header in guest code, and without this
+		// the comparison fell back to the boxing evaluator on every iteration.
+		// Dispatching on the identifier alone matches how evalExprNode itself
+		// resolves these builtins, so a program that shadows len sees the same
+		// (pre-existing) behavior on both paths.
+		fn, ok := ex.Fun.(*ast.Ident)
+		if !ok || len(ex.Args) != 1 {
+			return 0, false, nil
+		}
+		if fn.Name != "len" && fn.Name != "cap" {
+			return 0, false, nil
+		}
+		arg, ok := ex.Args[0].(*ast.Ident)
+		if !ok {
+			return 0, false, nil
+		}
+		v, ok := vm.get(arg.Name, env)
+		if !ok {
+			return 0, false, nil
+		}
+		switch v.(type) {
+		case string, *SliceVal, *MapVal:
+		default:
+			return 0, false, nil
+		}
+		if fn.Name == "cap" {
+			return builtinCap(v), true, nil
+		}
+		return builtinLen(v), true, nil
+
 	case *ast.UnaryExpr:
 		if ex.Op != token.ADD && ex.Op != token.SUB && ex.Op != token.XOR {
 			return 0, false, nil
@@ -1057,14 +1148,24 @@ func parseFastDecimalInt(s string) (int, bool) {
 	if len(s) == 0 || (len(s) > 1 && s[0] == '0') {
 		return 0, false
 	}
-	maxInt := int(^uint(0) >> 1)
+	// cutoff/cutoffLast split the overflow test into constants the compiler
+	// folds at build time. Deriving the bound from the digit instead — the
+	// obvious `n > (maxInt-digit)/10` — costs a real integer division on every
+	// digit of every literal the evaluator visits, which profiling showed to
+	// be the whole of this function's cost on arithmetic-heavy guest code.
+	const maxInt = int(^uint(0) >> 1)
+	const cutoff = maxInt / 10
+	const cutoffLast = maxInt % 10
 	n := 0
 	for i := 0; i < len(s); i++ {
-		digit := s[i] - '0'
-		if digit > 9 || n > (maxInt-int(digit))/10 {
+		digit := int(s[i] - '0')
+		if digit > 9 {
 			return 0, false
 		}
-		n = n*10 + int(digit)
+		if n > cutoff || (n == cutoff && digit > cutoffLast) {
+			return 0, false
+		}
+		n = n*10 + digit
 	}
 	return n, true
 }
@@ -1263,6 +1364,23 @@ func findLabel(stmts []ast.Stmt, label string) (int, bool) {
 // resolving the actual line number (traceLocation) is skipped entirely in
 // that (default) case.
 func (vm *Interpreter) evalStmt(s ast.Stmt, env *Env) (controlFlow, error) {
+	if vm.stmtHooks.Load() {
+		if err := vm.runStmtHooks(s, env); err != nil {
+			return controlFlow{}, err
+		}
+	}
+	cf, err := vm.evalStmtNode(s, env)
+	if err != nil {
+		attachRuntimeErrorLocation(err, vm.traceLocation(s.Pos()))
+	}
+	return cf, err
+}
+
+// runStmtHooks services the per-statement diagnostic hooks. It is kept out of
+// evalStmt's body so the overwhelmingly common no-hooks case is a single
+// atomic load and a not-taken branch, with none of this code's register
+// pressure or stack frame.
+func (vm *Interpreter) runStmtHooks(s ast.Stmt, env *Env) error {
 	if set := vm.breakpoints.Load(); set != nil {
 		if line := vm.traceLocation(s.Pos()).Line; line > 0 {
 			if _, ok := set.lines[line]; ok {
@@ -1278,15 +1396,18 @@ func (vm *Interpreter) evalStmt(s ast.Stmt, env *Env) (controlFlow, error) {
 		p.hit(vm.traceLocation(s.Pos()).Line)
 	}
 	if dc := vm.debugController.Load(); dc != nil {
-		if err := dc.checkpoint(vm, s, env); err != nil {
-			return controlFlow{}, err
-		}
+		return dc.checkpoint(vm, s, env)
 	}
-	cf, err := vm.evalStmtNode(s, env)
-	if err != nil {
-		attachRuntimeErrorLocation(err, vm.traceLocation(s.Pos()))
-	}
-	return cf, err
+	return nil
+}
+
+// refreshStmtHooks recomputes the stmtHooks summary flag. Every installer of
+// a per-statement hook calls it after its own Store, so the flag can never
+// disagree with the pointers it summarizes.
+func (vm *Interpreter) refreshStmtHooks() {
+	vm.stmtHooks.Store(vm.breakpoints.Load() != nil ||
+		vm.lineProfile.Load() != nil ||
+		vm.debugController.Load() != nil)
 }
 
 func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
@@ -1679,19 +1800,31 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		}
 
 	case *ast.IfStmt:
+		// Go scopes an if statement's init, condition, body and else clause
+		// in an implicit block of their own, which is what makes the
+		// idiomatic `if v, err := f(); err != nil` legal in a function that
+		// already has an err — the short declaration shadows rather than
+		// redeclares — and what keeps the init variable from outliving the
+		// statement. evalSwitchStmt and evalForStmt already do this for
+		// their own init; only the if case did not, so `if _, err := ...`
+		// was rejected as "no new variables on left side of :=". The scope
+		// is created only when there is an Init to put in it, so a plain
+		// `if cond {}` still allocates nothing.
+		local := env
 		if st.Init != nil {
-			if _, err := vm.evalStmt(st.Init, env); err != nil {
+			local = NewEnv(env)
+			if _, err := vm.evalStmt(st.Init, local); err != nil {
 				return controlFlow{}, err
 			}
 		}
-		cond, err := vm.evalExpr(st.Cond, env)
+		cond, err := vm.evalExpr(st.Cond, local)
 		if err != nil {
 			return controlFlow{}, err
 		}
 		if ToBool(cond) {
-			return vm.evalStmt(st.Body, env)
+			return vm.evalStmt(st.Body, local)
 		} else if st.Else != nil {
-			return vm.evalStmt(st.Else, env)
+			return vm.evalStmt(st.Else, local)
 		}
 		return controlFlow{}, nil
 
@@ -2754,6 +2887,7 @@ func (vm *Interpreter) callFrameFreeFunction(fn *Function, recv *any, args []any
 func (vm *Interpreter) releaseFastEnv(env *Env) {
 	env.Vars = nil
 	env.inlineIntVar = intVar{}
+	clearInlineVars(env)
 	env.Parent = nil
 	env.frame = nil
 	vm.fastEnvPool.Put(env)
@@ -2843,26 +2977,24 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 		if pid, ok := sel.X.(*ast.Ident); ok {
 			// Resolve against the caller's own env, matching evalExpr's
 			// CallExpr/SelectorExpr handling above.
-			if v, ok := vm.get(pid.Name, env); ok {
-				if p, ok := v.(*Package); ok {
-					m, ok2 := vm.resolvePackageSelector(p, sel.Sel.Name)
-					if !ok2 {
-						return nil, nil, nil, NewRuntimeError("unknown package member")
-					}
-					fn, ok3 := m.(*Function)
-					if !ok3 {
-						return nil, nil, nil, NewRuntimeError("member not function")
-					}
-					args := make([]any, len(call.Args))
-					for i, a := range call.Args {
-						v, err := vm.evalExpr(a, env)
-						if err != nil {
-							return nil, nil, nil, err
-						}
-						args[i] = v
-					}
-					return fn, nil, args, nil
+			if p, ok := vm.packageForSelector(pid.Name, env); ok {
+				m, ok2 := vm.resolvePackageSelector(p, sel.Sel.Name)
+				if !ok2 {
+					return nil, nil, nil, NewRuntimeError("unknown package member")
 				}
+				fn, ok3 := m.(*Function)
+				if !ok3 {
+					return nil, nil, nil, NewRuntimeError("member not function")
+				}
+				args := make([]any, len(call.Args))
+				for i, a := range call.Args {
+					v, err := vm.evalExpr(a, env)
+					if err != nil {
+						return nil, nil, nil, err
+					}
+					args[i] = v
+				}
+				return fn, nil, args, nil
 			}
 		}
 

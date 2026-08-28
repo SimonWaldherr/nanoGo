@@ -152,6 +152,61 @@ func main() {
   fmt.Println("Template rendered → #output")
 }
 `,
+  "Template Report": `package main
+
+import (
+  "fmt"
+  "text/template"
+)
+
+// Types used as template data must be declared at package level, and slice
+// elements spell out their type: []Row{Row{...}} rather than []Row{{...}}.
+type Row struct {
+  Name  string
+  Qty   int
+  Price int
+}
+
+type Report struct {
+  Title string
+  Rows  []Row
+}
+
+// One template text, executed once per row. nanoGo caches the parsed form,
+// so the loop parses it only the first time round.
+const line = "{{printf \\"%-8s\\" .Name}} {{printf \\"%4d\\" .Qty}} @ {{printf \\"%3d\\" .Price}}{{if eq .Qty 0}}  << out of stock{{end}}"
+
+const summary = "{{.Title}}: {{len .Rows}} article(s){{range $i, $r := .Rows}}\\n  {{$i}}. {{$r.Name}}{{end}}"
+
+func main() {
+  rows := []Row{
+    Row{Name: "bolt", Qty: 12, Price: 30},
+    Row{Name: "nut", Qty: 0, Price: 10},
+    Row{Name: "washer", Qty: 240, Price: 2},
+  }
+
+  total := 0
+  for i := 0; i < len(rows); i++ {
+    out, err := template.RenderString(line, rows[i])
+    if err != nil {
+      fmt.Println("render error:", err)
+      return
+    }
+    fmt.Println(out)
+    total = total + rows[i].Qty*rows[i].Price
+  }
+
+  out, _ := template.RenderString(summary, Report{Title: "Warehouse", Rows: rows})
+  fmt.Println(out)
+
+  // if-init scopes its own variables, so this err shadows the one above.
+  if _, err := template.RenderString("{{.Unclosed", rows); err != nil {
+    fmt.Println("malformed template rejected as expected")
+  }
+
+  fmt.Println("stock value:", total)
+}
+`,
   "Random": `package main
 
 import (

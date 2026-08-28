@@ -65,7 +65,7 @@ func RunSourceTestsMatching(ctx context.Context, vm *interp.Interpreter, source,
 
 func splitSourceTests(source string) (normal, tests []byte, packageName string, err error) {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "editor.go", source, parser.ParseComments)
+	file, err := parser.ParseFile(fset, "editor.go", source, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
 		return nil, nil, "", err
 	}

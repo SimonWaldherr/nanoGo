@@ -79,9 +79,11 @@ func (vm *Interpreter) SetBreakpoints(lines []int) {
 	// clears its breakpoint list (the normal case for an ordinary run).
 	if len(set.lines) == 0 {
 		vm.breakpoints.Store(nil)
+		vm.refreshStmtHooks()
 		return
 	}
 	vm.breakpoints.Store(set)
+	vm.refreshStmtHooks()
 }
 
 // Breakpoints returns a sorted snapshot of configured source lines.

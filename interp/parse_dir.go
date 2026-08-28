@@ -91,7 +91,7 @@ func parseFilesInto(vfs *VFS, fset *token.FileSet, dir string, names []string) (
 		if err != nil {
 			return nil, err
 		}
-		file, err := parser.ParseFile(fset, full, data, parser.ParseComments)
+		file, err := parser.ParseFile(fset, full, data, parser.ParseComments|parser.SkipObjectResolution)
 		if err != nil {
 			return nil, err
 		}

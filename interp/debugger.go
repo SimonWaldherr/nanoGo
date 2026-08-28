@@ -172,6 +172,7 @@ func NewDebugController() *DebugController {
 // session used by subsequent statement checkpoints.
 func (vm *Interpreter) SetDebugController(dc *DebugController) {
 	vm.debugController.Store(dc)
+	vm.refreshStmtHooks()
 }
 
 // DebugController returns the currently attached session, or nil.

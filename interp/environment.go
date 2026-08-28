@@ -23,7 +23,17 @@ type Env struct {
 	// avoids a second allocation per frame. Further values use Vars, retaining
 	// Env's compact size instead of making every scope permanently larger.
 	inlineIntVar intVar
-	Parent       *Env
+	// inlineVars does for non-integer bindings what inlineIntVar does for
+	// integers. A loop body that declares a struct, a slice, or a string —
+	// `p := P{...}` inside a for — used to allocate a whole Vars map per
+	// iteration, which allocation profiling showed to be the single largest
+	// object source for struct-heavy guest code. Entries are only ever added
+	// while Vars is nil, so a name is never in both tables and lookup order
+	// never has to disambiguate between them; once a scope overflows into
+	// Vars, everything new goes there.
+	inlineVars [envInlineVars]valueVar
+	inlineLen  uint8
+	Parent     *Env
 	// shared marks a package scope that hosts may hot-swap while guest code is
 	// running. It is fixed when the scope is created, so callers can lock this
 	// one boundary without making short-lived function/block scopes pay locks.
@@ -74,6 +84,77 @@ func removeIntVar(env *Env, name string) {
 	}
 }
 
+// envInlineVars is how many non-integer bindings a scope keeps inline before
+// it allocates a Vars map. Three covers the ordinary shapes — a loop body
+// binding one or two values, a call scope holding a couple of non-integer
+// parameters — while keeping Env small enough that the fast-call env pool
+// still recycles a compact object.
+const envInlineVars = 3
+
+// valueVar is one entry in Env's inline table of non-integer bindings. As
+// with intVar, a short linear scan of direct string comparisons beats a map
+// at this size: no hashing, no bucket allocation, and the names being
+// compared are usually the identical string header the parser produced.
+type valueVar struct {
+	name string
+	val  any
+}
+
+func lookupInlineVar(env *Env, name string) (any, bool) {
+	for i := 0; i < int(env.inlineLen); i++ {
+		if env.inlineVars[i].name == name {
+			return env.inlineVars[i].val, true
+		}
+	}
+	return nil, false
+}
+
+// storeValueInEnv writes a non-integer binding into env, preferring the
+// inline table. New names only go inline while Vars is nil, which is what
+// keeps "a name lives in exactly one table" true without any cross-checking:
+// a scope that has already spilled to a map puts everything new in the map.
+func storeValueInEnv(env *Env, name string, val any) {
+	for i := 0; i < int(env.inlineLen); i++ {
+		if env.inlineVars[i].name == name {
+			env.inlineVars[i].val = val
+			return
+		}
+	}
+	if env.Vars == nil {
+		if int(env.inlineLen) < len(env.inlineVars) {
+			env.inlineVars[env.inlineLen] = valueVar{name, val}
+			env.inlineLen++
+			return
+		}
+		env.Vars = make(map[string]any, 4)
+	}
+	env.Vars[name] = val
+}
+
+// removeInlineVar drops name from the inline table, closing the gap by moving
+// the last entry into its place. Nothing depends on the table's order: it is
+// scanned by name, and collectLocalVars folds it into a map.
+func removeInlineVar(env *Env, name string) {
+	for i := 0; i < int(env.inlineLen); i++ {
+		if env.inlineVars[i].name == name {
+			last := int(env.inlineLen) - 1
+			env.inlineVars[i] = env.inlineVars[last]
+			env.inlineVars[last] = valueVar{}
+			env.inlineLen--
+			return
+		}
+	}
+}
+
+// clearInlineVars drops every inline binding, releasing the values it holds
+// so a pooled Env cannot keep them alive.
+func clearInlineVars(env *Env) {
+	for i := 0; i < int(env.inlineLen); i++ {
+		env.inlineVars[i] = valueVar{}
+	}
+	env.inlineLen = 0
+}
+
 func NewEnv(parent *Env) *Env {
 	env := &Env{Parent: parent}
 	if parent != nil {
@@ -109,6 +190,14 @@ type Interpreter struct {
 	funcs    map[string]*Function
 	natives  map[string]func(args []any) (any, error)
 	packages map[string]*Package
+
+	// builtinsEnabled records that a host called RegisterBuiltinPackages.
+	// The curated packages are constructed on first use rather than there
+	// (see ensureBuiltinPackage), so this flag is what separates "this host
+	// opted into the builtins, that package just hasn't been built yet" from
+	// "this host never enabled them" — the latter must stay an unresolved
+	// import, exactly as before.
+	builtinsEnabled bool
 
 	// internalNatives holds natives registered via RegisterInternalNative/
 	// RegisterInternalNativeContext: reachable from other Go code in this
@@ -172,6 +261,15 @@ type Interpreter struct {
 	// a host that attaches one must call Run/RunContext from a goroutine it
 	// can afford to block and issue resume calls from another.
 	debugController atomic.Pointer[DebugController]
+	// stmtHooks is true whenever any of breakpoints, lineProfile or
+	// debugController is installed. evalStmt runs for every single guest
+	// statement, and testing those three pointers there meant three separate
+	// atomic loads from three different cache lines on a path that, for an
+	// ordinary run, has nothing to report to any of them. One flag collapses
+	// that to a single load; the individual pointers are only consulted once
+	// it says at least one hook exists. Maintained by refreshStmtHooks, which
+	// every installer calls after storing.
+	stmtHooks atomic.Bool
 	// fastEnvPool recycles call scopes for frame-free functions that cannot
 	// create closures. Recursive and call-heavy guest code otherwise creates
 	// one heap object per invocation even though each scope dies on return.
@@ -229,13 +327,15 @@ func NewInterpreterWithVFS(vfs *VFS) *Interpreter {
 		vfs = NewVFS()
 	}
 	return &Interpreter{
-		// globals is populated eagerly by RegisterBuiltinPackages (which
-		// writes vm.globals.Vars[alias] = ... directly, bypassing declare's
-		// lazy allocation — see that file), and every guest program's
-		// package-level decls land here too, so unlike a typical NewEnv
-		// scope it is never going to stay empty. Pre-allocate its map
-		// directly instead of going through NewEnv's lazy path.
-		globals:          &Env{Vars: make(map[string]any, 64)},
+		// globals never stays empty — host natives, each imported package's
+		// alias (written straight into this map by installImportedPackage),
+		// and every guest package-level declaration land here — so it is
+		// allocated directly instead of going through NewEnv's lazy path.
+		// The hint is modest on purpose: curated packages are built on
+		// first use now (see RegisterBuiltinPackages), so a typical program
+		// binds a couple of imports and a handful of natives rather than the
+		// twenty-odd aliases the old eager registration put here.
+		globals:          &Env{Vars: make(map[string]any, 16)},
 		types:            map[string]*TypeDef{},
 		funcs:            map[string]*Function{},
 		natives:          map[string]func(args []any) (any, error){},
@@ -330,6 +430,9 @@ func lookupValueInEnv(env *Env, name string) (any, bool) {
 	if n, ok := lookupIntVar(env, name); ok {
 		return n, true
 	}
+	if v, ok := lookupInlineVar(env, name); ok {
+		return v, true
+	}
 	v, ok := env.Vars[name]
 	return v, ok
 }
@@ -419,6 +522,9 @@ func lookupOwnershipInEnv(env *Env, name string) (intOK, valueOK bool) {
 	if intOK {
 		return true, false
 	}
+	if _, ok := lookupInlineVar(env, name); ok {
+		return false, true
+	}
 	_, valueOK = env.Vars[name]
 	return
 }
@@ -435,28 +541,21 @@ func updateInEnv(env *Env, name string, val any, intOK bool) {
 			return
 		}
 		removeIntVar(env, name)
-		if env.Vars == nil {
-			env.Vars = make(map[string]any, 4)
-		}
-		env.Vars[name] = val
-		return
 	}
-	env.Vars[name] = val // Vars is already non-nil: the caller only reaches here when valueOK was true
+	storeValueInEnv(env, name, val)
 }
 
 // declareInEnv stores a brand-new binding directly in env (not an ancestor):
 // used by both declare and set's "not found anywhere" fallback.
 func declareInEnv(env *Env, name string, val any) {
 	if n, ok := val.(int); ok {
+		removeInlineVar(env, name)
 		delete(env.Vars, name)
 		setOrAppendIntVar(env, name, n)
 		return
 	}
-	if env.Vars == nil {
-		env.Vars = make(map[string]any, 4)
-	}
 	removeIntVar(env, name)
-	env.Vars[name] = val
+	storeValueInEnv(env, name, val)
 }
 
 func (vm *Interpreter) set(name string, val any, env *Env) {
@@ -522,17 +621,20 @@ func (vm *Interpreter) undeclare(name string, env *Env) {
 	if env.shared {
 		env.mu.Lock()
 		removeIntVar(env, name)
+		removeInlineVar(env, name)
 		delete(env.Vars, name)
 		env.mu.Unlock()
 		return
 	}
 	if exec := vm.activeExecution; exec == nil || !exec.concurrent.Load() {
 		removeIntVar(env, name)
+		removeInlineVar(env, name)
 		delete(env.Vars, name)
 		return
 	}
 	env.mu.Lock()
 	removeIntVar(env, name)
+	removeInlineVar(env, name)
 	delete(env.Vars, name)
 	env.mu.Unlock()
 }
@@ -540,17 +642,20 @@ func (vm *Interpreter) undeclare(name string, env *Env) {
 func (vm *Interpreter) declareInt(name string, value int, env *Env) {
 	if env.shared {
 		env.mu.Lock()
+		removeInlineVar(env, name)
 		delete(env.Vars, name)
 		setOrAppendIntVar(env, name, value)
 		env.mu.Unlock()
 		return
 	}
 	if exec := vm.activeExecution; exec == nil || !exec.concurrent.Load() {
+		removeInlineVar(env, name)
 		delete(env.Vars, name)
 		setOrAppendIntVar(env, name, value)
 		return
 	}
 	env.mu.Lock()
+	removeInlineVar(env, name)
 	delete(env.Vars, name)
 	setOrAppendIntVar(env, name, value)
 	env.mu.Unlock()
@@ -786,6 +891,12 @@ func (vm *Interpreter) collectLocalVars(env *Env) map[string]any {
 		if iv := e.inlineIntVar; iv.name != "" {
 			if _, seen := out[iv.name]; !seen {
 				out[iv.name] = iv.val
+			}
+		}
+		for i := 0; i < int(e.inlineLen); i++ {
+			vv := e.inlineVars[i]
+			if _, seen := out[vv.name]; !seen {
+				out[vv.name] = vv.val
 			}
 		}
 		for name, v := range e.Vars {
