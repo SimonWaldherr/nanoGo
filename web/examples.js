@@ -1745,4 +1745,779 @@ func main() {
     }
   }
 }
-`};
+`,
+  "Interface Dispatch": `package main
+
+import "fmt"
+
+type Money struct{ Cents int }
+
+func (m Money) Text() string {
+  sign, c := "", m.Cents
+  if c < 0 {
+    sign, c = "-", -c
+  }
+  return fmt.Sprintf("%s%d.%02d", sign, c/100, c%100)
+}
+
+// Charge is satisfied by any struct that has these two methods.
+type Charge interface {
+  Label() string
+  Amount() Money
+}
+
+type LineItem struct {
+  Product string
+  Unit    Money
+  Qty     int
+}
+
+func (li LineItem) Label() string { return fmt.Sprintf("%s x%d", li.Product, li.Qty) }
+func (li LineItem) Amount() Money { return Money{Cents: li.Unit.Cents * li.Qty} }
+
+type Rebate struct {
+  Reason string
+  Off    Money
+}
+
+func (r Rebate) Label() string { return "rebate: " + r.Reason }
+func (r Rebate) Amount() Money { return Money{Cents: -r.Off.Cents} }
+
+func main() {
+  invoice := []Charge{
+    LineItem{Product: "Mechanical keyboard", Unit: Money{Cents: 4999}, Qty: 2},
+    LineItem{Product: "USB-C cable", Unit: Money{Cents: 1290}, Qty: 3},
+    Rebate{Reason: "loyalty tier", Off: Money{Cents: 1500}},
+  }
+
+  total := 0
+  for _, c := range invoice {
+    // This loop never names LineItem or Rebate: the value carries its own methods.
+    fmt.Printf("%-24s %9s EUR", c.Label(), c.Amount().Text())
+    total += c.Amount().Cents
+  }
+  fmt.Printf("%-24s %9s EUR", "TOTAL", Money{Cents: total}.Text())
+}`,
+  "Type Assertions": `package main
+
+import "fmt"
+
+// Every alert sink can deliver.
+type Sink interface {
+  Deliver(msg string) string
+}
+
+// Retryable is an optional add-on interface: only some sinks implement it.
+type Retryable interface {
+  MaxAttempts() int
+}
+
+type PagerSink struct {
+  Rotation string
+}
+
+func (p PagerSink) Deliver(msg string) string { return "page " + p.Rotation + " -- " + msg }
+func (p PagerSink) MaxAttempts() int          { return 5 }
+
+type ConsoleSink struct {
+  Prefix string
+}
+
+func (c ConsoleSink) Deliver(msg string) string { return c.Prefix + " " + msg }
+
+func main() {
+  sinks := []Sink{
+    PagerSink{Rotation: "sre-primary"},
+    ConsoleSink{Prefix: "[local]"},
+  }
+
+  for _, s := range sinks {
+    fmt.Println(s.Deliver("disk usage at 91 percent"))
+
+    // nanoGo has no switch x.(type); a comma-ok assertion does the same job.
+    // Asserting to an interface asks "does this value also do that?"
+    if r, ok := s.(Retryable); ok {
+      fmt.Println("   retries up to", r.MaxAttempts(), "times")
+    } else {
+      fmt.Println("   delivered once, no retries")
+    }
+
+    // Asserting to a concrete type hands back that struct's own fields.
+    if p, ok := s.(PagerSink); ok {
+      fmt.Println("   escalates to rotation", p.Rotation)
+    }
+  }
+}`,
+  "Method Chaining": `package main
+
+import "fmt"
+
+type Version struct {
+  Major int
+  Minor int
+  Patch int
+}
+
+func (v Version) Text() string {
+  return fmt.Sprintf("v%d.%d.%d", v.Major, v.Minor, v.Patch)
+}
+
+// Each method derives a NEW Version instead of editing the receiver,
+// which is what lets the calls chain.
+func (v Version) NextPatch() Version {
+  return Version{Major: v.Major, Minor: v.Minor, Patch: v.Patch + 1}
+}
+
+func (v Version) NextMinor() Version {
+  return Version{Major: v.Major, Minor: v.Minor + 1, Patch: 0}
+}
+
+func (v Version) rank() int {
+  return v.Major*1000000 + v.Minor*1000 + v.Patch
+}
+
+func (v Version) NewerThan(other Version) bool {
+  return v.rank() > other.rank()
+}
+
+func main() {
+  released := Version{Major: 1, Minor: 4, Patch: 2}
+  candidate := released.NextMinor().NextPatch().NextPatch()
+
+  fmt.Println("released: ", released.Text())
+  fmt.Println("candidate:", candidate.Text(), "(built by chaining three methods)")
+  fmt.Println("hotfix:   ", released.NextPatch().Text())
+
+  tags := []Version{
+    Version{Major: 0, Minor: 9, Patch: 9},
+    Version{Major: 1, Minor: 4, Patch: 2},
+    Version{Major: 2, Minor: 0, Patch: 0},
+  }
+  for _, t := range tags {
+    fmt.Printf("%-9s newer than released: %t", t.Text(), t.NewerThan(released))
+  }
+}`,
+  "Nested Structs": `package main
+
+import "fmt"
+
+type Endpoint struct {
+  Host string
+  Port int
+}
+
+func (e Endpoint) Addr() string { return fmt.Sprintf("%s:%d", e.Host, e.Port) }
+
+type Quota struct {
+  RequestsPerSec int
+  BurstFactor    int
+}
+
+func (q Quota) Burst() int { return q.RequestsPerSec * q.BurstFactor }
+
+// Service holds two Endpoints and a Quota as ordinary fields.
+type Service struct {
+  Name    string
+  Primary Endpoint
+  Replica Endpoint
+  Limits  Quota
+}
+
+// The outer method reaches through the nesting and reuses the inner methods.
+func (s Service) Summary() string {
+  return fmt.Sprintf("%-9s %-18s %-18s %6d rps burst",
+    s.Name, s.Primary.Addr(), s.Replica.Addr(), s.Limits.Burst())
+}
+
+func main() {
+  fleet := []Service{
+    Service{Name: "checkout",
+      Primary: Endpoint{Host: "eu-west-1.svc", Port: 8080},
+      Replica: Endpoint{Host: "eu-west-2.svc", Port: 8080},
+      Limits:  Quota{RequestsPerSec: 400, BurstFactor: 3}},
+    Service{Name: "search",
+      Primary: Endpoint{Host: "eu-west-1.svc", Port: 9200},
+      Replica: Endpoint{Host: "us-east-1.svc", Port: 9200},
+      Limits:  Quota{RequestsPerSec: 150, BurstFactor: 4}},
+  }
+
+  capacity := 0
+  for _, s := range fleet {
+    fmt.Println(s.Summary())
+    capacity += s.Limits.Burst()
+  }
+  fmt.Println("fleet burst capacity:", capacity, "rps")
+  fmt.Println("checkout replica host:", fleet[0].Replica.Host)
+}`,
+  "Closure Ledgers": `package main
+
+import "fmt"
+
+// newLedger seeds a balance from any number of opening deposits, then
+// returns a closure over it. Every call to newLedger creates a fresh
+// balance that outlives the return and is reachable only through the
+// function handed back -- no globals, nothing shared between ledgers.
+func newLedger(owner string, opening ...int) func(int) int {
+  balance := 0
+  for _, amount := range opening {
+    balance += amount
+  }
+  fmt.Printf("%-6s opened with %d deposit(s), balance %d", owner, len(opening), balance)
+  return func(delta int) int {
+    balance += delta
+    fmt.Printf("%-6s %+5d -> %4d", owner, delta, balance)
+    return balance
+  }
+}
+
+func main() {
+  fmt.Println("-- opening accounts --")
+  alice := newLedger("alice", 400, 250)
+  bob := newLedger("bob", 90)
+  seed := []int{30, 30, 30}
+  carol := newLedger("carol", seed...) // spread a slice into the variadic
+
+  fmt.Println("-- transactions --")
+  alice(-120)
+  bob(60)
+  carol(-25)
+  aliceEnd := alice(75)
+  bobEnd := bob(-40)
+  carolEnd := carol(-15)
+
+  fmt.Println("-- final --")
+  fmt.Println("alice", aliceEnd, "| bob", bobEnd, "| carol", carolEnd)
+  fmt.Println("three closures, three private balances")
+}`,
+  "Defer Order": `package main
+
+import "fmt"
+
+func acquire(name string) string {
+  fmt.Println("  acquire", name)
+  return name
+}
+
+func release(name string) {
+  fmt.Println("  release", name)
+}
+
+func runMigration() {
+  // Each defer pushes onto a stack that unwinds last-in-first-out, so
+  // resources are released in the exact reverse of acquisition order.
+  // Note acquire() runs NOW -- only release() is postponed.
+  defer release(acquire("config"))
+  defer release(acquire("database"))
+  defer release(acquire("audit-log"))
+  fmt.Println("  applying schema changes")
+}
+
+func reportRetries() {
+  for attempt := 1; attempt <= 3; attempt++ {
+    // attempt is evaluated here, at defer time, not at unwind time
+    defer fmt.Println("  rolled back attempt", attempt)
+  }
+  fmt.Println("  loop finished")
+}
+
+func main() {
+  fmt.Println("migration:")
+  runMigration()
+  fmt.Println("retry log:")
+  reportRetries()
+  fmt.Println("done")
+}`,
+  "Panic and Recover": `package main
+
+import (
+  "fmt"
+  "strconv"
+  "strings"
+)
+
+// mustPort is written the "can't fail" way: it panics instead of
+// returning an error, so callers below it stay free of error checks.
+func mustPort(line string) int {
+  fields := strings.Split(line, "=")
+  if len(fields) != 2 {
+    panic("malformed line: " + line)
+  }
+  value := strings.TrimSpace(fields[1])
+  port := strconv.Atoi(value)
+  if port < 1 || port > 65535 {
+    panic("port out of range: " + value)
+  }
+  return port
+}
+
+func bindService(line string) {
+  // recover() only works from inside a deferred function. It stops the
+  // panic unwinding here, so main survives and the loop keeps going --
+  // note "listener ready" never prints for a line that panicked.
+  defer func() {
+    if r := recover(); r != nil {
+      fmt.Println("  skipped:", r)
+    }
+  }()
+  fmt.Println("  bound on port", mustPort(line))
+  fmt.Println("  listener ready")
+}
+
+func main() {
+  config := []string{"http = 8080", "https = 443", "metrics", "debug = 70000", "ssh = 22"}
+  for _, line := range config {
+    fmt.Println("config:", line)
+    bindService(line)
+  }
+  fmt.Println("startup complete despite 2 bad lines")
+}`,
+  "Labeled Break and Goto": `package main
+
+import "fmt"
+
+// One string per conveyor lane: '.' is a good unit, '#' means the lane
+// is offline, 'x' is a jam that halts the whole scan.
+var lanes = []string{
+  "..#.",
+  "....",
+  ".x..",
+}
+
+func main() {
+  fmt.Println("-- labeled continue and break --")
+scan:
+  for lane := 0; lane < len(lanes); lane++ {
+    for slot := 0; slot < len(lanes[lane]); slot++ {
+      unit := lanes[lane][slot]
+      if unit == '#' {
+        // plain continue would advance slot; the label advances lane
+        fmt.Println("lane", lane, "offline at slot", slot, "- next lane")
+        continue scan
+      }
+      if unit == 'x' {
+        // plain break would escape only the inner loop
+        fmt.Println("lane", lane, "JAM at slot", slot, "- halting scan")
+        break scan
+      }
+      fmt.Println("lane", lane, "slot", slot, "ok")
+    }
+  }
+
+  fmt.Println("-- goto --")
+  attempt := 0
+retry:
+  attempt++
+  fmt.Println("clearing jam, attempt", attempt)
+  if attempt < 3 {
+    goto retry // jumps backwards to the label: a retry loop without a loop
+  }
+  fmt.Println("jam cleared after", attempt, "attempts")
+}`,
+  "Password Strength": `package main
+
+import (
+  "fmt"
+  "testing"
+)
+
+// classify scores a password's strength on a 0-4 scale by counting how many
+// distinct character classes it uses -- the same heuristic a signup form
+// might run client-side.
+func classify(pw string) int {
+  if len(pw) < 8 {
+    return 0
+  }
+  hasUpper, hasLower, hasDigit, hasSymbol := false, false, false, false
+  for _, r := range pw {
+    switch {
+    case r >= 'A' && r <= 'Z':
+      hasUpper = true
+    case r >= 'a' && r <= 'z':
+      hasLower = true
+    case r >= '0' && r <= '9':
+      hasDigit = true
+    default:
+      hasSymbol = true
+    }
+  }
+  score := 0
+  if hasUpper {
+    score++
+  }
+  if hasLower {
+    score++
+  }
+  if hasDigit {
+    score++
+  }
+  if hasSymbol {
+    score++
+  }
+  return score
+}
+
+func label(score int) string {
+  switch score {
+  case 0:
+    return "too short"
+  case 1, 2:
+    return "weak"
+  case 3:
+    return "good"
+  default:
+    return "strong"
+  }
+}
+
+func TestClassify(t *testing.T) {
+  t.Run("too_short", func(t *testing.T) {
+    if got := classify("Ab1!"); got != 0 {
+      t.Errorf("classify(short) = %d, want 0", got)
+    }
+  })
+  t.Run("digits_only", func(t *testing.T) {
+    if got := classify("12345678"); got != 1 {
+      t.Errorf("classify(digits only) = %d, want 1", got)
+    }
+  })
+  t.Run("all_classes", func(t *testing.T) {
+    if got := classify("Secret1!"); got != 4 {
+      t.Errorf("classify(all classes) = %d, want 4", got)
+    }
+  })
+}
+
+func main() {
+  passwords := []string{"abc", "12345678", "password1", "Secret1!"}
+  for i := 0; i < len(passwords); i++ {
+    score := classify(passwords[i])
+    fmt.Printf("%-11s score=%d (%s)", passwords[i], score, label(score))
+  }
+}`,
+  "Balanced Brackets": `package main
+
+import (
+  "fmt"
+  "testing"
+)
+
+// Stack is a LIFO of strings, backed by a slice. Declared at package level:
+// nanoGo has no function-local type declarations.
+type Stack struct {
+  items []string
+}
+
+func (s *Stack) Push(v string) {
+  s.items = append(s.items, v)
+}
+
+// Pop panics on an empty stack rather than returning a second "ok" value --
+// deliberately, so the test below can exercise recover().
+func (s *Stack) Pop() string {
+  n := len(s.items)
+  if n == 0 {
+    panic("pop from empty stack")
+  }
+  top := s.items[n-1]
+  s.items = s.items[:n-1]
+  return top
+}
+
+func (s *Stack) Len() int { return len(s.items) }
+
+func TestStackOrdering(t *testing.T) {
+  s := &Stack{}
+  s.Push("a")
+  s.Push("b")
+  s.Push("c")
+  if got := s.Pop(); got != "c" {
+    t.Fatalf("Pop() = %q, want %q (LIFO order broken)", got, "c")
+  }
+  if got := s.Len(); got != 2 {
+    t.Errorf("Len() after one pop = %d, want 2", got)
+  }
+}
+
+func TestStackPopEmptyPanics(t *testing.T) {
+  defer func() {
+    if r := recover(); r == nil {
+      t.Fatal("Pop() on an empty stack did not panic")
+    }
+  }()
+  empty := &Stack{}
+  empty.Pop()
+}
+
+// balanced reports whether brackets in expr nest correctly, using Stack as
+// its scratch space -- a stack's natural job. Characters are compared as
+// one-character substrings (expr[i:i+1]) rather than converted between int
+// and string, which follow different rules here than plain Go.
+func balanced(expr string) bool {
+  s := &Stack{}
+  for i := 0; i < len(expr); i++ {
+    c := expr[i : i+1]
+    switch c {
+    case "(", "[", "{":
+      s.Push(c)
+    case ")", "]", "}":
+      if s.Len() == 0 {
+        return false
+      }
+      top := s.Pop()
+      opensThis := (c == ")" && top == "(") || (c == "]" && top == "[") || (c == "}" && top == "{")
+      if !opensThis {
+        return false
+      }
+    }
+  }
+  return s.Len() == 0
+}
+
+func main() {
+  exprs := []string{"(a+b)*[c-d]", "{[()]}", "(a+b]", "((("}
+  for i := 0; i < len(exprs); i++ {
+    fmt.Printf("%-14s balanced=%t", exprs[i], balanced(exprs[i]))
+  }
+}`,
+  "Allocation Benchmark": `package main
+
+import (
+  "fmt"
+  "testing"
+  "time"
+)
+
+// buildLine grows a slice one append at a time -- a common allocation-heavy
+// pattern worth benchmarking on its own, distinct from a plain string scan.
+func buildLine(n int) []int {
+  var out []int
+  for i := 0; i < n; i++ {
+    out = append(out, i*i)
+  }
+  return out
+}
+
+// BenchmarkBuildLine reports allocations as well as time -- b.ReportAllocs()
+// is the piece a bare timing loop misses, and it is what tells you an
+// append-heavy hot path is worth pre-sizing with make([]int, 0, n).
+func BenchmarkBuildLine(b *testing.B) {
+  b.ReportAllocs()
+  for i := 0; i < b.N; i++ {
+    buildLine(64)
+  }
+}
+
+func main() {
+  b := testing.B{N: 300}
+  started := time.Now()
+  BenchmarkBuildLine(&b)
+  fmt.Printf("BenchmarkBuildLine: N=%d, wall=%dms", b.N, time.Since(started))
+  fmt.Println("(ReportAllocs is what a plain time.Since loop can't tell you)")
+
+  sample := buildLine(8)
+  line := ""
+  for i := 0; i < len(sample); i++ {
+    if i > 0 {
+      line = line + " "
+    }
+    line = line + fmt.Sprintf("%d", sample[i])
+  }
+  fmt.Println("sample output: [" + line + "]")
+}`,
+  "Word Frequency": `package main
+
+import (
+  "fmt"
+  "sort"
+  "strings"
+)
+
+// Count pairs a word with how often it appeared, so the frequency table can
+// be sorted -- Go maps have no defined iteration order.
+type Count struct {
+  Word string
+  N    int
+}
+
+func main() {
+  text := "the quick brown fox jumps over the lazy dog the fox runs the dog barks"
+  words := strings.Split(text, " ")
+
+  freq := map[string]int{}
+  for i := 0; i < len(words); i++ {
+    freq[words[i]] = freq[words[i]] + 1
+  }
+
+  // Collect into a slice so sort.Strings (the only sort nanoGo exposes
+  // besides Ints/Float64s) can order it deterministically.
+  unique := []string{}
+  for w := range freq {
+    unique = append(unique, w)
+  }
+  sort.Strings(unique)
+
+  counts := []Count{}
+  for i := 0; i < len(unique); i++ {
+    counts = append(counts, Count{Word: unique[i], N: freq[unique[i]]})
+  }
+
+  fmt.Println("word frequencies (alphabetical):")
+  for i := 0; i < len(counts); i++ {
+    bar := strings.Repeat("#", counts[i].N)
+    fmt.Printf("%-7s %d %s", counts[i].Word, counts[i].N, bar)
+  }
+  fmt.Println("distinct words:", len(unique))
+}`,
+  "Matrix Multiply": `package main
+
+import "fmt"
+
+// Matrix is a small fixed-shape 2D grid of ints, stored row-major.
+type Matrix struct {
+  Rows int
+  Cols int
+  Data []int
+}
+
+func (m Matrix) At(r, c int) int { return m.Data[r*m.Cols+c] }
+
+func newMatrix(rows, cols int, values []int) Matrix {
+  return Matrix{Rows: rows, Cols: cols, Data: values}
+}
+
+// multiply computes a*b the textbook way: each output cell is a dot product
+// of a row of a and a column of b.
+func multiply(a Matrix, b Matrix) Matrix {
+  if a.Cols != b.Rows {
+    panic("incompatible matrix shapes")
+  }
+  out := make([]int, a.Rows*b.Cols)
+  for r := 0; r < a.Rows; r++ {
+    for c := 0; c < b.Cols; c++ {
+      sum := 0
+      for k := 0; k < a.Cols; k++ {
+        sum = sum + a.At(r, k)*b.At(k, c)
+      }
+      out[r*b.Cols+c] = sum
+    }
+  }
+  return newMatrix(a.Rows, b.Cols, out)
+}
+
+func printMatrix(m Matrix) {
+  for r := 0; r < m.Rows; r++ {
+    line := ""
+    for c := 0; c < m.Cols; c++ {
+      line = line + fmt.Sprintf("%4d", m.At(r, c))
+    }
+    fmt.Println(line)
+  }
+}
+
+func main() {
+  a := newMatrix(2, 3, []int{1, 2, 3, 4, 5, 6})
+  b := newMatrix(3, 2, []int{7, 8, 9, 10, 11, 12})
+
+  fmt.Println("A (2x3):")
+  printMatrix(a)
+  fmt.Println("B (3x2):")
+  printMatrix(b)
+
+  product := multiply(a, b)
+  fmt.Println("A * B (2x2):")
+  printMatrix(product)
+}`,
+  "Anagram Groups": `package main
+
+import (
+  "fmt"
+  "sort"
+  "strings"
+)
+
+// letterKey reduces a word to a canonical form -- its letters sorted -- so
+// two anagrams of each other always produce the same key.
+func letterKey(word string) string {
+  letters := strings.Split(strings.ToLower(word), "")
+  sort.Strings(letters)
+  return strings.Join(letters, "")
+}
+
+func main() {
+  words := []string{"listen", "silent", "enlist", "banana", "orange", "ratio", "riota"}
+
+  groups := map[string][]string{}
+  keys := []string{}
+  for i := 0; i < len(words); i++ {
+    key := letterKey(words[i])
+    if _, seen := groups[key]; !seen {
+      // A missing map entry reads back as nil, and appending to nil
+      // needs an explicit empty slice first -- this is the one line
+      // that does that, before the append below ever runs on this key.
+      groups[key] = []string{}
+      keys = append(keys, key)
+    }
+    groups[key] = append(groups[key], words[i])
+  }
+  sort.Strings(keys)
+
+  fmt.Println("anagram groups:")
+  for i := 0; i < len(keys); i++ {
+    members := groups[keys[i]]
+    if len(members) > 1 {
+      fmt.Println(" ", strings.Join(members, " = "))
+    } else {
+      fmt.Println(" ", members[0], "(no match)")
+    }
+  }
+}`,
+  "Monthly Reports (VFS)": `package main
+
+import (
+  "fmt"
+  "os"
+)
+
+// This program writes files to nanoGo's virtual filesystem, lists the
+// directory it just populated, and reads one file back -- all sandboxed:
+// nothing here touches the real disk, only the VFS the playground grants
+// this program read/write access to.
+func main() {
+  if err := os.MkdirAll("/reports", 0755); err != nil {
+    fmt.Println("mkdir failed:", err)
+    return
+  }
+
+  names := []string{"january.txt", "february.txt", "march.txt"}
+  totals := []int{1200, 980, 1450}
+  for i := 0; i < len(names); i++ {
+    content := fmt.Sprintf("month total: %d", totals[i])
+    path := "/reports/" + names[i]
+    if _, err := os.WriteFile(path, content, 0644); err != nil {
+      fmt.Println("write failed:", err)
+      return
+    }
+  }
+  fmt.Println("wrote", len(names), "report(s) to /reports")
+
+  entries, err := os.ReadDir("/reports")
+  if err != nil {
+    fmt.Println("readdir failed:", err)
+    return
+  }
+  fmt.Println("directory listing:")
+  sum := 0
+  for i := 0; i < len(entries); i++ {
+    info := entries[i]
+    data, readErr := os.ReadFile("/reports/" + info.Name)
+    if readErr != nil {
+      fmt.Println("  read failed:", readErr)
+      continue
+    }
+    fmt.Printf("  %-16s %d bytes", info.Name, info.Size)
+    fmt.Println("   ", data)
+    sum++
+  }
+  fmt.Println("read back", sum, "file(s) successfully")
+}`,
+};
