@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/rand"
 	"strconv"
-	"strings"
 	"syscall/js"
 	"time"
 
@@ -176,14 +175,15 @@ type CanvasBinding struct {
 	CellSize  int
 	GridW     int
 	GridH     int
-	// pendingCells is used only when the interpreter runs in a Web Worker.
-	// Crossing Go<->JS once per painted cell is far more expensive than the
-	// actual rendering work, so cells are encoded here and transferred once
-	// per explicit Flush (or at the end of a run).
-	pendingCells strings.Builder
+	// cells is used only when the interpreter runs in a Web Worker: one
+	// palette level per grid cell, row-major. Crossing Go<->JS once per
+	// painted cell is far more expensive than the actual rendering work, so
+	// paints land here and the whole grid ships as one byte buffer per
+	// explicit Flush (or at the end of a run). It persists across flushes,
+	// so demos that only repaint what changed keep working.
+	cells []byte
+	dirty bool
 }
-
-const canvasFrameFlushBytes = 64 << 10
 
 // canvasPalette provides eight stable levels for direct DOM-bound canvases.
 // Level 0 is the background; level 1 remains the established nanoGo green so
@@ -211,6 +211,12 @@ func (c *CanvasBinding) Size(gridW, gridH int) {
 		// A resize establishes a new coordinate system, so all previously
 		// queued cells must reach the host before it.
 		c.Flush()
+		n := gridW * gridH
+		if n < 0 {
+			n = 0
+		}
+		c.cells = make([]byte, n)
+		c.dirty = false
 		sendMessage(map[string]any{"type": "canvas-size", "w": gridW, "h": gridH})
 		return
 	}
@@ -237,18 +243,14 @@ func (c *CanvasBinding) SetCellLevel(x, y, level int) {
 		level = len(canvasPalette) - 1
 	}
 	if !c.isBound() {
-		// Compact `x,y,level;` wire format. Building this byte stream in Go is
-		// cheap; one JS callback for a frame is dramatically cheaper than one
-		// callback per cell in a Game-of-Life generation.
-		c.pendingCells.WriteString(strconv.Itoa(x))
-		c.pendingCells.WriteByte(',')
-		c.pendingCells.WriteString(strconv.Itoa(y))
-		c.pendingCells.WriteByte(',')
-		c.pendingCells.WriteString(strconv.Itoa(level))
-		c.pendingCells.WriteByte(';')
-		if c.pendingCells.Len() >= canvasFrameFlushBytes {
-			c.Flush()
+		// One byte store per paint, no allocation and no encoding: the grid
+		// itself is the wire format, so a frame costs a single JS callback
+		// regardless of how many cells a Game-of-Life generation touches.
+		if x < 0 || y < 0 || x >= c.GridW || y >= c.GridH || len(c.cells) < c.GridW*c.GridH {
+			return
 		}
+		c.cells[y*c.GridW+x] = byte(level)
+		c.dirty = true
 		return
 	}
 	cs := c.CellSize
@@ -257,19 +259,25 @@ func (c *CanvasBinding) SetCellLevel(x, y, level int) {
 }
 
 func (c *CanvasBinding) Flush() {
-	if c == nil || c.pendingCells.Len() == 0 {
+	if c == nil || !c.dirty || len(c.cells) == 0 {
 		return
 	}
 	// Avoid sendMessage's generic map conversion: this is the hot worker
-	// transport path, and its payload is already a compact string.
+	// transport path, and its payload is already a flat byte grid.
 	hook := js.Global().Get("nanoGoPostMessage")
 	if hook.Truthy() {
+		// A fresh Uint8Array per frame: the worker may hold this message in
+		// its outbound batch, so the buffer must not change underneath it.
+		buf := js.Global().Get("Uint8Array").New(len(c.cells))
+		js.CopyBytesToJS(buf, c.cells)
 		obj := js.Global().Get("Object").New()
 		obj.Set("type", "canvas-frame")
-		obj.Set("data", c.pendingCells.String())
+		obj.Set("w", c.GridW)
+		obj.Set("h", c.GridH)
+		obj.Set("cells", buf)
 		hook.Invoke(obj)
 	}
-	c.pendingCells.Reset()
+	c.dirty = false
 }
 
 // ---------------- Simple HTTP + Storage -------------

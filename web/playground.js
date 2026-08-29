@@ -1312,33 +1312,13 @@
         level = Number(level) | 0;
         _canvasCells[y * _canvasGridW + x] = level < 0 ? 0 : (level >= CANVAS_PALETTE.length ? CANVAS_PALETTE.length - 1 : level);
       }
-      function applyCanvasFrame(data) {
-        // Decode compact `x,y,level;...` without allocating one array/object
-        // per cell. The worker already guarantees this is a whole frame.
-        let i = 0;
-        while (i < data.length) {
-          let x = 0, y = 0, sign = 1;
-          if (data.charCodeAt(i) === 45) { sign = -1; i++; }
-          while (i < data.length) {
-            const c = data.charCodeAt(i);
-            if (c < 48 || c > 57) break;
-            x = x * 10 + c - 48; i++;
-          }
-          x *= sign;
-          if (data.charCodeAt(i++) !== 44) break;
-          sign = 1;
-          if (data.charCodeAt(i) === 45) { sign = -1; i++; }
-          while (i < data.length) {
-            const c = data.charCodeAt(i);
-            if (c < 48 || c > 57) break;
-            y = y * 10 + c - 48; i++;
-          }
-          y *= sign;
-          if (data.charCodeAt(i++) !== 44) break;
-          const level = data.charCodeAt(i++) - 48;
-          while (i < data.length && data.charCodeAt(i) !== 59) i++;
-          if (i < data.length) i++;
-          setCanvasCell(x, y, level);
+      function applyCanvasFrame(cells) {
+        // The guest ships a whole grid of palette levels, one byte per cell,
+        // already clamped and bounds-checked on the Go side -- so adopting a
+        // frame is a memcpy rather than a per-cell decode. A length mismatch
+        // means this frame predates the matching canvas-size, so drop it.
+        if (cells && cells.length === _canvasCells.length) {
+          _canvasCells.set(cells);
         }
         _scheduleCanvasRender();
       }
@@ -1482,10 +1462,10 @@
               break;
             case 'canvas-frame': {
               autoSwitchOutputPanel('canvas');
-              // The WASM worker encodes a whole frame as `x,y,alive;...` so
+              // The WASM worker ships a whole frame as a flat byte grid, so
               // Go crosses into JavaScript once per frame instead of once per
-              // cell. Decode directly into the existing rAF drawing queue.
-              applyCanvasFrame(String(m.data || ''));
+              // cell. Feed it into the existing rAF drawing queue.
+              applyCanvasFrame(m.cells);
               break;
             }
             case 'canvas-flush':

@@ -152,15 +152,19 @@ func main() {
         // each level 0-7 to a distinct color.
         drawCell(Number(m.x), Number(m.y), Number(m.level) > 0);
         break;
-      case 'canvas-frame':
-        // A whole animation frame encoded as "x,y,level;x,y,level;...".
-        // Decoding it in full (as index.html does, for performance) is out
-        // of scope for this minimal example — draw each cell directly.
-        String(m.data || '').split(';').filter(Boolean).forEach(cell => {
-          const [x, y, level] = cell.split(',').map(Number);
-          drawCell(x, y, level > 0);
-        });
+      case 'canvas-frame': {
+        // A whole animation frame as a flat, row-major grid of palette
+        // levels — one byte per cell. The full playground turns this into
+        // pixels in one pass (see index.html); this minimal example just
+        // draws each cell, treating any non-zero level as "on".
+        const cells = m.cells, w = Number(m.w) || 0;
+        if (cells && w > 0) {
+          for (let i = 0; i < cells.length; i++) {
+            drawCell(i % w, (i / w) | 0, cells[i] > 0);
+          }
+        }
         break;
+      }
       case 'canvas-flush':
         break; // nothing to do: drawCell already paints immediately above
       case 'dom-setinner': {
