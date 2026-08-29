@@ -741,6 +741,91 @@ func main() { greet() }
 	}
 }
 
+// TestDeferBuiltinClose covers `defer close(ch)`: prepareCall must resolve a
+// bare builtin identifier in a defer's call expression instead of only
+// accepting real *Function values, or this fails with "undefined: close".
+func TestDeferBuiltinClose(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func work(ch chan int) {
+	defer close(ch)
+	ch <- 1
+}
+func main() {
+	ch := make(chan int, 1)
+	work(ch)
+	v, ok := <-ch
+	fmt.Println(v)
+	fmt.Println(ok)
+	_, ok2 := <-ch
+	fmt.Println(ok2)
+}
+`)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected 3 lines, got %d: %q", len(lines), out)
+	}
+	if strings.TrimSpace(lines[0]) != "1" {
+		t.Errorf("line 0: want '1', got %q", lines[0])
+	}
+	if strings.TrimSpace(lines[1]) != "true" {
+		t.Errorf("line 1: want 'true', got %q", lines[1])
+	}
+	if strings.TrimSpace(lines[2]) != "false" {
+		t.Errorf("line 2: want 'false' (channel should be closed by the deferred close), got %q", lines[2])
+	}
+}
+
+// TestDeferBuiltinDelete covers `defer delete(m, k)`, a second bare-builtin
+// defer that additionally checks defer's "capture args now, execute later"
+// semantics: the map and key are evaluated when the defer statement runs,
+// but delete itself only happens once work returns.
+func TestDeferBuiltinDelete(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func work(m map[string]int) {
+	defer delete(m, "a")
+	fmt.Println(len(m))
+}
+func main() {
+	m := map[string]int{"a": 1, "b": 2}
+	work(m)
+	fmt.Println(len(m))
+}
+`)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected 2 lines, got %d: %q", len(lines), out)
+	}
+	if strings.TrimSpace(lines[0]) != "2" {
+		t.Errorf("line 0: want '2' (both keys still present while work's body runs), got %q", lines[0])
+	}
+	if strings.TrimSpace(lines[1]) != "1" {
+		t.Errorf("line 1: want '1' (key \"a\" removed by the deferred delete), got %q", lines[1])
+	}
+}
+
+// TestGoBuiltinClose covers `go close(ch)`: the GoStmt case shares
+// prepareCall with defer, so a bare builtin identifier must resolve there
+// too instead of failing with "undefined: close".
+func TestGoBuiltinClose(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	ch := make(chan int)
+	go close(ch)
+	_, ok := <-ch
+	fmt.Println(ok)
+}
+`)
+	if strings.TrimSpace(out) != "false" {
+		t.Errorf("expected 'false' (channel closed via go close(ch)), got %q", out)
+	}
+}
+
 func TestForRangeSlice(t *testing.T) {
 	out := runAndCapture(t, `
 package main

@@ -444,116 +444,14 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 	case *ast.CallExpr:
 		// Builtins: make, len, cap, append, copy, close, delete, panic
 		if id, ok := ex.Fun.(*ast.Ident); ok {
+			if isBuiltinCallName(id.Name) {
+				args, err := vm.evalBuiltinArgs(id.Name, ex, env)
+				if err != nil {
+					return nil, err
+				}
+				return vm.applyBuiltin(id.Name, args)
+			}
 			switch id.Name {
-			case "make":
-				if len(ex.Args) == 0 {
-					return nil, NewRuntimeError("make: missing type")
-				}
-				tstr := typeString(ex.Args[0])
-				var args []any
-				for _, a := range ex.Args[1:] {
-					v, err := vm.evalExpr(a, env)
-					if err != nil {
-						return nil, err
-					}
-					args = append(args, v)
-				}
-				return vm.builtinMake(tstr, args)
-			case "len":
-				if len(ex.Args) != 1 {
-					return 0, nil
-				}
-				v, err := vm.evalExpr(ex.Args[0], env)
-				if err != nil {
-					return nil, err
-				}
-				return builtinLen(v), nil
-			case "cap":
-				if len(ex.Args) != 1 {
-					return 0, nil
-				}
-				v, err := vm.evalExpr(ex.Args[0], env)
-				if err != nil {
-					return nil, err
-				}
-				return builtinCap(v), nil
-			case "append":
-				if len(ex.Args) < 1 {
-					return nil, NewRuntimeError("append: args")
-				}
-				s, err := vm.evalExpr(ex.Args[0], env)
-				if err != nil {
-					return nil, err
-				}
-				var els []any
-				for i, a := range ex.Args[1:] {
-					// Support f(slice...) expansion if CallExpr.Ellipsis is set on last arg.
-					if ex.Ellipsis != token.NoPos && i == len(ex.Args[1:])-1 {
-						v, err := vm.evalExpr(a, env)
-						if err != nil {
-							return nil, err
-						}
-						if sv, ok := v.(*SliceVal); ok {
-							els = append(els, sv.Data...)
-						} else {
-							els = append(els, v)
-						}
-					} else {
-						v, err := vm.evalExpr(a, env)
-						if err != nil {
-							return nil, err
-						}
-						els = append(els, v)
-					}
-				}
-				return vm.builtinAppend(s, els...)
-			case "copy":
-				if len(ex.Args) != 2 {
-					return 0, nil
-				}
-				dst, err := vm.evalExpr(ex.Args[0], env)
-				if err != nil {
-					return nil, err
-				}
-				src, err := vm.evalExpr(ex.Args[1], env)
-				if err != nil {
-					return nil, err
-				}
-				return builtinCopy(dst, src), nil
-			case "close":
-				if len(ex.Args) != 1 {
-					return nil, NewRuntimeError("close: need channel")
-				}
-				v, err := vm.evalExpr(ex.Args[0], env)
-				if err != nil {
-					return nil, err
-				}
-				return builtinClose(v)
-			case "delete":
-				if len(ex.Args) != 2 {
-					return nil, nil
-				}
-				m, err := vm.evalExpr(ex.Args[0], env)
-				if err != nil {
-					return nil, err
-				}
-				k, err := vm.evalExpr(ex.Args[1], env)
-				if err != nil {
-					return nil, err
-				}
-				if mm, ok := m.(*MapVal); ok {
-					mm.deleteByKey(k)
-				}
-				return nil, nil
-			case "panic":
-				if len(ex.Args) == 0 {
-					return nil, &panicError{value: "panic"}
-				}
-				v, err := vm.evalExpr(ex.Args[0], env)
-				if err != nil {
-					return nil, err
-				}
-				return nil, &panicError{value: v}
 			case "recover":
 				// Matches Go's "recover must be called directly by a
 				// deferred function": env.frame.caller is only the
@@ -2969,8 +2867,155 @@ func sourceMayInspectStack(node ast.Node) bool {
 	return needsFrames
 }
 
+// isBuiltinCallName reports whether name is one of the predeclared
+// identifiers evalExpr's CallExpr case and prepareCall special-case instead
+// of resolving through the normal *Function lookup. recover is deliberately
+// absent: it reads the calling frame, so it cannot be split into an
+// evaluate-then-apply pair and stays inline in evalExpr.
+func isBuiltinCallName(name string) bool {
+	switch name {
+	case "make", "len", "cap", "append", "copy", "close", "delete", "panic":
+		return true
+	default:
+		return false
+	}
+}
+
+// evalBuiltinArgs evaluates the argument expressions of a builtin call named
+// name, from the raw AST -- needed because make's first argument is a type
+// rather than a value, and append's last argument may need slice expansion
+// via call.Ellipsis. Shared by evalExpr's CallExpr case, which applies the
+// builtin immediately, and prepareCall, which captures the args now so
+// defer/go can apply the builtin later.
+func (vm *Interpreter) evalBuiltinArgs(name string, call *ast.CallExpr, env *Env) ([]any, error) {
+	switch name {
+	case "make":
+		if len(call.Args) == 0 {
+			return nil, NewRuntimeError("make: missing type")
+		}
+		args := []any{typeString(call.Args[0])}
+		for _, a := range call.Args[1:] {
+			v, err := vm.evalExpr(a, env)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, v)
+		}
+		return args, nil
+	case "append":
+		if len(call.Args) < 1 {
+			return nil, NewRuntimeError("append: args")
+		}
+		s, err := vm.evalExpr(call.Args[0], env)
+		if err != nil {
+			return nil, err
+		}
+		args := []any{s}
+		rest := call.Args[1:]
+		for i, a := range rest {
+			v, err := vm.evalExpr(a, env)
+			if err != nil {
+				return nil, err
+			}
+			// Support f(slice...) expansion if CallExpr.Ellipsis is set on last arg.
+			if call.Ellipsis != token.NoPos && i == len(rest)-1 {
+				if sv, ok := v.(*SliceVal); ok {
+					args = append(args, sv.Data...)
+					continue
+				}
+			}
+			args = append(args, v)
+		}
+		return args, nil
+	default:
+		args := make([]any, 0, len(call.Args))
+		for _, a := range call.Args {
+			v, err := vm.evalExpr(a, env)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, v)
+		}
+		return args, nil
+	}
+}
+
+// applyBuiltin executes a builtin named name against its already-evaluated
+// arguments (see evalBuiltinArgs). Splitting evaluation from application is
+// what lets prepareCall capture a builtin call's args at defer/go time and
+// run the builtin itself later, matching defer's "capture now, execute
+// later" semantics.
+func (vm *Interpreter) applyBuiltin(name string, args []any) (any, error) {
+	switch name {
+	case "make":
+		if len(args) == 0 {
+			return nil, NewRuntimeError("make: missing type")
+		}
+		tstr, _ := args[0].(string)
+		return vm.builtinMake(tstr, args[1:])
+	case "len":
+		if len(args) != 1 {
+			return 0, nil
+		}
+		return builtinLen(args[0]), nil
+	case "cap":
+		if len(args) != 1 {
+			return 0, nil
+		}
+		return builtinCap(args[0]), nil
+	case "append":
+		if len(args) < 1 {
+			return nil, NewRuntimeError("append: args")
+		}
+		return vm.builtinAppend(args[0], args[1:]...)
+	case "copy":
+		if len(args) != 2 {
+			return 0, nil
+		}
+		return builtinCopy(args[0], args[1]), nil
+	case "close":
+		if len(args) != 1 {
+			return nil, NewRuntimeError("close: need channel")
+		}
+		return builtinClose(args[0])
+	case "delete":
+		if len(args) != 2 {
+			return nil, nil
+		}
+		if mm, ok := args[0].(*MapVal); ok {
+			mm.deleteByKey(args[1])
+		}
+		return nil, nil
+	case "panic":
+		if len(args) == 0 {
+			return nil, &panicError{value: "panic"}
+		}
+		return nil, &panicError{value: args[0]}
+	default:
+		return nil, NewRuntimeError("unknown builtin: " + name)
+	}
+}
+
 // prepareCall evaluates a CallExpr into callee and concrete argument list without invoking it.
 func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *any, []any, error) {
+	// Bare builtin identifier: defer/go must resolve make, len, cap, append,
+	// copy, close, delete and panic here too, since they are not real
+	// *Function values reachable through the normal env lookup below.
+	if id, ok := call.Fun.(*ast.Ident); ok && isBuiltinCallName(id.Name) {
+		args, err := vm.evalBuiltinArgs(id.Name, call, env)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		name := id.Name
+		fn := &Function{
+			Name: name,
+			Native: func(a []any) (any, error) {
+				return vm.applyBuiltin(name, a)
+			},
+		}
+		return fn, nil, args, nil
+	}
+
 	// Method / package / function cases similar to evalExpr(CallExpr) but do not call.
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 		// Package function?
