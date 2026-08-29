@@ -169,60 +169,38 @@ func Alert(s string) {
 
 // ---------------- Canvas binding -----------------
 
+// CanvasBinding buffers a guest program's canvas paints. The host page owns
+// the actual <canvas>: this side only tracks the grid and ships it across.
 type CanvasBinding struct {
-	Canvas    js.Value
-	Context2D js.Value
-	CellSize  int
-	GridW     int
-	GridH     int
-	// cells is used only when the interpreter runs in a Web Worker: one
-	// palette level per grid cell, row-major. Crossing Go<->JS once per
-	// painted cell is far more expensive than the actual rendering work, so
-	// paints land here and the whole grid ships as one byte buffer per
-	// explicit Flush (or at the end of a run). It persists across flushes,
-	// so demos that only repaint what changed keep working.
+	GridW int
+	GridH int
+	// cells holds one palette level per grid cell, row-major. Crossing
+	// Go<->JS once per painted cell is far more expensive than the actual
+	// rendering work, so paints land here and the whole grid ships as one
+	// byte buffer per explicit Flush (or at the end of a run). It persists
+	// across flushes, so demos that only repaint what changed keep working.
 	cells []byte
 	dirty bool
 }
 
-// canvasPalette provides eight stable levels for direct DOM-bound canvases.
-// Level 0 is the background; level 1 remains the established nanoGo green so
-// existing CanvasSet demos keep their visual identity. Levels 2..7 are used
-// by palette-aware examples such as Mandelbrot.
-var canvasPalette = [...]string{"#080d13", "#10b981", "#0ea5e9", "#2563eb", "#7c3aed", "#ec4899", "#f97316", "#facc15"}
-
-func (c *CanvasBinding) isBound() bool {
-	return c != nil && c.Canvas.Truthy() && !c.Context2D.IsUndefined()
-}
-
-func BindCanvasById(elementId string, cellSize int) CanvasBinding {
-	doc := js.Global().Get("document")
-	canvas := doc.Call("getElementById", elementId)
-	if canvas.IsUndefined() || canvas.IsNull() {
-		ConsoleError("Canvas element not found: " + elementId)
-	}
-	ctx := canvas.Call("getContext", "2d")
-	return CanvasBinding{Canvas: canvas, Context2D: ctx, CellSize: cellSize}
-}
+// canvasLevels is the number of palette levels a cell may use. Level 0 is the
+// background; level 1 is the established nanoGo green, so existing CanvasSet
+// demos keep their visual identity. Levels 2..7 are used by palette-aware
+// examples such as Mandelbrot. The colors themselves live in the host page.
+const canvasLevels = 8
 
 func (c *CanvasBinding) Size(gridW, gridH int) {
 	c.GridW, c.GridH = gridW, gridH
-	if !c.isBound() {
-		// A resize establishes a new coordinate system, so all previously
-		// queued cells must reach the host before it.
-		c.Flush()
-		n := gridW * gridH
-		if n < 0 {
-			n = 0
-		}
-		c.cells = make([]byte, n)
-		c.dirty = false
-		sendMessage(map[string]any{"type": "canvas-size", "w": gridW, "h": gridH})
-		return
+	// A resize establishes a new coordinate system, so all previously
+	// queued cells must reach the host before it.
+	c.Flush()
+	n := gridW * gridH
+	if n < 0 {
+		n = 0
 	}
-	c.Canvas.Set("width", gridW*c.CellSize)
-	c.Canvas.Set("height", gridH*c.CellSize)
-	c.Context2D.Call("clearRect", 0, 0, c.Canvas.Get("width").Int(), c.Canvas.Get("height").Int())
+	c.cells = make([]byte, n)
+	c.dirty = false
+	sendMessage(map[string]any{"type": "canvas-size", "w": gridW, "h": gridH})
 }
 
 func (c *CanvasBinding) SetCell(x, y int, alive bool) {
@@ -233,33 +211,27 @@ func (c *CanvasBinding) SetCell(x, y int, alive bool) {
 	c.SetCellLevel(x, y, level)
 }
 
-// SetCellLevel paints one cell with a compact palette level from 0 to 7.
-// It retains CanvasSet's batched transport format while enabling demos that
-// need more information than a binary on/off pixel.
+// SetCellLevel paints one cell with a compact palette level from 0 to 7,
+// for demos that need more than a binary on/off pixel.
+//
+// One byte store per paint, no allocation and no encoding: the grid itself is
+// the wire format, so a frame costs a single JS callback regardless of how
+// many cells a Game-of-Life generation touches.
 func (c *CanvasBinding) SetCellLevel(x, y, level int) {
 	if level < 0 {
 		level = 0
-	} else if level >= len(canvasPalette) {
-		level = len(canvasPalette) - 1
+	} else if level >= canvasLevels {
+		level = canvasLevels - 1
 	}
-	if !c.isBound() {
-		// One byte store per paint, no allocation and no encoding: the grid
-		// itself is the wire format, so a frame costs a single JS callback
-		// regardless of how many cells a Game-of-Life generation touches.
-		if x < 0 || y < 0 || x >= c.GridW || y >= c.GridH || len(c.cells) < c.GridW*c.GridH {
-			return
-		}
-		c.cells[y*c.GridW+x] = byte(level)
-		c.dirty = true
+	if x < 0 || y < 0 || x >= c.GridW || y >= c.GridH || len(c.cells) < c.GridW*c.GridH {
 		return
 	}
-	cs := c.CellSize
-	c.Context2D.Set("fillStyle", canvasPalette[level])
-	c.Context2D.Call("fillRect", x*cs, y*cs, cs, cs)
+	c.cells[y*c.GridW+x] = byte(level)
+	c.dirty = true
 }
 
 func (c *CanvasBinding) Flush() {
-	if c == nil || !c.dirty || len(c.cells) == 0 {
+	if !c.dirty || len(c.cells) == 0 {
 		return
 	}
 	// Avoid sendMessage's generic map conversion: this is the hot worker
@@ -346,6 +318,7 @@ func workerStorage() js.Value {
 // ---------------- Native registrations ----------
 
 // RegisterHostNatives wires host-provided functions to the interpreter globals.
+// canvas must be non-nil; it buffers the guest's canvas paints for the host.
 func RegisterHostNatives(vm *interp.Interpreter, canvas *CanvasBinding) {
 	rand.Seed(time.Now().UnixNano())
 
@@ -428,47 +401,25 @@ func RegisterHostNatives(vm *interp.Interpreter, canvas *CanvasBinding) {
 
 	// Canvas
 	vm.RegisterNative("CanvasSize", func(args []any) (any, error) {
-		if canvas != nil && len(args) >= 2 {
-			w := interp.ToInt(args[0])
-			h := interp.ToInt(args[1])
-			canvas.Size(w, h)
-			return nil, nil
-		}
-		// If no canvas binding (e.g., running in a worker), post message to host
 		if len(args) >= 2 {
-			sendMessage(map[string]any{"type": "canvas-size", "w": interp.ToInt(args[0]), "h": interp.ToInt(args[1])})
+			canvas.Size(interp.ToInt(args[0]), interp.ToInt(args[1]))
 		}
 		return nil, nil
 	})
 	vm.RegisterNative("CanvasSet", func(args []any) (any, error) {
-		if canvas != nil && len(args) >= 3 {
-			x := interp.ToInt(args[0])
-			y := interp.ToInt(args[1])
-			alive := interp.ToBool(args[2])
-			canvas.SetCell(x, y, alive)
-			return nil, nil
-		}
 		if len(args) >= 3 {
-			sendMessage(map[string]any{"type": "canvas-set", "x": interp.ToInt(args[0]), "y": interp.ToInt(args[1]), "alive": interp.ToBool(args[2])})
+			canvas.SetCell(interp.ToInt(args[0]), interp.ToInt(args[1]), interp.ToBool(args[2]))
 		}
 		return nil, nil
 	})
 	vm.RegisterNative("CanvasSetLevel", func(args []any) (any, error) {
-		if canvas != nil && len(args) >= 3 {
-			canvas.SetCellLevel(interp.ToInt(args[0]), interp.ToInt(args[1]), interp.ToInt(args[2]))
-			return nil, nil
-		}
 		if len(args) >= 3 {
-			sendMessage(map[string]any{"type": "canvas-set-level", "x": interp.ToInt(args[0]), "y": interp.ToInt(args[1]), "level": interp.ToInt(args[2])})
+			canvas.SetCellLevel(interp.ToInt(args[0]), interp.ToInt(args[1]), interp.ToInt(args[2]))
 		}
 		return nil, nil
 	})
 	vm.RegisterNative("CanvasFlush", func(args []any) (any, error) {
-		if canvas != nil {
-			canvas.Flush()
-			return nil, nil
-		}
-		sendMessage(map[string]any{"type": "canvas-flush"})
+		canvas.Flush()
 		return nil, nil
 	})
 

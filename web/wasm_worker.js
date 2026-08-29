@@ -11,16 +11,15 @@ const _readyPromise = new Promise((resolve) => { _readyResolve = resolve; });
 // ---------------------------------------------------------------------------
 // Outbound message batching.
 //
-// Guest programs can emit thousands of `log` / `canvas-set` messages in a
-// tight loop (Game of Life paints every cell of every generation). One
+// Guest programs can emit thousands of `log` messages in a tight loop. One
 // postMessage per event means one structured clone + one main-thread task
-// per cell, which dominates total run time. High-frequency message types are
+// each, which dominates total run time. High-frequency message types are
 // therefore buffered and shipped as a single `{type:'batch', items:[...]}`
-// message: on flush points (canvas-flush, run end), when the buffer is full,
+// message: on flush points (canvas-frame, run end), when the buffer is full,
 // or on the next microtask once the synchronous Go slice yields (covers
 // animated demos that time.Sleep between frames).
 // ---------------------------------------------------------------------------
-const BATCHABLE = { 'log': 1, 'warn': 1, 'canvas-set': 1, 'canvas-set-level': 1, 'canvas-size': 1, 'canvas-flush': 1, 'canvas-frame': 1 };
+const BATCHABLE = { 'log': 1, 'warn': 1, 'canvas-size': 1, 'canvas-frame': 1 };
 const BATCH_LIMIT = 2048;
 let _batch = [];
 let _batchScheduled = false;
@@ -44,7 +43,7 @@ function postFromGuest(msg) {
     // canvas-frame is an explicit guest flush. Deliver it immediately so an
     // animation's frame order survives even when Go yields faster than the
     // browser's next paint.
-    if (t === 'canvas-flush' || t === 'canvas-frame' || _batch.length >= BATCH_LIMIT) {
+    if (t === 'canvas-frame' || _batch.length >= BATCH_LIMIT) {
       flushBatch();
     } else if (!_batchScheduled) {
       _batchScheduled = true;
@@ -77,14 +76,6 @@ self.onmessage = async function (ev) {
     } catch (e) {
       self.postMessage({ type: 'error', text: 'WASM init failed: ' + (e && e.message ? e.message : String(e)) });
     }
-    return;
-  }
-  if (msg && msg.type === 'set-scale') {
-    try {
-      if (typeof self.nanoGoSetScale === 'function') {
-        self.nanoGoSetScale(Number(msg.scale|0));
-      }
-    } catch (e) {/*no-op*/}
     return;
   }
   if (msg && msg.type === 'run') {
@@ -448,7 +439,6 @@ async function initWasmWorker() {
 
   // Make sure references are populated (Go usually puts them on globalThis).
   self.nanoGoRun      = self.nanoGoRun      || self.globalThis?.nanoGoRun;
-  self.nanoGoSetScale = self.nanoGoSetScale || self.globalThis?.nanoGoSetScale;
   self.nanoGoFormat   = self.nanoGoFormat   || self.globalThis?.nanoGoFormat;
   self.nanoGoVet      = self.nanoGoVet      || self.globalThis?.nanoGoVet;
   self.nanoGoAst        = self.nanoGoAst        || self.globalThis?.nanoGoAst;

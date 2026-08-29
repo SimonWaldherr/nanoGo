@@ -138,6 +138,22 @@
         , 'Custom Errors': { output: 'console', description: 'A struct-based error type implementing the error interface', badge: 'Error Handling', tags: ['Error Handling'] }
         , 'Stack (LIFO)': { output: 'console', description: 'Push/pop a last-in-first-out stack built from a plain slice', badge: 'Data Structures', tags: ['Data Structures', 'Algorithms'] }
         , 'Binary Search': { output: 'console', description: 'Classic O(log n) search over a sorted slice, step-counted', badge: 'Algorithms', tags: ['Algorithms'] }
+        , 'Defer Order': { output: 'console', description: 'LIFO defer unwinding, and when deferred arguments are evaluated', badge: 'Fundamentals', tags: ['Fundamentals'] }
+        , 'Labeled Break and Goto': { output: 'console', description: 'Labeled continue/break across nested loops, plus a backward goto', badge: 'Fundamentals', tags: ['Fundamentals'] }
+        , 'Panic and Recover': { output: 'console', description: 'Recover inside a deferred function so a loop survives bad input', badge: 'Error Handling', tags: ['Error Handling'] }
+        , 'Closure Ledgers': { output: 'console', description: 'Variadic constructors returning closures over private balances', badge: 'Algorithms', tags: ['Algorithms', 'Fundamentals'] }
+        , 'Nested Structs': { output: 'console', description: 'Structs holding structs, with methods reaching through the nesting', badge: 'Types', tags: ['Types'] }
+        , 'Method Chaining': { output: 'console', description: 'Value methods that return new values, so calls chain', badge: 'Types', tags: ['Types'] }
+        , 'Interface Dispatch': { output: 'console', description: 'An invoice of mixed types billed through a single interface', badge: 'Types', tags: ['Types'] }
+        , 'Type Assertions': { output: 'console', description: 'Comma-ok assertions to an optional interface and to a concrete type', badge: 'Types', tags: ['Types'] }
+        , 'Matrix Multiply': { output: 'console', description: 'Row-major matrices multiplied as dot products', badge: 'Math', tags: ['Math', 'Algorithms'] }
+        , 'Anagram Groups': { output: 'console', description: 'Group words by a sorted-letter key using maps and sort', badge: 'Algorithms', tags: ['Algorithms', 'Data Processing'] }
+        , 'Word Frequency': { output: 'console', description: 'Count words into a map, then print a deterministic sorted bar chart', badge: 'Data Processing', tags: ['Data Processing', 'Algorithms'] }
+        , 'Balanced Brackets': { output: 'console', description: 'A slice-backed stack checked by tests, including a recover() case', badge: 'Data Structures', tags: ['Data Structures', 'Algorithms', 'Testing'] }
+        , 'Password Strength': { output: 'console', description: 'A character-class strength score covered by named subtests', badge: 'Testing', tags: ['Testing', 'Algorithms'] }
+        , 'Allocation Benchmark': { output: 'console', description: 'testing.B with b.ReportAllocs() on an append-heavy hot path', badge: 'Benchmarks', tags: ['Benchmarks', 'Testing'] }
+        , 'Template Report': { output: 'console', description: 'text/template rendered per row, and a malformed template rejected', badge: 'Text', tags: ['Text', 'Data'] }
+        , 'Monthly Reports (VFS)': { output: 'console', description: 'Write, list and read files back in the sandboxed virtual filesystem', badge: 'OS', tags: ['OS'] }
       };
 
       const EXAMPLE_NAMES = Object.keys(EXAMPLE_CONFIG).filter(name => name !== 'Empty');
@@ -526,8 +542,6 @@
         autoSwitchedOutputThisRun = false;
         const payload = workspacePayload();
         activeRunSource = getSource();
-        const scale = parseInt(scaleEl.value, 10);
-        worker.postMessage({ type: 'set-scale', scale: scale });
         const c = document.getElementById('life');
         if (c) c.getContext('2d').clearRect(0, 0, c.width, c.height);
         if (execTimeEl) execTimeEl.textContent = '';
@@ -1306,12 +1320,6 @@
         // ImageData's own zero-initialized, fully-transparent default.
         _canvasImageData32.fill(CANVAS_PALETTE_U32[0]);
       }
-      function setCanvasCell(x, y, level) {
-        x |= 0; y |= 0;
-        if (x < 0 || y < 0 || x >= _canvasGridW || y >= _canvasGridH) return;
-        level = Number(level) | 0;
-        _canvasCells[y * _canvasGridW + x] = level < 0 ? 0 : (level >= CANVAS_PALETTE.length ? CANVAS_PALETTE.length - 1 : level);
-      }
       function applyCanvasFrame(cells) {
         // The guest ships a whole grid of palette levels, one byte per cell,
         // already clamped and bounds-checked on the Go side -- so adopting a
@@ -1320,10 +1328,6 @@
         if (cells && cells.length === _canvasCells.length) {
           _canvasCells.set(cells);
         }
-        _scheduleCanvasRender();
-      }
-      function drawCell(x, y, alive) {
-        setCanvasCell(x, y, alive ? 1 : 0);
         _scheduleCanvasRender();
       }
 
@@ -1449,17 +1453,6 @@
               canvas.height = h * scale;
               break;
             }
-            case 'canvas-set': {
-              autoSwitchOutputPanel('canvas');
-              const cx = Number(m.x), cy = Number(m.y), alive = !!m.alive;
-              drawCell(cx, cy, alive);
-              break;
-            }
-            case 'canvas-set-level':
-              autoSwitchOutputPanel('canvas');
-              setCanvasCell(Number(m.x), Number(m.y), Number(m.level));
-              _scheduleCanvasRender();
-              break;
             case 'canvas-frame': {
               autoSwitchOutputPanel('canvas');
               // The WASM worker ships a whole frame as a flat byte grid, so
@@ -1468,9 +1461,6 @@
               applyCanvasFrame(m.cells);
               break;
             }
-            case 'canvas-flush':
-              autoSwitchOutputPanel('canvas');
-              break;
             case 'dom-setinner': {
               autoSwitchOutputPanel('dom');
               const el = document.getElementById(m.id);
@@ -1633,9 +1623,6 @@
           if (currentExample && EXAMPLE_CONFIG[currentExample]) {
             showOutputPanel(EXAMPLE_CONFIG[currentExample].output);
           }
-          
-          const scale = parseInt(scaleEl.value, 10);
-          worker.postMessage({ type: 'set-scale', scale: scale });
           
           const c = document.getElementById('life');
           const ctx = c.getContext('2d');

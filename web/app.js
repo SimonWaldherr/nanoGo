@@ -143,15 +143,6 @@ func main() {
         if (canvasEl) { canvasEl.width = w * cellSize; canvasEl.height = h * cellSize; }
         break;
       }
-      case 'canvas-set':
-        drawCell(Number(m.x), Number(m.y), !!m.alive);
-        break;
-      case 'canvas-set-level':
-        // A minimal frontend can treat any non-zero palette level as "on";
-        // the full playground's canvas panel (see index.html) instead maps
-        // each level 0-7 to a distinct color.
-        drawCell(Number(m.x), Number(m.y), Number(m.level) > 0);
-        break;
       case 'canvas-frame': {
         // A whole animation frame as a flat, row-major grid of palette
         // levels — one byte per cell. The full playground turns this into
@@ -165,8 +156,6 @@ func main() {
         }
         break;
       }
-      case 'canvas-flush':
-        break; // nothing to do: drawCell already paints immediately above
       case 'dom-setinner': {
         const el = document.getElementById(m.id);
         if (el) el.innerHTML = m.html;
@@ -235,8 +224,6 @@ func main() {
 
   function runCode() {
     if (!worker) return;
-    const scale = parseInt((scaleEl && scaleEl.value) || '10', 10);
-    worker.postMessage({ type: 'set-scale', scale: scale });
     if (canvasEl) canvasEl.getContext('2d').clearRect(0, 0, canvasEl.width, canvasEl.height);
     log('=== running ===');
     setStatus('Running…', 'loading');
