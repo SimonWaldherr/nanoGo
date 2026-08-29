@@ -111,6 +111,35 @@ func main() { ch := make(chan int, 1); for i := 0; i < 20000; i++ { ch <- i; _ =
 	}
 }
 
+// BenchmarkBuiltinsAndBranches exercises fixed-arity builtin dispatch together
+// with the normal for/if/switch control path used by real guest programs.
+func BenchmarkBuiltinsAndBranches(b *testing.B) {
+	const src = `
+package main
+func main() {
+	s := make([]int, 8, 16)
+	total := 0
+	for i := 0; i < 50000; i++ {
+		if i&1 == 0 { total = total + len(s) } else { total = total + cap(s) }
+		switch i & 3 {
+		case 0: total++
+		case 1: total = total + 2
+		case 2: total = total + 3
+		default: total = total + 4
+		}
+	}
+	_ = total
+}`
+	vm, _ := newTestVM()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := vm.Run(src); err != nil {
+			b.Fatalf("Run: %v", err)
+		}
+	}
+}
+
 // guestWorkloads are whole guest programs, each dominated by one distinct
 // part of the evaluator, so a change can be attributed instead of just
 // observed. BenchmarkFibRecursive and BenchmarkEvalExprArithmetic above cover

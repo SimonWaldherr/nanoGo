@@ -462,6 +462,67 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			if id.Name == "make" {
 				return vm.evalMakeCall(ex, env)
 			}
+			// The usual fixed-arity builtins need no temporary []any. Keep the
+			// general evaluate-then-apply path for append and unusual arities so
+			// deferred calls and argument-side-effect behavior stay unchanged.
+			switch id.Name {
+			case "len":
+				if len(ex.Args) == 1 {
+					v, err := vm.evalExpr(ex.Args[0], env)
+					return builtinLen(v), err
+				}
+			case "cap":
+				if len(ex.Args) == 1 {
+					v, err := vm.evalExpr(ex.Args[0], env)
+					return builtinCap(v), err
+				}
+			case "copy":
+				if len(ex.Args) == 2 {
+					dst, err := vm.evalExpr(ex.Args[0], env)
+					if err != nil {
+						return nil, err
+					}
+					src, err := vm.evalExpr(ex.Args[1], env)
+					if err != nil {
+						return nil, err
+					}
+					return builtinCopy(dst, src), nil
+				}
+			case "close":
+				if len(ex.Args) == 1 {
+					v, err := vm.evalExpr(ex.Args[0], env)
+					if err != nil {
+						return nil, err
+					}
+					return builtinClose(v)
+				}
+			case "delete":
+				if len(ex.Args) == 2 {
+					m, err := vm.evalExpr(ex.Args[0], env)
+					if err != nil {
+						return nil, err
+					}
+					key, err := vm.evalExpr(ex.Args[1], env)
+					if err != nil {
+						return nil, err
+					}
+					if mm, ok := m.(*MapVal); ok {
+						mm.deleteByKey(key)
+					}
+					return nil, nil
+				}
+			case "panic":
+				if len(ex.Args) == 0 {
+					return nil, &panicError{value: "panic"}
+				}
+				if len(ex.Args) == 1 {
+					v, err := vm.evalExpr(ex.Args[0], env)
+					if err != nil {
+						return nil, err
+					}
+					return nil, &panicError{value: v}
+				}
+			}
 			if isBuiltinCallName(id.Name) {
 				args, err := vm.evalBuiltinArgs(id.Name, ex, env)
 				if err != nil {
@@ -1162,7 +1223,11 @@ type controlFlow struct {
 // i` still declares x into this block, not some scope of Loop's own (labels
 // aren't scopes) — so it unwraps through unwrapLabel first.
 func blockNeedsOwnScope(block *ast.BlockStmt) bool {
-	for _, s := range block.List {
+	return stmtListNeedsOwnScope(block.List)
+}
+
+func stmtListNeedsOwnScope(stmts []ast.Stmt) bool {
+	for _, s := range stmts {
 		switch s := unwrapLabel(s).(type) {
 		case *ast.AssignStmt:
 			if s.Tok == token.DEFINE {
@@ -1173,6 +1238,21 @@ func blockNeedsOwnScope(block *ast.BlockStmt) bool {
 		}
 	}
 	return false
+}
+
+// evalSwitchCaseBody avoids allocating a synthetic *ast.BlockStmt for every
+// selected case in the normal no-hook path. The helper reproduces BlockStmt's
+// scope behavior exactly; active statement hooks retain the old AST route so
+// debugger and line-profile observations remain unchanged.
+func (vm *Interpreter) evalSwitchCaseBody(stmts []ast.Stmt, env *Env) (controlFlow, error) {
+	if vm.stmtHooks.Load() {
+		return vm.evalStmt(&ast.BlockStmt{List: stmts}, env)
+	}
+	local := env
+	if stmtListNeedsOwnScope(stmts) {
+		local = NewEnv(env)
+	}
+	return vm.execStmtList(stmts, local)
 }
 
 // unwrapLabel peels off any (possibly stacked) *ast.LabeledStmt wrappers
@@ -2018,8 +2098,12 @@ func (vm *Interpreter) evalSimpleCountedFor(st *ast.ForStmt, local *Env, label s
 // enclosing loop bearing that label can act on it — see the package
 // comment on controlFlow.label.
 func (vm *Interpreter) evalForStmt(st *ast.ForStmt, env *Env, label string) (controlFlow, error) {
-	local := NewEnv(env)
+	// The loop's implicit scope is only observable when it owns an init
+	// binding. Without Init, the body already creates a child scope whenever
+	// it needs one, so reusing env avoids one Env allocation per loop entry.
+	local := env
 	if st.Init != nil {
+		local = NewEnv(env)
 		if _, err := vm.evalStmt(st.Init, local); err != nil {
 			return controlFlow{}, err
 		}
@@ -2205,8 +2289,12 @@ func (vm *Interpreter) bindRangeValue(binding rangeBinding, value any, env *Env,
 // evalSwitchStmt evaluates a (possibly labeled) switch statement; only
 // break (not continue) can target a switch's own label, matching Go.
 func (vm *Interpreter) evalSwitchStmt(st *ast.SwitchStmt, env *Env, label string) (controlFlow, error) {
-	local := NewEnv(env)
+	// As with for, an initializer is the only reason the switch itself needs
+	// an implicit scope. Case bodies receive their own scope when they declare
+	// values, so an init-free switch can use its caller env directly.
+	local := env
 	if st.Init != nil {
+		local = NewEnv(env)
 		if _, err := vm.evalStmt(st.Init, local); err != nil {
 			return controlFlow{}, err
 		}
@@ -2245,7 +2333,7 @@ func (vm *Interpreter) evalSwitchStmt(st *ast.SwitchStmt, env *Env, label string
 			}
 		}
 
-		c, err := vm.evalStmt(&ast.BlockStmt{List: cc.Body}, local)
+		c, err := vm.evalSwitchCaseBody(cc.Body, local)
 		if err != nil {
 			return controlFlow{}, err
 		}
@@ -2271,7 +2359,7 @@ func (vm *Interpreter) evalSwitchStmt(st *ast.SwitchStmt, env *Env, label string
 		}
 	}
 	if !matched && defaultIndex >= 0 {
-		c, err := vm.evalStmt(&ast.BlockStmt{List: st.Body.List[defaultIndex].(*ast.CaseClause).Body}, local)
+		c, err := vm.evalSwitchCaseBody(st.Body.List[defaultIndex].(*ast.CaseClause).Body, local)
 		if err != nil {
 			return controlFlow{}, err
 		}
