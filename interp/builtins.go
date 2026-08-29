@@ -170,17 +170,23 @@ func coerceToType(val any, typ string) any {
 // --------------- Builtins -----------------------
 
 func (vm *Interpreter) builtinMake(typ string, args []any) (any, error) {
+	length, capacity := 0, 0
+	if len(args) > 0 {
+		length = ToInt(args[0])
+	}
+	if len(args) > 1 {
+		capacity = ToInt(args[1])
+	}
+	return vm.builtinMakeSizes(typ, length, capacity, len(args))
+}
+
+// builtinMakeSizes is the allocation-free argument form used by direct make
+// calls. builtinMake above retains the []any API needed by deferred/go
+// builtins, while ordinary guest make calls avoid constructing that slice.
+func (vm *Interpreter) builtinMakeSizes(typ string, length, capacity, argc int) (any, error) {
 	// Slices: make([]T, len[, cap])
 	if strings.HasPrefix(typ, "[]") {
 		elem := typ[2:]
-		length := 0
-		capacity := 0
-		if len(args) >= 1 {
-			length = ToInt(args[0])
-		}
-		if len(args) >= 2 {
-			capacity = ToInt(args[1])
-		}
 		if length < 0 || capacity < 0 {
 			return nil, NewRuntimeError("make: negative size")
 		}
@@ -198,29 +204,25 @@ func (vm *Interpreter) builtinMake(typ string, args []any) (any, error) {
 	}
 	// Maps: make(map[K]V)
 	if strings.HasPrefix(typ, "map[") {
-		if len(args) >= 1 && (ToInt(args[0]) < 0 || ToInt(args[0]) > vm.maxContainerSize()) {
+		if argc >= 1 && (length < 0 || length > vm.maxContainerSize()) {
 			return nil, NewRuntimeError("make: size exceeds interpreter limit")
 		}
 		k, v := parseMapType(typ)
-		return &MapVal{KeyType: k, ElementType: v, Data: map[string]any{}, Keys: map[string]any{}}, nil
+		return &MapVal{KeyType: k, ElementType: v, Data: make(map[string]any, length), Keys: make(map[string]any, length)}, nil
 	}
 	// Channels: make(chan T[, cap])
 	if strings.HasPrefix(typ, "chan ") {
 		elem := strings.TrimSpace(typ[5:])
-		cap := 0
-		if len(args) >= 1 {
-			cap = ToInt(args[0])
-		}
-		if cap < 0 {
+		if length < 0 {
 			return nil, NewRuntimeError("make: negative size")
 		}
-		if cap > vm.maxContainerSize() {
+		if length > vm.maxContainerSize() {
 			return nil, NewRuntimeError("make: size exceeds interpreter limit")
 		}
-		if cap == 0 {
+		if length == 0 {
 			return &ChannelVal{ElementType: elem, C: make(chan any)}, nil
 		}
-		return &ChannelVal{ElementType: elem, C: make(chan any, cap)}, nil
+		return &ChannelVal{ElementType: elem, C: make(chan any, length)}, nil
 	}
 	return nil, NewRuntimeError("make: unsupported type")
 }
@@ -350,6 +352,26 @@ func (c *ChannelVal) Send(ctx context.Context, value any) (err error) {
 	case <-ctxDone:
 		return contextError(ctx)
 	}
+}
+
+// sendChannel is the evaluator-only fast path for an ordinary guest channel
+// while exactly one guest goroutine exists. No other guest or host can close
+// such a channel concurrently, so the defensive recover wrapper in Send is
+// unnecessary. Public and host callers continue to use Send's race-safe path.
+func (vm *Interpreter) sendChannel(c *ChannelVal, value any) error {
+	if c != nil && !c.hostOwned && c.done == nil {
+		if exec := vm.activeExecution; exec != nil && !exec.concurrent.Load() && exec.ctx.Done() == nil {
+			if c.direction == channelReceiveOnly {
+				return NewRuntimeError("send on receive-only host channel")
+			}
+			if c.closed.Load() {
+				return &panicError{value: "send on closed channel"}
+			}
+			c.C <- value
+			return nil
+		}
+	}
+	return c.Send(vm.Context(), value)
 }
 
 func (c *ChannelVal) Receive(ctx context.Context) (value any, open bool, err error) {

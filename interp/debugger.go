@@ -78,8 +78,21 @@ type DebugLogInfo struct {
 }
 
 type debugBreakpoint struct {
-	cond    ast.Expr
-	condSrc string
+	cond      ast.Expr
+	condSrc   string
+	temporary bool
+	hitTarget uint64
+	hits      uint64
+}
+
+// DebugBreakpointInfo is a host-facing snapshot of one configured
+// breakpoint. HitTarget is zero for an ordinary breakpoint; temporary and
+// hit-count breakpoints remove themselves after their first pause.
+type DebugBreakpointInfo struct {
+	Condition string `json:"condition,omitempty"`
+	Temporary bool   `json:"temporary,omitempty"`
+	HitTarget uint64 `json:"hitTarget,omitempty"`
+	Hits      uint64 `json:"hits,omitempty"`
 }
 
 type debugLogpoint struct {
@@ -217,30 +230,69 @@ func (dc *DebugController) SetBreakpoints(lines []int) {
 	dc.bpMu.Unlock()
 }
 
+func parseDebugCondition(operation, expr string) (ast.Expr, string, error) {
+	if expr == "" {
+		return nil, "", nil
+	}
+	cond, err := parser.ParseExpr(expr)
+	if err != nil {
+		return nil, "", fmt.Errorf("nanogo: invalid %s condition: %w", operation, err)
+	}
+	return cond, expr, nil
+}
+
+func (dc *DebugController) setBreakpoint(line int, breakpoint debugBreakpoint) error {
+	if dc == nil {
+		return NewRuntimeError("nanogo: nil debug controller")
+	}
+	if line <= 0 {
+		return NewRuntimeError("debug breakpoint: line must be positive")
+	}
+	dc.bpMu.Lock()
+	if dc.breakpoints == nil {
+		dc.breakpoints = make(map[int]debugBreakpoint)
+	}
+	dc.breakpoints[line] = breakpoint
+	dc.bpMu.Unlock()
+	return nil
+}
+
 // SetConditionalBreakpoint arms a breakpoint at line that only pauses when
 // expr — a single Go expression evaluated in the paused statement's own
 // scope — is truthy. An empty expr clears the condition (equivalent to a
 // plain breakpoint at that line); a parse error is returned immediately
 // without changing the existing breakpoint set.
 func (dc *DebugController) SetConditionalBreakpoint(line int, expr string) error {
-	if line <= 0 {
-		return NewRuntimeError("SetConditionalBreakpoint: line must be positive")
+	cond, source, err := parseDebugCondition("breakpoint", expr)
+	if err != nil {
+		return err
 	}
-	bp := debugBreakpoint{}
-	if expr != "" {
-		cond, err := parser.ParseExpr(expr)
-		if err != nil {
-			return fmt.Errorf("nanogo: invalid breakpoint condition: %w", err)
-		}
-		bp.cond, bp.condSrc = cond, expr
+	return dc.setBreakpoint(line, debugBreakpoint{cond: cond, condSrc: source})
+}
+
+// SetTemporaryBreakpoint arms a breakpoint that removes itself immediately
+// after it pauses once. An optional condition must be truthy for that one
+// pause; passing an empty condition creates a plain temporary breakpoint.
+func (dc *DebugController) SetTemporaryBreakpoint(line int, expr string) error {
+	cond, source, err := parseDebugCondition("temporary breakpoint", expr)
+	if err != nil {
+		return err
 	}
-	dc.bpMu.Lock()
-	if dc.breakpoints == nil {
-		dc.breakpoints = make(map[int]debugBreakpoint)
+	return dc.setBreakpoint(line, debugBreakpoint{cond: cond, condSrc: source, temporary: true})
+}
+
+// SetHitBreakpoint arms a breakpoint that pauses once after count matching
+// visits to line, then removes itself. The optional condition is evaluated at
+// each visit and only truthy visits contribute to the count.
+func (dc *DebugController) SetHitBreakpoint(line int, count uint64, expr string) error {
+	if count == 0 {
+		return NewRuntimeError("SetHitBreakpoint: count must be positive")
 	}
-	dc.breakpoints[line] = bp
-	dc.bpMu.Unlock()
-	return nil
+	cond, source, err := parseDebugCondition("hit breakpoint", expr)
+	if err != nil {
+		return err
+	}
+	return dc.setBreakpoint(line, debugBreakpoint{cond: cond, condSrc: source, temporary: true, hitTarget: count})
 }
 
 // ClearBreakpoints removes every configured breakpoint (plain or
@@ -248,6 +300,16 @@ func (dc *DebugController) SetConditionalBreakpoint(line int, expr string) error
 func (dc *DebugController) ClearBreakpoints() {
 	dc.bpMu.Lock()
 	dc.breakpoints = make(map[int]debugBreakpoint)
+	dc.bpMu.Unlock()
+}
+
+// ClearBreakpoint removes the breakpoint at line, if any.
+func (dc *DebugController) ClearBreakpoint(line int) {
+	if dc == nil {
+		return
+	}
+	dc.bpMu.Lock()
+	delete(dc.breakpoints, line)
 	dc.bpMu.Unlock()
 }
 
@@ -263,11 +325,57 @@ func (dc *DebugController) Breakpoints() map[int]string {
 	return out
 }
 
+// BreakpointDetails returns configuration and current hit counts for all
+// breakpoints. The returned map is independent of the active session.
+func (dc *DebugController) BreakpointDetails() map[int]DebugBreakpointInfo {
+	if dc == nil {
+		return nil
+	}
+	dc.bpMu.RLock()
+	defer dc.bpMu.RUnlock()
+	out := make(map[int]DebugBreakpointInfo, len(dc.breakpoints))
+	for line, bp := range dc.breakpoints {
+		out[line] = DebugBreakpointInfo{
+			Condition: bp.condSrc,
+			Temporary: bp.temporary,
+			HitTarget: bp.hitTarget,
+			Hits:      bp.hits,
+		}
+	}
+	return out
+}
+
 func (dc *DebugController) breakpointAt(line int) (debugBreakpoint, bool) {
 	dc.bpMu.RLock()
 	bp, ok := dc.breakpoints[line]
 	dc.bpMu.RUnlock()
 	return bp, ok
+}
+
+// recordBreakpointHit advances the breakpoint's matching-hit counter and
+// reports whether it should pause now. It runs after a conditional expression
+// has evaluated truthy, keeping condition evaluation outside bpMu and avoiding
+// lock recursion if a condition calls guest code.
+func (dc *DebugController) recordBreakpointHit(line int) bool {
+	dc.bpMu.Lock()
+	bp, ok := dc.breakpoints[line]
+	if !ok {
+		dc.bpMu.Unlock()
+		return false
+	}
+	bp.hits++
+	if bp.hitTarget > 0 && bp.hits < bp.hitTarget {
+		dc.breakpoints[line] = bp
+		dc.bpMu.Unlock()
+		return false
+	}
+	if bp.temporary || bp.hitTarget > 0 {
+		delete(dc.breakpoints, line)
+	} else {
+		dc.breakpoints[line] = bp
+	}
+	dc.bpMu.Unlock()
+	return true
 }
 
 // SetLogpoint configures an expression sample at line. Unlike a breakpoint,
@@ -680,9 +788,13 @@ func (dc *DebugController) checkpoint(vm *Interpreter, s ast.Stmt, env *Env) err
 		reason = "pause"
 	default:
 		if bp, ok := dc.breakpointAt(loc.Line); ok {
-			if bp.cond == nil {
-				reason = "breakpoint"
-			} else if v, err := vm.evalExpr(bp.cond, env); err == nil && ToBool(v) {
+			matches := bp.cond == nil
+			if !matches {
+				if v, err := vm.evalExpr(bp.cond, env); err == nil {
+					matches = ToBool(v)
+				}
+			}
+			if matches && dc.recordBreakpointHit(loc.Line) {
 				reason = "breakpoint"
 			}
 		}

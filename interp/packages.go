@@ -108,19 +108,21 @@ func registerFmtPackage(vm *Interpreter) {
 	// --- fmt ---
 	fmtPkg := &Package{Name: "fmt", Funcs: map[string]*Function{}}
 	fmtPkg.Funcs["Println"] = &Function{Name: "Println", IsVariadic: true, Native: func(args []any) (any, error) {
-		// Join with spaces + newline
-		out := ""
+		// Join with spaces. A Builder avoids the quadratic copying caused by
+		// repeated string concatenation in wide log/diagnostic lines.
+		var out strlib.Builder
 		for i, a := range args {
 			if i > 0 {
-				out += " "
+				out.WriteByte(' ')
 			}
-			out += ToString(a)
+			out.WriteString(ToString(a))
 		}
+		message := out.String()
 		// Reuse ConsoleLog via host
 		if nfun, ok := vm.natives["ConsoleLog"]; ok {
-			_, _ = nfun([]any{out})
+			_, _ = nfun([]any{message})
 		}
-		return len(out), nil
+		return len(message), nil
 	}}
 	fmtPkg.Funcs["Printf"] = &Function{Name: "Printf", IsVariadic: true, Native: func(args []any) (any, error) {
 		if len(args) == 0 {
@@ -895,11 +897,12 @@ func registerHTTPPackage(vm *Interpreter) {
 		if len(args) == 0 {
 			return "", NewRuntimeError("http.GetText: missing URL")
 		}
-		if err := vm.requireHTTP(ToString(args[0])); err != nil {
+		rawURL := ToString(args[0])
+		if err := vm.requireHTTP(rawURL); err != nil {
 			return "", err
 		}
 		if n, ok := vm.hostNative("HTTPGetText"); ok {
-			v, err := n([]any{ToString(args[0])})
+			v, err := n([]any{rawURL})
 			return v, err
 		}
 		return "", NewRuntimeError("HTTP host native not available")
@@ -910,7 +913,8 @@ func registerHTTPPackage(vm *Interpreter) {
 		if len(args) < 2 {
 			return "", NewRuntimeError("http.PostText: missing URL or body")
 		}
-		if err := vm.requireHTTP(ToString(args[0])); err != nil {
+		rawURL := ToString(args[0])
+		if err := vm.requireHTTP(rawURL); err != nil {
 			return "", err
 		}
 		contentType := "application/json"
@@ -918,7 +922,7 @@ func registerHTTPPackage(vm *Interpreter) {
 			contentType = ToString(args[2])
 		}
 		if n, ok := vm.hostNative("HTTPPostText"); ok {
-			v, err := n([]any{ToString(args[0]), ToString(args[1]), contentType})
+			v, err := n([]any{rawURL, ToString(args[1]), contentType})
 			return v, err
 		}
 		return "", NewRuntimeError("HTTP host native not available")

@@ -1236,7 +1236,9 @@ few deployment tweaks can improve cold-load time:
 ### 1. Serve pre-compressed WASM
 
 `make build-wasm-compressed` produces `web/nanogo.wasm.gz` and (if `brotli` is
-installed) `web/nanogo.wasm.br`. Typical sizes:
+installed) `web/nanogo.wasm.br`. It defaults to compression level 6 for much
+faster local and CI builds; releases can opt into maximum compression with
+`GZIP_LEVEL=9 BROTLI_QUALITY=11`. Typical maximum-compression sizes:
 
 | Encoding     | Size          |
 |--------------|---------------|

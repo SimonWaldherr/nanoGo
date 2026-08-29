@@ -385,23 +385,10 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		}
 
 	case *ast.BinaryExpr:
-		// Keep pure integer arithmetic out of interface{} until the result
-		// crosses an actual dynamic-value boundary. The regular evaluator
-		// returns an any for every AST node, which makes large integer
-		// intermediates escape to the heap. Tight counter/arithmetic loops are
-		// therefore allocation-heavy even though all their intermediate values
-		// are plain ints. This path preserves the normal checkpoint cadence (one
-		// per AST node) and falls back before evaluating anything effectful when
-		// an expression is not statically an integer expression.
-		if n, ok, err := vm.tryEvalIntExpr(ex, env, false); err != nil {
-			return nil, err
-		} else if ok {
-			return n, nil
-		}
-
-		// Integer comparisons are similarly common loop conditions. Evaluating
-		// both operands as ints avoids boxing large literal bounds (for example
-		// i < 100000) on every iteration.
+		// Comparisons cannot be handled by the arithmetic-only path below.
+		// Check them first: loop conditions such as `i < limit` occur on every
+		// iteration, and previously paid for one guaranteed-to-fail
+		// tryEvalIntExpr call before reaching this fast path.
 		if isIntComparison(ex.Op) {
 			left, leftOK, err := vm.tryEvalIntExpr(ex.X, env, true)
 			if err != nil {
@@ -431,6 +418,20 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			}
 		}
 
+		// Keep pure integer arithmetic out of interface{} until the result
+		// crosses an actual dynamic-value boundary. The regular evaluator
+		// returns an any for every AST node, which makes large integer
+		// intermediates escape to the heap. Tight counter/arithmetic loops are
+		// therefore allocation-heavy even though all their intermediate values
+		// are plain ints. This path preserves the normal checkpoint cadence (one
+		// per AST node) and falls back before evaluating anything effectful when
+		// an expression is not statically an integer expression.
+		if n, ok, err := vm.tryEvalIntExpr(ex, env, false); err != nil {
+			return nil, err
+		} else if ok {
+			return n, nil
+		}
+
 		l, err := vm.evalExpr(ex.X, env)
 		if err != nil {
 			return nil, err
@@ -444,29 +445,29 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 	case *ast.CallExpr:
 		// Builtins: make, len, cap, append, copy, close, delete, panic
 		if id, ok := ex.Fun.(*ast.Ident); ok {
+			// recover is frame-sensitive and has no arguments. Handle it before
+			// the generic builtin-name dispatch, keeping the normal no-panic path
+			// to a few pointer checks.
+			if id.Name == "recover" {
+				if cur := env.frame; cur != nil {
+					if caller := cur.caller; caller != nil && caller.panicking {
+						v := caller.panicVal
+						caller.panicking = false
+						caller.panicVal = nil
+						return v, nil
+					}
+				}
+				return nil, nil
+			}
+			if id.Name == "make" {
+				return vm.evalMakeCall(ex, env)
+			}
 			if isBuiltinCallName(id.Name) {
 				args, err := vm.evalBuiltinArgs(id.Name, ex, env)
 				if err != nil {
 					return nil, err
 				}
 				return vm.applyBuiltin(id.Name, args)
-			}
-			switch id.Name {
-			case "recover":
-				// Matches Go's "recover must be called directly by a
-				// deferred function": env.frame.caller is only the
-				// panicking frame when THIS call is itself running as one
-				// of that frame's deferred calls (see callFunction and the
-				// DeferStmt case) — a helper function called from within
-				// the deferred function has its own, non-panicking caller,
-				// so recover() there correctly sees nothing to recover.
-				if cur := env.frame; cur != nil && cur.caller != nil && cur.caller.panicking {
-					v := cur.caller.panicVal
-					cur.caller.panicking = false
-					cur.caller.panicVal = nil
-					return v, nil
-				}
-				return nil, nil
 			}
 		}
 
@@ -865,6 +866,31 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 	}
 }
 
+// evalMakeCall is the direct-call counterpart of evalBuiltinArgs("make").
+// It preserves argument evaluation order (including ignored extra arguments)
+// but passes scalar sizes directly to builtinMakeSizes, avoiding a temporary
+// []any for every slice, map, and channel allocation in guest code.
+func (vm *Interpreter) evalMakeCall(call *ast.CallExpr, env *Env) (any, error) {
+	if len(call.Args) == 0 {
+		return nil, NewRuntimeError("make: missing type")
+	}
+	typ := typeString(call.Args[0])
+	length, capacity := 0, 0
+	for i, arg := range call.Args[1:] {
+		value, err := vm.evalExpr(arg, env)
+		if err != nil {
+			return nil, err
+		}
+		switch i {
+		case 0:
+			length = ToInt(value)
+		case 1:
+			capacity = ToInt(value)
+		}
+	}
+	return vm.builtinMakeSizes(typ, length, capacity, len(call.Args)-1)
+}
+
 // tryEvalIntExpr evaluates the integer-only subset without allocating an any
 // result for every intermediate expression. handled is false when evaluating
 // the expression through the ordinary dynamic evaluator is necessary.
@@ -1013,10 +1039,6 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 			return left * right, true, nil
 		case token.REM:
 			if right == 0 {
-				// A recoverable Go runtime panic, like applyBinaryOp's QUO/REM
-				// cases below — no attachRuntimeErrorLocation call here since
-				// *panicError carries no source location, matching every
-				// other guest panic (a plain panic("msg") has none either).
 				return 0, true, &panicError{value: "runtime error: integer divide by zero"}
 			}
 			return left % right, true, nil
@@ -1044,6 +1066,17 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 // bases, separators, leading-zero literals, and overflow diagnostics.
 func parseFastDecimalInt(s string) (int, bool) {
 	if len(s) == 0 || (len(s) > 1 && s[0] == '0') {
+		return 0, false
+	}
+	// Loop counters, offsets, and boolean-like integer values dominate guest
+	// arithmetic. A one-digit literal is by far the common case (`0`, `1`,
+	// `2`), and avoiding the generic overflow-aware digit loop here removes
+	// several branches from every visit to that AST node.
+	if len(s) == 1 {
+		digit := s[0] - '0'
+		if digit <= 9 {
+			return int(digit), true
+		}
 		return 0, false
 	}
 	// cutoff/cutoffLast split the overflow test into constants the compiler
@@ -1169,13 +1202,17 @@ func unwrapLabel(s ast.Stmt) ast.Stmt {
 // pays nothing beyond the plain sequential loop it already needed.
 func (vm *Interpreter) execStmtList(stmts []ast.Stmt, env *Env) (controlFlow, error) {
 	i := 0
+	var targets map[string]gotoTarget
 	for i < len(stmts) {
 		c, err := vm.evalStmt(stmts[i], env)
 		if err != nil {
 			return controlFlow{}, err
 		}
 		if c.kind == controlGoto {
-			if idx, ok := findLabel(stmts, c.label); ok {
+			if targets == nil {
+				targets = buildGotoTargets(stmts)
+			}
+			if target, ok := targets[c.label]; ok {
 				// The restarted region (from the label to wherever
 				// execution goes next, so conservatively everything from
 				// here to the end of this list) reuses env rather than
@@ -1184,10 +1221,10 @@ func (vm *Interpreter) execStmtList(stmts []ast.Stmt, env *Env) (controlFlow, er
 				// redeclares via := or var/const must first forget its
 				// previous binding, or validateShortDecl sees it as
 				// already bound and rejects the legitimate redeclaration.
-				for _, name := range declaredNames(stmts[idx:]) {
+				for _, name := range target.declared {
 					vm.undeclare(name, env)
 				}
-				i = idx
+				i = target.index
 				continue
 			}
 			return c, nil
@@ -1199,6 +1236,27 @@ func (vm *Interpreter) execStmtList(stmts []ast.Stmt, env *Env) (controlFlow, er
 		i++
 	}
 	return controlFlow{}, nil
+}
+
+type gotoTarget struct {
+	index    int
+	declared []string
+}
+
+// buildGotoTargets performs the label search and redeclaration scan once per
+// executing statement list, and only after that list has actually seen a
+// goto. Backward goto loops then use O(1) target lookups rather than scanning
+// their whole function body every iteration.
+func buildGotoTargets(stmts []ast.Stmt) map[string]gotoTarget {
+	targets := make(map[string]gotoTarget)
+	for i, stmt := range stmts {
+		label, ok := stmt.(*ast.LabeledStmt)
+		if !ok {
+			continue
+		}
+		targets[label.Label.Name] = gotoTarget{index: i, declared: declaredNames(stmts[i:])}
+	}
+	return targets
 }
 
 // declaredNames collects the names that stmts would bind directly via :=
@@ -1330,7 +1388,7 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		if !ok || ch == nil {
 			return controlFlow{}, NewRuntimeError("send on non-channel")
 		}
-		return controlFlow{}, ch.Send(vm.Context(), val)
+		return controlFlow{}, vm.sendChannel(ch, val)
 
 	case *ast.AssignStmt:
 		// Go's short declaration reuses names already present in the current
@@ -1847,6 +1905,112 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 	}
 }
 
+// simpleCountedFor identifies the tight loop-control shape
+// `for i := ...; i < literal; i++`. It deliberately accepts only a compact
+// top-level assignment/inc-dec body: that is the common accumulator form and
+// makes eligibility allocation-free while ruling out calls, nested control
+// flow, and hidden writes that could invalidate the direct counter slot.
+func simpleCountedFor(st *ast.ForStmt) (name string, limit int, ok bool) {
+	init, ok := st.Init.(*ast.AssignStmt)
+	if !ok || init.Tok != token.DEFINE || len(init.Lhs) != 1 || len(init.Rhs) != 1 {
+		return "", 0, false
+	}
+	id, ok := init.Lhs[0].(*ast.Ident)
+	if !ok || id.Name == "_" {
+		return "", 0, false
+	}
+	cond, ok := st.Cond.(*ast.BinaryExpr)
+	if !ok || cond.Op != token.LSS {
+		return "", 0, false
+	}
+	condID, ok := cond.X.(*ast.Ident)
+	if !ok || condID.Name != id.Name {
+		return "", 0, false
+	}
+	bound, ok := cond.Y.(*ast.BasicLit)
+	if !ok || bound.Kind != token.INT {
+		return "", 0, false
+	}
+	limit, ok = parseFastDecimalInt(bound.Value)
+	if !ok {
+		return "", 0, false
+	}
+	post, ok := st.Post.(*ast.IncDecStmt)
+	if !ok || post.Tok != token.INC {
+		return "", 0, false
+	}
+	postID, ok := post.X.(*ast.Ident)
+	if !ok || postID.Name != id.Name {
+		return "", 0, false
+	}
+
+	for _, bodyStmt := range st.Body.List {
+		switch body := bodyStmt.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range body.Lhs {
+				if target, ok := lhs.(*ast.Ident); ok && target.Name == id.Name {
+					return "", 0, false
+				}
+			}
+		case *ast.IncDecStmt:
+			if target, ok := body.X.(*ast.Ident); ok && target.Name == id.Name {
+				return "", 0, false
+			}
+		default:
+			return "", 0, false
+		}
+	}
+	return id.Name, limit, true
+}
+
+// evalSimpleCountedFor executes simpleCountedFor's fixed loop-control AST
+// directly. The three condition nodes and one post statement are still
+// charged exactly, so limits, cancellation behavior, and LastStepCount stay
+// byte-for-byte compatible with the general evaluator.
+func (vm *Interpreter) evalSimpleCountedFor(st *ast.ForStmt, local *Env, label string) (controlFlow, bool, error) {
+	name, limit, ok := simpleCountedFor(st)
+	if !ok || vm.stmtHooks.Load() || vm.trackingVariables() {
+		return controlFlow{}, false, nil
+	}
+	exec := vm.activeExecution
+	if exec == nil || exec.concurrent.Load() || local.inlineIntVar.name != name {
+		return controlFlow{}, false, nil
+	}
+	for {
+		counter := local.inlineIntVar.val
+		if counter >= limit {
+			if err := vm.executionErrors(3); err != nil {
+				return controlFlow{}, true, err
+			}
+			return controlFlow{}, true, nil
+		}
+		if err := vm.executionErrors(3); err != nil {
+			return controlFlow{}, true, err
+		}
+		c, err := vm.evalStmt(st.Body, local)
+		if err != nil {
+			return controlFlow{}, true, err
+		}
+		switch c.kind {
+		case controlBreak:
+			if c.label == "" || c.label == label {
+				return controlFlow{}, true, nil
+			}
+			return c, true, nil
+		case controlReturn, controlGoto:
+			return c, true, nil
+		case controlContinue:
+			if c.label != "" && c.label != label {
+				return c, true, nil
+			}
+		}
+		if err := vm.executionErrors(1); err != nil {
+			return controlFlow{}, true, err
+		}
+		local.inlineIntVar.val++
+	}
+}
+
 // evalForStmt evaluates a (possibly labeled) for statement. label is ""
 // when the loop has no label. A labeled break/continue whose label doesn't
 // match this loop's own must not be treated as targeting it: the loop
@@ -1859,6 +2023,9 @@ func (vm *Interpreter) evalForStmt(st *ast.ForStmt, env *Env, label string) (con
 		if _, err := vm.evalStmt(st.Init, local); err != nil {
 			return controlFlow{}, err
 		}
+	}
+	if c, handled, err := vm.evalSimpleCountedFor(st, local, label); handled {
+		return c, err
 	}
 	for {
 		cond := true
@@ -1907,6 +2074,9 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 	if err != nil {
 		return controlFlow{}, err
 	}
+	keyBinding := makeRangeBinding(st.Key)
+	valueBinding := makeRangeBinding(st.Value)
+	trackVariables := vm.trackingVariables()
 	// handleBody runs the loop body and translates its controlFlow into what
 	// the range loop over any of the container kinds below should do:
 	// "stop=true" means the whole range statement is done evaluating (its
@@ -1934,22 +2104,8 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 	switch s := x.(type) {
 	case *SliceVal:
 		for i := 0; i < len(s.Data); i++ {
-			if st.Key != nil {
-				if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
-					vm.set(id.Name, i, local)
-					if vm.trackingVariables() {
-						vm.recordVariable(id.Name, i, id, local)
-					}
-				}
-			}
-			if st.Value != nil {
-				if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" {
-					vm.set(id.Name, s.Data[i], local)
-					if vm.trackingVariables() {
-						vm.recordVariable(id.Name, s.Data[i], id, local)
-					}
-				}
-			}
+			vm.bindRangeInt(keyBinding, i, local, trackVariables)
+			vm.bindRangeValue(valueBinding, s.Data[i], local, trackVariables)
 			if c, err, stop := handleBody(st.Body); stop {
 				return c, err
 			}
@@ -1957,22 +2113,8 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 	case *MapVal:
 		for hk, key := range s.Keys {
 			val := s.Data[hk]
-			if st.Key != nil {
-				if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
-					vm.set(id.Name, key, local)
-					if vm.trackingVariables() {
-						vm.recordVariable(id.Name, key, id, local)
-					}
-				}
-			}
-			if st.Value != nil {
-				if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" {
-					vm.set(id.Name, val, local)
-					if vm.trackingVariables() {
-						vm.recordVariable(id.Name, val, id, local)
-					}
-				}
-			}
+			vm.bindRangeValue(keyBinding, key, local, trackVariables)
+			vm.bindRangeValue(valueBinding, val, local, trackVariables)
 			if c, err, stop := handleBody(st.Body); stop {
 				return c, err
 			}
@@ -1982,22 +2124,8 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 		// by individual bytes. This matters for the Unicode-heavy display
 		// and serial protocols commonly used by TinyGo targets as well.
 		for i, r := range s {
-			if st.Key != nil {
-				if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
-					vm.set(id.Name, i, local)
-					if vm.trackingVariables() {
-						vm.recordVariable(id.Name, i, id, local)
-					}
-				}
-			}
-			if st.Value != nil {
-				if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" {
-					vm.set(id.Name, int(r), local)
-					if vm.trackingVariables() {
-						vm.recordVariable(id.Name, int(r), id, local)
-					}
-				}
-			}
+			vm.bindRangeInt(keyBinding, i, local, trackVariables)
+			vm.bindRangeInt(valueBinding, int(r), local, trackVariables)
 			if c, err, stop := handleBody(st.Body); stop {
 				return c, err
 			}
@@ -2006,14 +2134,7 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 		// Go 1.22 added `for i := range n`. It is a compact, allocation-free
 		// loop form that maps well to firmware-style TinyGo code.
 		for i := 0; i < s; i++ {
-			if st.Key != nil {
-				if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
-					vm.set(id.Name, i, local)
-					if vm.trackingVariables() {
-						vm.recordVariable(id.Name, i, id, local)
-					}
-				}
-			}
+			vm.bindRangeInt(keyBinding, i, local, trackVariables)
 			if c, err, stop := handleBody(st.Body); stop {
 				return c, err
 			}
@@ -2027,14 +2148,7 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 			if !open {
 				break
 			}
-			if st.Key != nil {
-				if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" {
-					vm.set(id.Name, v, local)
-					if vm.trackingVariables() {
-						vm.recordVariable(id.Name, v, id, local)
-					}
-				}
-			}
+			vm.bindRangeValue(keyBinding, v, local, trackVariables)
 			if c, err, stop := handleBody(st.Body); stop {
 				return c, err
 			}
@@ -2043,6 +2157,49 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 		return controlFlow{}, NewRuntimeError("range over unsupported type")
 	}
 	return controlFlow{}, nil
+}
+
+type rangeBinding struct {
+	name string
+	id   *ast.Ident
+}
+
+func makeRangeBinding(expr ast.Expr) rangeBinding {
+	id, ok := expr.(*ast.Ident)
+	if !ok || id.Name == "_" {
+		return rangeBinding{}
+	}
+	return rangeBinding{name: id.Name, id: id}
+}
+
+// bindRangeInt avoids the per-iteration AST assertion and tracker lookup for
+// common index/rune bindings, and preserves the inline integer Env slot.
+func (vm *Interpreter) bindRangeInt(binding rangeBinding, value int, env *Env, track bool) {
+	if binding.name == "" {
+		return
+	}
+	if !vm.setInt(binding.name, value, env) {
+		vm.set(binding.name, value, env)
+	}
+	if track {
+		vm.recordVariable(binding.name, value, binding.id, env)
+	}
+}
+
+func (vm *Interpreter) bindRangeValue(binding rangeBinding, value any, env *Env, track bool) {
+	if binding.name == "" {
+		return
+	}
+	if n, ok := value.(int); ok && vm.setInt(binding.name, n, env) {
+		if track {
+			vm.recordVariable(binding.name, n, binding.id, env)
+		}
+		return
+	}
+	vm.set(binding.name, value, env)
+	if track {
+		vm.recordVariable(binding.name, value, binding.id, env)
+	}
 }
 
 // evalSwitchStmt evaluates a (possibly labeled) switch statement; only
@@ -2398,7 +2555,7 @@ func (vm *Interpreter) evalSingleSelectClause(cc *ast.CommClause, env *Env, labe
 		if channelDone(ch.done) {
 			return controlFlow{}, true, NewRuntimeError("send on closed host channel")
 		}
-		if err := ch.Send(vm.Context(), val); err != nil {
+		if err := vm.sendChannel(ch, val); err != nil {
 			return controlFlow{}, true, err
 		}
 	default:

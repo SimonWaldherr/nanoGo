@@ -144,16 +144,46 @@ func (e *execution) err() error {
 const stepBlock = 256
 
 func (e *execution) checkpoint() error {
+	if e.stepsLeft > 0 {
+		e.stepsLeft--
+		return nil
+	}
+	// In the single-goroutine fast path, stepsLeft is an execution-local
+	// countdown. Its zero transition already happens at least once per
+	// stepBlock, so use it as the cancellation poll point too. Reading the
+	// stopped atomic on every AST node showed up prominently in CPU profiles;
+	// batching it here removes 255/256 of those loads while keeping step-limit
+	// accounting exact. Concurrent executions never retain a block and thus
+	// continue to poll on every checkpoint.
 	if e.stopped.Load() {
 		if err := e.err(); err != nil {
 			return err
 		}
 	}
-	if e.stepsLeft > 0 {
-		e.stepsLeft--
-		return nil
-	}
 	return e.chargeStep()
+}
+
+// checkpoints charges n adjacent evaluator nodes. It is equivalent to n
+// checkpoint calls, including exact MaxSteps behavior, but takes one local
+// fast path when a simple AST shape can account for several nodes at once.
+// The counted-for loop specialization uses it for its fixed three-node
+// condition (binary expression, identifier, literal).
+func (e *execution) checkpoints(n uint64) error {
+	for n > 0 {
+		if e.stepsLeft >= n {
+			e.stepsLeft -= n
+			return nil
+		}
+		if e.stepsLeft > 0 {
+			n -= e.stepsLeft
+			e.stepsLeft = 0
+		}
+		if err := e.checkpoint(); err != nil {
+			return err
+		}
+		n--
+	}
+	return nil
 }
 
 // chargeStep is checkpoint's slow path: the step limit is disabled, this
@@ -389,6 +419,14 @@ func (vm *Interpreter) executionError() error {
 		return nil
 	}
 	return e.checkpoint()
+}
+
+func (vm *Interpreter) executionErrors(n uint64) error {
+	e := vm.activeExecution
+	if e == nil {
+		return nil
+	}
+	return e.checkpoints(n)
 }
 
 // cancellationError is used after a context wait has already unblocked. It

@@ -950,6 +950,12 @@ func TestHashKey(t *testing.T) {
 	if h1 == h3 {
 		t.Error("int and string should hash differently")
 	}
+	if got, want := hashKey(1.5), "f:1.5"; got != want {
+		t.Errorf("float hash = %q, want %q", got, want)
+	}
+	if hashKey(1) == hashKey(1.0) {
+		t.Error("int and float should hash differently")
+	}
 }
 
 // ---------- select statement ----------
@@ -2298,6 +2304,29 @@ func main() {
 	}
 	if qEvent.Location.Line == 0 || qEvent.Sequence >= markEvent.Sequence {
 		t.Fatalf("trace events are missing source order: q=%#v mark=%#v", qEvent, markEvent)
+	}
+}
+
+func TestDebugQWithoutObserverStillEvaluatesArguments(t *testing.T) {
+	vm, output := newTestVM()
+	if err := vm.Run(`package main
+import (
+    "debug"
+    "fmt"
+)
+var calls int
+func next() int {
+    calls++
+    return calls
+}
+func main() {
+    debug.Q(next())
+    fmt.Println(calls)
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := output.String(); got != "1\n" {
+		t.Fatalf("debug.Q skipped argument evaluation: output = %q, want %q", got, "1\\n")
 	}
 }
 

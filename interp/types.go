@@ -4,6 +4,7 @@ package interp
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -211,6 +212,11 @@ func hashKey(v any) string {
 		return "i:" + strconv.Itoa(t)
 	case int64:
 		return "I:" + strconv.FormatInt(t, 10)
+	case float64:
+		// Floats otherwise take the fmt fallback below, which is needlessly
+		// expensive for a perfectly ordinary map key. Keep a distinct prefix
+		// so int(1) and float64(1) continue to be different dynamic keys.
+		return "f:" + strconv.FormatFloat(t, 'g', -1, 64)
 	case string:
 		return "s:" + t
 	case bool:
@@ -227,13 +233,10 @@ func hashKey(v any) string {
 		for k := range t.Fields {
 			names = append(names, k)
 		}
-		for i := 0; i < len(names); i++ {
-			for j := i + 1; j < len(names); j++ {
-				if names[j] < names[i] {
-					names[i], names[j] = names[j], names[i]
-				}
-			}
-		}
+		// Structural keys need a deterministic field order. sort.Strings uses
+		// the standard library's tuned O(n log n) sorter; the former nested
+		// loop was O(n²) on every struct-key lookup.
+		sort.Strings(names)
 		for _, name := range names {
 			b.WriteString(name)
 			b.WriteByte('=')

@@ -120,6 +120,78 @@ func main() {
 	}
 }
 
+func TestDebugHitBreakpointPausesOnceAtTarget(t *testing.T) {
+	dc := NewDebugController()
+	if err := dc.SetHitBreakpoint(6, 2, "i%2 == 0"); err != nil {
+		t.Fatalf("SetHitBreakpoint: %v", err)
+	}
+	details := dc.BreakpointDetails()[6]
+	if details.HitTarget != 2 || !details.Temporary || details.Condition != "i%2 == 0" {
+		t.Fatalf("BreakpointDetails = %+v, want temporary two-hit condition", details)
+	}
+	pauses, done, _ := runDebugged(t, dc, `
+package main
+import "fmt"
+func main() {
+	for i := 0; i < 5; i++ {
+		fmt.Println(i)
+	}
+}
+`)
+	info := mustPause(t, pauses)
+	if info.Reason != "breakpoint" {
+		t.Fatalf("reason = %q, want breakpoint", info.Reason)
+	}
+	if v, ok := varValue(info.Vars, "i"); !ok || v != "2" {
+		t.Fatalf("i = %q (ok=%v), want 2", v, ok)
+	}
+	if len(dc.BreakpointDetails()) != 0 {
+		t.Fatal("hit breakpoint was not removed after pausing")
+	}
+	if !dc.Continue(info.Token) {
+		t.Fatal("Continue reported not pending")
+	}
+	select {
+	case extra := <-pauses:
+		t.Fatalf("unexpected extra pause: %+v", extra)
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Run to finish")
+	}
+}
+
+func TestDebugTemporaryBreakpointRemovesItself(t *testing.T) {
+	dc := NewDebugController()
+	if err := dc.SetTemporaryBreakpoint(6, ""); err != nil {
+		t.Fatalf("SetTemporaryBreakpoint: %v", err)
+	}
+	pauses, done, _ := runDebugged(t, dc, `
+package main
+import "fmt"
+func main() {
+	for i := 0; i < 3; i++ {
+		fmt.Println(i)
+	}
+}
+`)
+	info := mustPause(t, pauses)
+	if info.Reason != "breakpoint" {
+		t.Fatalf("reason = %q, want breakpoint", info.Reason)
+	}
+	if len(dc.BreakpointDetails()) != 0 {
+		t.Fatal("temporary breakpoint was not removed after first pause")
+	}
+	if !dc.Continue(info.Token) {
+		t.Fatal("Continue reported not pending")
+	}
+	if err := mustFinish(t, done); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+}
+
 func TestDebugStepOverSkipsNestedCall(t *testing.T) {
 	dc := NewDebugController()
 	dc.Pause()

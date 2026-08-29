@@ -21,6 +21,11 @@ build-repl:
 
 # ---------- WASM target (for the web playground) ----------
 WASM_OUT := web/nanogo.wasm
+# Fast publication defaults. Override these in release jobs that prioritise
+# the last few percent of transfer size over local/CI turnaround, e.g.
+# `make build-wasm-compressed GZIP_LEVEL=9 BROTLI_QUALITY=11`.
+GZIP_LEVEL ?= 6
+BROTLI_QUALITY ?= 6
 
 build-wasm:
 	@mkdir -p $(dir $(WASM_OUT))
@@ -31,10 +36,10 @@ build-wasm:
 # the target succeeds even if the `brotli` binary is not installed.
 build-wasm-compressed: build-wasm
 	@echo "--- gzip ---"
-	@gzip -9 -k -f $(WASM_OUT)
+	@gzip -$(GZIP_LEVEL) -k -f $(WASM_OUT)
 	@if command -v brotli >/dev/null 2>&1; then \
 		echo "--- brotli ---"; \
-		brotli -f -q 11 -k $(WASM_OUT); \
+		brotli -f -q $(BROTLI_QUALITY) -k $(WASM_OUT); \
 	else \
 		echo "(brotli not installed — skipping .br; install with 'apt-get install brotli')"; \
 	fi

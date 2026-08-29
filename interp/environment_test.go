@@ -2,6 +2,7 @@
 package interp
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -250,6 +251,21 @@ func TestStepLimitFiresOnExactCheckpoint(t *testing.T) {
 func main() { for { } }`)
 		if err == nil {
 			t.Fatalf("MaxSteps=%d: busy loop was not stopped", max)
+		}
+		if got := vm.LastStepCount(); got != max+1 {
+			t.Errorf("MaxSteps=%d: LastStepCount = %d, want %d", max, got, max+1)
+		}
+	}
+}
+
+func TestCountedForFastPathPreservesExactStepLimit(t *testing.T) {
+	for _, max := range []uint64{1, 2, 7, 50, stepBlock - 1, stepBlock, stepBlock + 1, 1000} {
+		vm, _ := newTestVM()
+		vm.Limits = ExecutionLimits{MaxSteps: max, MaxGoroutines: 1024}
+		err := vm.Run(`package main
+func main() { for i := 0; i < 1000000; i++ { } }`)
+		if !errors.Is(err, ErrStepLimit) {
+			t.Fatalf("MaxSteps=%d: Run error = %v, want ErrStepLimit", max, err)
 		}
 		if got := vm.LastStepCount(); got != max+1 {
 			t.Errorf("MaxSteps=%d: LastStepCount = %d, want %d", max, got, max+1)

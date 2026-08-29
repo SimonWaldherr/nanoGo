@@ -78,6 +78,39 @@ func main() {
 	}
 }
 
+// BenchmarkControlFlowHotPaths keeps range binding, backward goto lookup,
+// recover dispatch, and guest buffered channels measurable independently.
+func BenchmarkControlFlowHotPaths(b *testing.B) {
+	workloads := []struct {
+		name string
+		src  string
+	}{
+		{"RangeSlice", `package main
+func main() { s := []int{}; for i := 0; i < 20000; i++ { s = append(s, i) }; total := 0; for _, v := range s { total = total + v }; _ = total }`},
+		{"Goto", `package main
+func main() { i := 0; loop: i++; if i < 20000 { goto loop } }`},
+		{"Make", `package main
+func main() { for i := 0; i < 5000; i++ { s := make([]int, 8, 16); m := make(map[string]int, 8); ch := make(chan int, 1); m["x"] = s[0]; ch <- m["x"]; _ = <-ch } }`},
+		{"Recover", `package main
+func one() { defer func() { recover() }(); panic("x") }
+func main() { for i := 0; i < 1000; i++ { one() } }`},
+		{"BufferedChannel", `package main
+func main() { ch := make(chan int, 1); for i := 0; i < 20000; i++ { ch <- i; _ = <-ch } }`},
+	}
+	for _, workload := range workloads {
+		b.Run(workload.name, func(b *testing.B) {
+			vm, _ := newTestVM()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := vm.Run(workload.src); err != nil {
+					b.Fatalf("Run: %v", err)
+				}
+			}
+		})
+	}
+}
+
 // guestWorkloads are whole guest programs, each dominated by one distinct
 // part of the evaluator, so a change can be attributed instead of just
 // observed. BenchmarkFibRecursive and BenchmarkEvalExprArithmetic above cover
@@ -216,6 +249,56 @@ func BenchmarkChannelBufferedRoundTrip(b *testing.B) {
 		}
 		if _, open, err := ch.Receive(ctx); err != nil || !open {
 			b.Fatalf("Receive: value open=%v err=%v", open, err)
+		}
+	}
+}
+
+// BenchmarkDebugQNoObserver keeps the common production case measurable:
+// debug.Q must evaluate its arguments, but without a tracer it must not pay
+// for building diagnostic strings or formatting expression ASTs.
+func BenchmarkDebugQNoObserver(b *testing.B) {
+	const src = `
+package main
+import "debug"
+func main() {
+	for i := 0; i < 2000; i++ {
+		debug.Q(i, i*2)
+	}
+}`
+	vm, _ := newTestVM()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := vm.Run(src); err != nil {
+			b.Fatalf("Run: %v", err)
+		}
+	}
+}
+
+// BenchmarkMathAndHTTPFacade covers the lightweight standard-package layer:
+// numeric native dispatch plus the capability-checked HTTP host hand-off.
+// The HTTP native is deliberately local, so this measures interpreter work,
+// not network latency.
+func BenchmarkMathAndHTTPFacade(b *testing.B) {
+	const src = `
+package main
+import (
+	"http"
+	"math"
+)
+func main() {
+	for i := 0; i < 1000; i++ {
+		_ = math.Sqrt(i*i + 1)
+		_ = http.GetText("https://example.com/value")
+	}
+}`
+	vm, _ := newTestVM()
+	vm.RegisterInternalNative("HTTPGetText", func([]any) (any, error) { return "ok", nil })
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := vm.Run(src); err != nil {
+			b.Fatalf("Run: %v", err)
 		}
 	}
 }

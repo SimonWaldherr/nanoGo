@@ -248,12 +248,24 @@ func attachRuntimeErrorLocation(err error, loc SourceLocation) {
 	}
 }
 
-func debugExpression(expr ast.Expr) string {
+// debugExpression returns canonical source for a probe expression. Identifiers
+// and literals make up the overwhelming majority of debug.Q calls, so avoid
+// go/format's buffer and file-set work for those simple forms.
+func debugExpression(expr ast.Expr, fset *token.FileSet) string {
 	if expr == nil {
 		return ""
 	}
+	switch x := expr.(type) {
+	case *ast.Ident:
+		return x.Name
+	case *ast.BasicLit:
+		return x.Value
+	}
 	var buf bytes.Buffer
-	if err := format.Node(&buf, token.NewFileSet(), expr); err != nil {
+	if fset == nil {
+		fset = token.NewFileSet()
+	}
+	if err := format.Node(&buf, fset, expr); err != nil {
 		return fmt.Sprintf("%T", expr)
 	}
 	return buf.String()
@@ -269,15 +281,42 @@ func debugValue(value any) string {
 }
 
 func (vm *Interpreter) traceDebugQ(call *ast.CallExpr, env *Env) (any, error) {
-	parts := make([]string, 0, len(call.Args))
+	// A probe must always evaluate its arguments, even without an observer:
+	// they are ordinary Go expressions and may have side effects. Formatting
+	// their source and values, however, is pure diagnostic work. Skip it when
+	// neither local tracing nor a live runtime trace can receive the event.
+	capture := vm.tracer.Load() != nil ||
+		(vm.runtimeTraceAnnotations.Load() && runtimeTrace.IsEnabled())
+	if !capture {
+		for _, arg := range call.Args {
+			if _, err := vm.evalExpr(arg, env); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	}
+
+	var fset *token.FileSet
+	if exec := vm.activeExecution; exec != nil {
+		fset = exec.fset
+	}
+	var message strings.Builder
 	for _, arg := range call.Args {
 		value, err := vm.evalExpr(arg, env)
 		if err != nil {
 			return nil, err
 		}
-		parts = append(parts, debugExpression(arg)+" = "+debugValue(value))
+		if message.Len() > 0 {
+			message.WriteString(", ")
+		}
+		message.WriteString(debugExpression(arg, fset))
+		message.WriteString(" = ")
+		message.WriteString(debugValue(value))
 	}
-	vm.emitTrace("debug_q", "debug.Q", joinDebugParts(parts), call)
+	if message.Len() == 0 {
+		message.WriteString("<no values>")
+	}
+	vm.emitTrace("debug_q", "debug.Q", message.String(), call)
 	return nil, nil
 }
 
@@ -346,15 +385,4 @@ func (vm *Interpreter) envVarsString(env *Env) string {
 		fmt.Fprintf(&buf, "%s = %s\n", name, debugValue(vars[name]))
 	}
 	return strings.TrimRight(buf.String(), "\n")
-}
-
-func joinDebugParts(parts []string) string {
-	if len(parts) == 0 {
-		return "<no values>"
-	}
-	result := parts[0]
-	for _, part := range parts[1:] {
-		result += ", " + part
-	}
-	return result
 }
