@@ -10,7 +10,7 @@
   <meta name="author" content="Simon Waldherr" />
   <meta name="keywords" content="Go, Golang, WebAssembly, WASM, playground, interpreter, browser, goroutines, channels, sandbox" />
   <meta name="color-scheme" content="dark light" />
-  <meta name="theme-color" content="#0d0814" />
+  <meta name="theme-color" content="#080c14" />
   <link rel="canonical" href="https://simonwaldherr.github.io/nanoGo/" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="assets/logo.svg" />
@@ -41,7 +41,7 @@
        the scripts intentionally load (deferred) before playground.js, near
        the end of <body>, so they execute before it runs. -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css" crossorigin="anonymous">
-  <link rel="stylesheet" href="styles.css?14">
+  <link rel="stylesheet" href="styles.css?15">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js" crossorigin="anonymous" defer></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js" crossorigin="anonymous" defer></script>
 </head>
@@ -50,7 +50,6 @@
   <header class="header">
     <div class="header-content">
       <div class="brand">
-        <button id="sidebarToggleBtn" class="sidebar-toggle-btn" title="Browse examples" aria-expanded="false" aria-controls="sidebar">☰</button>
         <img src="assets/logo.svg" alt="nanoGo">
         <span>nanoGo</span>
         <span class="brand-subtitle">Go playground · WebAssembly</span>
@@ -72,8 +71,36 @@
             <button class="theme-option" data-theme="high-contrast">High Contrast</button>
           </div>
         </div>
-        <button id="shareBtn" title="Share code">📤 <span class="btn-label">Share</span></button>
-        <button id="embedBtn" title="Embed this playground in another site">🔗 <span class="btn-label">Embed</span></button>
+        <!-- Share/Embed/Download/Upload used to be four flat buttons here;
+             grouped behind one menu after feedback that the header had too
+             many always-visible controls. Reuses the exact .theme-popup
+             mechanism themeBtn/themePopup already prove above (aria-hidden
+             toggle, absolute positioning) -- .menu-popup only changes the
+             popup's own layout to a vertical list of rows. Every row below
+             keeps its original id and click handler untouched; see
+             playground.js for the menu open/close wiring. The trigger and
+             its popup are wrapped in their own position:relative box (see
+             .menu-trigger in styles.css) so the popup anchors under THIS
+             button specifically, regardless of where it sits among its
+             header-actions siblings -- unlike themeBtn, it is not the last
+             item in that row. -->
+        <div class="menu-trigger">
+          <button id="shareMenuBtn" title="Share, embed, download, or upload code" aria-expanded="false" aria-haspopup="true" aria-controls="shareMenuPopup">📤 <span class="btn-label">Share</span> <span class="menu-caret" aria-hidden="true">▾</span></button>
+          <div id="shareMenuPopup" class="theme-popup menu-popup" aria-hidden="true">
+            <button id="shareBtn" class="menu-row" title="Copy a shareable URL for the current code">📤 Share code</button>
+            <button id="embedBtn" class="menu-row" title="Embed this playground in another site">🔗 Embed in a page</button>
+            <button id="downloadBtn" class="menu-row" title="Download code as a .go file">💾 Download .go file</button>
+            <label class="upload-control menu-row" title="Upload one or more .go/.mod workspace files">
+              📂 Upload files
+              <input id="fileInput" type="file" accept=".go,.mod" multiple style="display:none">
+            </label>
+          </div>
+        </div>
+        <!-- Direct child of .header-actions, NOT inside .menu-trigger above:
+             it renders at the same anchored corner it always has (relative
+             to .header-actions itself, unaffected by the new wrapper), and
+             #embedBtn (now a row inside the Share menu) still just opens
+             this exact element, unmoved. -->
         <div id="embedPopup" class="theme-popup embed-popup" aria-hidden="true">
           <p class="embed-popup-title">Embed in another page</p>
           <p class="embed-popup-sub">Pastes as a self-contained &lt;iframe&gt; showing the code currently in the editor.</p>
@@ -88,13 +115,8 @@
           </div>
           <p class="embed-popup-hint">Third-party pages can also control the embed via <code>window.postMessage</code> — see the README's "Embedding" section.</p>
         </div>
-        <button id="downloadBtn" title="Download code">💾 <span class="btn-label">Download</span></button>
-        <label class="upload-control" title="Upload one or more .go/.mod workspace files">
-          📂 <span class="btn-label">Upload</span>
-          <input id="fileInput" type="file" accept=".go,.mod" multiple style="display:none">
-        </label>
         <a class="header-link" href="https://github.com/SimonWaldherr/nanogo" target="_blank" rel="noreferrer">
-          📚 <span class="btn-label">GitHub</span>
+          🐙 <span class="btn-label">GitHub</span>
         </a>
         <a id="embedPopoutLink" class="header-link embed-popout-link" href="#" target="_blank" rel="noreferrer" hidden>
           ↗ <span class="btn-label">Open in nanoGo</span>
@@ -131,15 +153,36 @@
     <!-- Editor Section -->
     <section class="editor-section">
       <div class="controls">
+        <!-- Moved here from the brand corner (top-left), where it was a
+             bare "☰" icon nobody found: direct feedback that the examples
+             catalog had become undiscoverable. Same id, same
+             setSidebarOpen()-driven click handler, same #sidebar it opens
+             -- only its position, label and this badge are new. See
+             playground.js's introduceExamplesDrawer() for the matching
+             one-time auto-open. -->
+        <button id="sidebarToggleBtn" class="sidebar-toggle-btn" title="Browse examples" aria-expanded="false" aria-controls="sidebar">📚 <span class="btn-label">Examples</span> <span class="example-count-badge" id="exampleCountBadge"></span></button>
         <button id="runBtn" class="primary" disabled>
           ▶️ Run<span class="shortcut-hint"> (Ctrl/⌘+Enter)</span>
         </button>
         <button id="stopBtn" title="Stop running program">⏹️ <span class="btn-label">Stop</span></button>
-        <button id="formatBtn" title="Format code with gofmt">✨ <span class="btn-label">Format</span></button>
-        <button id="vetBtn" title="Run static analysis">🔍 <span class="btn-label">Vet</span></button>
-        <button id="testBtn" title="Run TestXxx functions in the current document">🧪 <span class="btn-label">Test</span></button>
         <button id="inspectBtn" title="Open the execution inspector (AST, benchmark, trace)">🔬 <span class="btn-label">Inspect</span></button>
-        <button id="clearBtn">🗑️ <span class="btn-label">Clear</span></button>
+        <!-- Format/Vet/Test/Clear used to be four flat buttons here too;
+             grouped the same way Share is in the header (see the comment
+             there) -- reuses .theme-popup/.menu-popup again rather than a
+             third mechanism. Wrapped in its own .menu-trigger for the same
+             reason: .controls spans the full editor width, so anchoring
+             directly against it (like .theme-popup normally does) would
+             drop the popup under the far-right Options button instead of
+             under Code▾, which sits mid-row. -->
+        <div class="menu-trigger">
+          <button id="codeMenuBtn" title="Format, vet, test, or clear the console" aria-expanded="false" aria-haspopup="true" aria-controls="codeMenuPopup">🛠️ <span class="btn-label">Code</span> <span class="menu-caret" aria-hidden="true">▾</span></button>
+          <div id="codeMenuPopup" class="theme-popup menu-popup" aria-hidden="true">
+            <button id="formatBtn" class="menu-row" title="Format code with gofmt">✨ Format code</button>
+            <button id="vetBtn" class="menu-row" title="Run static analysis">🔍 Vet code</button>
+            <button id="testBtn" class="menu-row" title="Run TestXxx functions in the current document">🧪 Run tests</button>
+            <button id="clearBtn" class="menu-row">🗑️ Clear console</button>
+          </div>
+        </div>
         <details class="control-settings">
           <summary title="Test, output, canvas, and editor settings">⚙️ <span class="btn-label">Options</span></summary>
           <div class="control-settings-menu">
@@ -461,7 +504,7 @@ Select an example from the sidebar to get started! 🚀</div>
 
   <!-- Scripts -->
   <script src="wasm_exec.js?1"></script>
-  <script src="playground.js?1"></script>
+  <script src="playground.js?2"></script>
   <script src="lab.js?2"></script>
   <script src="live_debug.js?1"></script>
   <script src="ai.js?1"></script>

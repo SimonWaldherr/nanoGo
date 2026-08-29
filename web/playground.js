@@ -182,6 +182,11 @@
       const downloadBtn = document.getElementById("downloadBtn");
       const embedBtn = document.getElementById("embedBtn");
       const embedPopup = document.getElementById("embedPopup");
+      const shareMenuBtn = document.getElementById("shareMenuBtn");
+      const shareMenuPopup = document.getElementById("shareMenuPopup");
+      const codeMenuBtn = document.getElementById("codeMenuBtn");
+      const codeMenuPopup = document.getElementById("codeMenuPopup");
+      const exampleCountBadgeEl = document.getElementById("exampleCountBadge");
       const embedAutorunEl = document.getElementById("embedAutorun");
       const embedReadonlyEl = document.getElementById("embedReadonly");
       const embedSnippetEl = document.getElementById("embedSnippet");
@@ -267,6 +272,24 @@
       let activeRunSource = '';
       let lastRuntimeSource = '';
       let lastRuntimeVariables = [];
+
+      // Whether the CURRENT run has already auto-switched the output tab in
+      // response to something the guest program actually did (drew to the
+      // canvas, wrote HTML). Reset at the start of every run (see runCode/
+      // runWorkspace) and consumed at most once per run by
+      // autoSwitchOutputPanel below, so a long-running animation doesn't
+      // keep yanking focus away from a tab the user deliberately switched to
+      // mid-run, but the first real signal always wins over whatever tab
+      // happened to be showing (including one preselected from static
+      // per-example metadata) -- unlike that metadata, this reflects what the
+      // program is actually doing right now, which also covers hand-written
+      // code that was never in the examples list at all.
+      let autoSwitchedOutputThisRun = false;
+      function autoSwitchOutputPanel(panel) {
+        if (autoSwitchedOutputThisRun) return;
+        autoSwitchedOutputThisRun = true;
+        showOutputPanel(panel);
+      }
 
       function applyFontSize(size) {
         const px = size + 'px';
@@ -500,6 +523,7 @@
 
       function runWorkspace() {
         if (!worker) { logMessage('Worker not ready', 'warn'); return; }
+        autoSwitchedOutputThisRun = false;
         const payload = workspacePayload();
         activeRunSource = getSource();
         const scale = parseInt(scaleEl.value, 10);
@@ -775,6 +799,26 @@
       if (sidebarBackdropEl) sidebarBackdropEl.addEventListener('click', () => setSidebarOpen(false));
       document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && sidebarOpen) setSidebarOpen(false); });
 
+      // Direct feedback after the drawer-only redesign: with the examples
+      // list reachable only through one icon-only hamburger, nobody found
+      // it. #sidebarToggleBtn is now a labeled "📚 Examples" control (see
+      // index.html), which helps on its own, but the strongest fix is to
+      // show the drawer itself once, unprompted, so a first-time visitor
+      // (or an existing one who never noticed the drawer before this
+      // change) sees the example list without having to click anything.
+      // Gated on a dedicated flag rather than reusing nanogo_sidebar_open,
+      // so it fires exactly once per browser regardless of whatever open/
+      // closed preference that other flag already holds. Called once WASM
+      // is ready (see the 'ready' case in handleWorkerMessage) so it can't
+      // race the very first paint. Embed mode is exempt, same as every
+      // other sidebar behavior -- see setSidebarOpen's own comment.
+      function introduceExamplesDrawer() {
+        if (isEmbedMode) return;
+        if (localStorage.getItem('nanogo_examples_intro_shown') === 'true') return;
+        localStorage.setItem('nanogo_examples_intro_shown', 'true');
+        setSidebarOpen(true);
+      }
+
       // Theme popup control
       function closeThemePopup() {
         if (!themePopup) return;
@@ -795,9 +839,92 @@
           }
         } catch (e) { /* ignore */ }
       }
+      // ---------------- Share / Code menus -----------------------------
+      // Two small always-there-but-collapsed menus (see the toolbar
+      // redesign after user feedback that the flat button row had grown
+      // too large): Share/Embed/Download/Upload live behind #shareMenuBtn,
+      // Format/Vet/Test/Clear behind #codeMenuBtn. Both reuse the exact
+      // .theme-popup show/hide mechanism (aria-hidden toggling, absolute
+      // positioning) already proven by the theme picker and the embed
+      // popup below -- .menu-popup only changes the popup's internal
+      // layout (a vertical list of full-width rows) via CSS, not how it
+      // opens/closes. Every row keeps the exact id and click handler it
+      // always had; only their DOM position (now inside a popup instead
+      // of directly in the toolbar) and this file's mutual-exclusion
+      // wiring are new.
+      function closeShareMenuPopup() {
+        if (!shareMenuPopup) return;
+        shareMenuPopup.setAttribute('aria-hidden', 'true');
+        if (shareMenuBtn) shareMenuBtn.setAttribute('aria-expanded', 'false');
+      }
+      function openShareMenuPopup() {
+        if (!shareMenuPopup) return;
+        shareMenuPopup.setAttribute('aria-hidden', 'false');
+        if (shareMenuBtn) shareMenuBtn.setAttribute('aria-expanded', 'true');
+      }
+      function closeCodeMenuPopup() {
+        if (!codeMenuPopup) return;
+        codeMenuPopup.setAttribute('aria-hidden', 'true');
+        if (codeMenuBtn) codeMenuBtn.setAttribute('aria-expanded', 'false');
+      }
+      function openCodeMenuPopup() {
+        if (!codeMenuPopup) return;
+        codeMenuPopup.setAttribute('aria-hidden', 'false');
+        if (codeMenuBtn) codeMenuBtn.setAttribute('aria-expanded', 'true');
+      }
+      // Only one of Theme/Share/Code (plus the Embed popup nested inside
+      // Share) is ever open at once -- each trigger closes the other two
+      // top-level menus before toggling its own, the same pairwise pattern
+      // this file already used between Theme and Embed.
+      if (shareMenuBtn) shareMenuBtn.onclick = () => {
+        closeThemePopup();
+        closeCodeMenuPopup();
+        const hidden = !shareMenuPopup || shareMenuPopup.getAttribute('aria-hidden') !== 'false';
+        if (hidden) openShareMenuPopup(); else closeShareMenuPopup();
+      };
+      if (codeMenuBtn) codeMenuBtn.onclick = () => {
+        closeThemePopup();
+        closeShareMenuPopup();
+        const hidden = !codeMenuPopup || codeMenuPopup.getAttribute('aria-hidden') !== 'false';
+        if (hidden) openCodeMenuPopup(); else closeCodeMenuPopup();
+      };
+      if (shareMenuPopup) {
+        // shareBtn/downloadBtn/the upload label all keep their existing
+        // onclick handlers (further down this file) unmodified; this just
+        // closes the menu after whichever one of them just ran. embedBtn is
+        // deliberately excluded -- its own handler (below) opens embedPopup
+        // and must not have this generic close race with that.
+        [shareBtn, downloadBtn].forEach(btn => {
+          if (btn) btn.addEventListener('click', closeShareMenuPopup);
+        });
+        const uploadLabel = fileInput ? fileInput.closest('.upload-control') : null;
+        if (uploadLabel) uploadLabel.addEventListener('click', closeShareMenuPopup);
+        document.addEventListener('click', (ev) => {
+          if (shareMenuPopup.getAttribute('aria-hidden') === 'false') {
+            const path = ev.composedPath ? ev.composedPath() : (ev.path || []);
+            if (!path.includes(shareMenuPopup) && ev.target !== shareMenuBtn) closeShareMenuPopup();
+          }
+        });
+        document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeShareMenuPopup(); });
+      }
+      if (codeMenuPopup) {
+        [formatBtn, vetBtn, testBtn, clearBtn].forEach(btn => {
+          if (btn) btn.addEventListener('click', closeCodeMenuPopup);
+        });
+        document.addEventListener('click', (ev) => {
+          if (codeMenuPopup.getAttribute('aria-hidden') === 'false') {
+            const path = ev.composedPath ? ev.composedPath() : (ev.path || []);
+            if (!path.includes(codeMenuPopup) && ev.target !== codeMenuBtn) closeCodeMenuPopup();
+          }
+        });
+        document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeCodeMenuPopup(); });
+      }
+
       if (themeBtn) themeBtn.onclick = (e) => {
         if (!themePopup) return;
         if (embedPopup) embedPopup.setAttribute('aria-hidden', 'true');
+        closeShareMenuPopup();
+        closeCodeMenuPopup();
         const hidden = themePopup.getAttribute('aria-hidden') !== 'false';
         if (hidden) openThemePopup(); else closeThemePopup();
       };
@@ -1267,7 +1394,9 @@
               if (workspaceRunBtn && wasmCapabilities.hasWorkspace === false) workspaceRunBtn.disabled = true;
               if (workspaceMetaEl && wasmCapabilities.sdk) workspaceMetaEl.textContent = wasmCapabilities.sdk;
               logMessage('🎉 WebAssembly loaded and ready!', 'system');
+              if (exampleCountBadgeEl) exampleCountBadgeEl.textContent = String(EXAMPLE_NAMES.length);
               fillExamples();
+              introduceExamplesDrawer();
               loadCodeFromURL().then(() => {
                 setupEmbedPopout();
                 postToHost({ type: 'nanogo:ready' });
@@ -1286,6 +1415,7 @@
               if (execTimeEl) execTimeEl.textContent = '';
               break;
             case 'canvas-size': {
+              autoSwitchOutputPanel('canvas');
               const w = Number(m.w), h = Number(m.h);
               const scale = parseInt(scaleEl.value, 10);
               const canvas = document.getElementById('life');
@@ -1295,15 +1425,18 @@
               break;
             }
             case 'canvas-set': {
+              autoSwitchOutputPanel('canvas');
               const cx = Number(m.x), cy = Number(m.y), alive = !!m.alive;
               drawCell(cx, cy, alive);
               break;
             }
             case 'canvas-set-level':
+              autoSwitchOutputPanel('canvas');
               setCanvasCell(Number(m.x), Number(m.y), Number(m.level));
               _scheduleCanvasRender();
               break;
             case 'canvas-frame': {
+              autoSwitchOutputPanel('canvas');
               // The WASM worker encodes a whole frame as `x,y,alive;...` so
               // Go crosses into JavaScript once per frame instead of once per
               // cell. Decode directly into the existing rAF drawing queue.
@@ -1311,24 +1444,29 @@
               break;
             }
             case 'canvas-flush':
+              autoSwitchOutputPanel('canvas');
               break;
             case 'dom-setinner': {
+              autoSwitchOutputPanel('dom');
               const el = document.getElementById(m.id);
               if (el) el.innerHTML = m.html;
               logMessage('📄 HTML template rendered', 'system');
               break;
             }
             case 'dom-setvalue': {
+              autoSwitchOutputPanel('dom');
               const elv = document.getElementById(m.id);
               if (elv) elv.value = m.value;
               break;
             }
             case 'dom-addclass': {
+              autoSwitchOutputPanel('dom');
               const ea = document.getElementById(m.id);
               if (ea) ea.classList.add(m.class);
               break;
             }
             case 'dom-removeclass': {
+              autoSwitchOutputPanel('dom');
               const er = document.getElementById(m.id);
               if (er) er.classList.remove(m.class);
               break;
@@ -1458,8 +1596,15 @@
             return;
           }
           clearErrorHighlight();
+          autoSwitchedOutputThisRun = false;
 
-          // Show appropriate output panel for current example
+          // Preselect the output panel from the example's static metadata, if
+          // any -- this is just a starting guess, shown before the program
+          // has run a single line. autoSwitchOutputPanel (see handleWorkerMessage)
+          // overrides it the moment the program actually draws to the canvas
+          // or writes HTML, which is what makes this work for hand-written
+          // code (no metadata at all) and for an example whose edited code no
+          // longer matches its original classification.
           if (currentExample && EXAMPLE_CONFIG[currentExample]) {
             showOutputPanel(EXAMPLE_CONFIG[currentExample].output);
           }
@@ -1512,6 +1657,13 @@
         if (heatmapToggle) heatmapToggle.checked = true;
         showOutputPanel('lab');
         runCode();
+        // runCode() just reset autoSwitchedOutputThisRun so a plain run can
+        // react to what the program draws; a debug run is explicitly about
+        // watching the Lab panel's trace, so re-arm the "already switched"
+        // flag right after so a canvas/dom message during this run can't
+        // yank focus away from it. Safe because the worker's response
+        // messages only arrive on a later event-loop turn than this line.
+        autoSwitchedOutputThisRun = true;
       }
 
       // ---------------- Live debug (real pause/step, see web/live_debug.js) ----------------
@@ -1526,6 +1678,10 @@
         if (!worker) return;
         clearErrorHighlight();
         showOutputPanel('lab');
+        // See runDebug()'s matching comment: a live-debug session is about
+        // watching Lab (call stack, locals), so pin the output tab there --
+        // a canvas/dom message from the paused program must not steal focus.
+        autoSwitchedOutputThisRun = true;
         const source = getSource();
         activeRunSource = source;
         const breakpoints = breakpointLineNumbers();
@@ -2707,6 +2863,11 @@
       if (embedBtn && embedPopup) {
         embedBtn.onclick = () => {
           if (themePopup) closeThemePopup();
+          // embedBtn now lives inside #shareMenuPopup (see the Share menu
+          // above), and #embedPopup renders at the same anchored corner of
+          // .header-actions that #shareMenuPopup does -- leaving the Share
+          // menu open here would show both stacked on top of each other.
+          closeShareMenuPopup();
           const hidden = embedPopup.getAttribute('aria-hidden') !== 'false';
           if (hidden) { refreshEmbedSnippet(); embedPopup.setAttribute('aria-hidden', 'false'); }
           else closeEmbedPopup();

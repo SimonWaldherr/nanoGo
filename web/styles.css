@@ -1,50 +1,47 @@
 :root {
   color-scheme: dark;
-  /* 2026 visual refresh: every token below keeps the exact lightness of its
-     predecessor (only hue moved, from a blue ~215° family to a violet-indigo
-     ~260° family) so the contrast ratios documented throughout this file —
-     "clears 4.5:1", etc. — still hold. --success/--warning/--error are the
-     deliberate exception: their hue IS their meaning (green/amber/red), so
-     they are untouched. See memory: computed with a lightness-preserving
-     HSL hue rotation rather than picked by eye, specifically so this
-     redesign could not accidentally regress an accessibility guarantee. */
-  --bg: #0d0814;
-  --surface: #171022;
-  --surface-raised: #211731;
-  --surface-hover: #291d3d;
-  --text: #ece6f7;
-  --text-muted: #a598bd;
+  /* Colors reverted to the original blue-accent palette after direct
+     feedback that a violet redesign (tried briefly here) was too much
+     violet. Keeping only the non-color refinements from that pass
+     (--radius/--radius-card below) rather than re-guessing another new
+     color direction sight-unseen — see memory on why. */
+  --bg: #080c14;
+  --surface: #101722;
+  --surface-raised: #172131;
+  --surface-hover: #1d2a3d;
+  --text: #e6edf7;
+  --text-muted: #98a7bd;
   /* The dimmest text tier still has to be *readable* — it labels the stat
      chips, inspector notes and example descriptions at 10–11px. Kept a clear
      step below --text-muted while clearing 4.5:1 on --surface-raised. */
-  --text-dim: #9385ac;
-  --border: #312447;
-  --border-light: #44335f;
-  --accent: #a26efe;
-  --accent-hover: #bc93ff;
-  --accent-strong: #7234dd;
+  --text-dim: #8595ac;
+  --border: #243247;
+  --border-light: #33445f;
+  --accent: #6ea8fe;
+  --accent-hover: #93bdff;
+  --accent-strong: #3478dd;
   --success: #46d7a0;
   --warning: #f8be5d;
   --error: #ff7785;
-  --code-bg: #110b1b;
-  --code-gutter: #170f24;
+  --code-bg: #0b111b;
+  --code-gutter: #0f1724;
   /* Syntax palette. These values used to be literal hex on the .cm-* rules,
      which caused two separate problems: the tokens could not follow a theme
      (on the four light themes a dark-theme palette is unreadable), and the
      rules were losing outright to CodeMirror's own .cm-s-default palette —
      see the specificity note above the .cm-* block. Themes override these
      tokens instead (see "Syntax palettes per theme" below). */
-  --syn-keyword: #ea92ca;
-  --syn-number: #bcf76a;
-  --syn-type: #8f7dff;
-  --syn-string: #8ddbaf;
-  --syn-comment: #81719a;
-  --syn-operator: #f2de9e;
-  --syn-builtin: #6eb1e7;
-  --syn-meta: #f5aea3;
+  --syn-keyword: #c792ea;
+  --syn-number: #f7c66a;
+  --syn-type: #7dcfff;
+  --syn-string: #a7db8d;
+  --syn-comment: #71809a;
+  --syn-operator: #f29e9e;
+  --syn-builtin: #6ee7c0;
+  --syn-meta: #f5a3d7;
   --shadow: 0 12px 32px rgba(0, 0, 0, .2);
   --shadow-lg: 0 24px 64px rgba(0, 0, 0, .34);
-  --gradient-bg: linear-gradient(112deg, #170f2b, #0d0a1b 60%, #0c0a22);
+  --gradient-bg: linear-gradient(112deg, #101a2b, #0b101b 60%, #0a1622);
   --radius: 16px;
   /* Two smaller radii that recur throughout the panel/card and pill/badge
      components (introduced as tokens rather than restating the literal
@@ -73,7 +70,7 @@ body {
   min-width: 320px;
   margin: 0;
   background:
-    radial-gradient(circle at 12% -12%, rgba(162, 110, 254, .2), transparent 28rem),
+    radial-gradient(circle at 12% -12%, rgba(65, 130, 255, .2), transparent 28rem),
     radial-gradient(circle at 94% 8%, rgba(70, 215, 160, .09), transparent 24rem),
     var(--bg);
   color: var(--text);
@@ -143,11 +140,11 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 }
 
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; font-weight: 760; letter-spacing: -.02em; font-size: 20px; }
-.brand img { width: 30px; height: 30px; filter: drop-shadow(0 4px 10px rgba(162, 110, 254, .28)); }
+.brand img { width: 30px; height: 30px; filter: drop-shadow(0 4px 10px rgba(110, 168, 254, .22)); }
 .brand-subtitle { padding-left: 12px; border-left: 1px solid var(--border); color: var(--text-muted); font-size: 13px; font-weight: 500; letter-spacing: 0; }
 
 .header-actions { position: relative; display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
-.header-actions > button, .upload-control { padding: 7px 10px; font-size: 13px; }
+.header-actions > button, .header-actions > .menu-trigger > button, .upload-control { padding: 7px 10px; font-size: 13px; }
 .upload-control { display: inline-flex; align-items: center; gap: 5px; }
 .upload-control input { display: none; }
 .header-link { padding: 7px 10px; color: var(--text-muted); font-size: 13px; text-decoration: none; }
@@ -182,6 +179,54 @@ button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
 .theme-option .swatch { width: 24px; height: 24px; margin-right: 8px; border-radius: 6px; }
 .theme-option .label { font-size: 12px; }
 
+/* Share▾ / Code▾ menus — the same .theme-popup box, but a vertical list of
+   full-width rows instead of the theme grid. Each row is one of the
+   original flat buttons (#shareBtn, #formatBtn, ...), moved here bodily
+   with its id and click handler unchanged; see playground.js for the
+   open/close wiring shared with the theme popup.
+   .menu-trigger gives the trigger+popup pair their own positioning
+   context, unlike themeBtn/themePopup (which rely on .header-actions
+   itself, fine only because themeBtn happens to be that row's first
+   child) -- both new menus sit mid-row among siblings, so anchoring
+   .theme-popup's right:0 against the wrong ancestor would drop the popup
+   under whichever sibling happens to be at that ancestor's own right
+   edge instead of under the button that actually opened it. */
+.menu-trigger { position: relative; display: inline-flex; }
+.menu-caret { margin-left: 2px; font-size: 10px; opacity: .8; }
+.menu-popup { display: none; flex-direction: column; gap: 3px; }
+.menu-popup[aria-hidden="false"] { display: flex; }
+.menu-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+}
+.menu-row:hover { background: var(--surface-hover); }
+label.menu-row { cursor: pointer; }
+label.menu-row input[type="file"] { display: none; }
+
+/* Example count badge on the relocated #sidebarToggleBtn (see index.html
+   and playground.js's 'ready' handler, which fills in the number). Empty
+   until then, so it renders as nothing rather than a hollow pill. */
+.example-count-badge {
+  min-width: 15px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--accent) 22%, var(--surface-raised));
+  color: var(--accent-hover);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+}
+.example-count-badge:empty { display: none; }
+
 /* Share & Embed popup — reuses .theme-popup's positioning/box but needs a
    column layout instead of the theme grid. */
 .embed-popup { display: none; width: min(360px, calc(100vw - 28px)); }
@@ -204,6 +249,7 @@ body.mode-embed .sidebar,
 body.mode-embed .sidebar-backdrop,
 body.mode-embed .sidebar-toggle-btn,
 body.mode-embed .header-link:not(.embed-popout-link),
+body.mode-embed #shareMenuBtn,
 body.mode-embed #shareBtn,
 body.mode-embed #embedBtn,
 body.mode-embed #downloadBtn,
@@ -387,9 +433,9 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
   box-shadow: var(--shadow);
 }
 .controls::before { position: absolute; top: 0; left: 0; width: 46px; height: 2px; border-radius: 0 0 3px 0; background: linear-gradient(90deg, var(--success), var(--accent)); content: ""; }
-.controls > button { padding: 6px 9px; font-size: 12px; }
+.controls > button, .controls > .menu-trigger > button { padding: 6px 9px; font-size: 12px; }
 .controls .primary { border-color: var(--accent-strong); background: var(--accent-strong); color: white; font-weight: 700; }
-.controls .primary:hover { border-color: var(--accent); background: var(--accent); transform: translateY(-1px); box-shadow: 0 7px 16px rgba(114, 52, 221, .28); }
+.controls .primary:hover { border-color: var(--accent); background: var(--accent); transform: translateY(-1px); box-shadow: 0 7px 16px rgba(52, 120, 221, .25); }
 .control-settings { position: relative; }
 .control-settings > summary { min-height: 32px; padding: 6px 9px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface-raised); color: var(--text-muted); cursor: pointer; font-size: 12px; list-style: none; }
 .control-settings > summary::-webkit-details-marker { display: none; }
@@ -782,7 +828,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 
 /* Theme variables stay lightweight: the existing picker only needs to switch
    these tokens; the full layout above remains identical and accessible. */
-.theme-light { color-scheme: light; --bg:#f6f4fb; --surface:#fff; --surface-raised:#f7f5fc; --surface-hover:#efeaf8; --text:#231733; --text-muted:#514865; --text-dim:#706285; --border:#e1d9ef; --border-light:#c9bce0; --accent:#6024c5; --accent-hover:#49179d; --accent-strong:#6024c5; --success:#13865b; --warning:#8f5a00; --error:#c23a4a; --code-bg:#faf8ff; --code-gutter:#f1eefa; --gradient-bg:linear-gradient(112deg,#f8f5ff,#fff); }
+.theme-light { color-scheme: light; --bg:#f4f7fb; --surface:#fff; --surface-raised:#f5f8fc; --surface-hover:#eaf0f8; --text:#172033; --text-muted:#485565; --text-dim:#626f85; --border:#d9e2ef; --border-light:#bccbe0; --accent:#2463c5; --accent-hover:#174c9d; --accent-strong:#2463c5; --success:#13865b; --warning:#8f5a00; --error:#c23a4a; --code-bg:#f8fbff; --code-gutter:#eef4fa; --gradient-bg:linear-gradient(112deg,#f2f7ff,#fff); }
 .theme-solar, .theme-sepia { color-scheme: light; --bg:#f5efdf; --surface:#fff9ea; --surface-raised:#f3ead6; --surface-hover:#ecdfc4; --text:#4a4031; --text-muted:#5d5342; --text-dim:#71654f; --border:#ded2ba; --border-light:#cdbd9f; --accent:#9a6519; --accent-hover:#74490f; --accent-strong:#9a6519; --success:#31745d; --warning:#9a6519; --error:#b34b48; --code-bg:#fff9eb; --code-gutter:#f3ead7; }
 .theme-dracula { --bg:#282a36; --surface:#343746; --surface-raised:#414557; --surface-hover:#4d5265; --text:#f8f8f2; --text-muted:#d5d5cc; --text-dim:#b0b6cb; --border:#505466; --border-light:#696d81; --accent:#ff79c6; --accent-hover:#ff9bd6; --accent-strong:#c95f9f; --success:#50fa7b; --warning:#f1fa8c; --error:#ff8585; --code-bg:#20212b; --code-gutter:#292b36; }
 .theme-monokai { --bg:#272822; --surface:#30312a; --surface-raised:#3a3b34; --surface-hover:#46473f; --text:#f8f8f2; --text-muted:#cccbbf; --text-dim:#aca997; --border:#515248; --border-light:#6d6e61; --accent:#a6e22e; --accent-hover:#c1f26a; --accent-strong:#76ae1a; --success:#a6e22e; --warning:#e6db74; --error:#ff709f; --code-bg:#1f201c; --code-gutter:#292a25; }
@@ -803,8 +849,8 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
    for the comment color, which both projects define far too dim to read
    (#6272a4 and #75715e sit near 3:1); each is lifted just far enough. */
 .theme-light {
-  --syn-keyword:#df50ce; --syn-number:#658f00; --syn-type:#3c05ae; --syn-string:#0f466a;
-  --syn-comment:#625b75; --syn-operator:#a58f28; --syn-builtin:#0d326f; --syn-meta:#962b29;
+  --syn-keyword:#8250df; --syn-number:#8f4b00; --syn-type:#0550ae; --syn-string:#0f6a48;
+  --syn-comment:#5b6875; --syn-operator:#a52f28; --syn-builtin:#0d6f61; --syn-meta:#96297b;
 }
 .theme-solar, .theme-sepia {
   --syn-keyword:#5a51b0; --syn-number:#855d00; --syn-type:#155f8d; --syn-string:#586a00;
@@ -869,8 +915,8 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
      Run button keeps its own label (it's the primary action) but sheds the
      "(Ctrl/⌘+Enter)" hint, which is meaningless without a hardware keyboard. */
   .btn-label, .shortcut-hint { display: none; }
-  .header-actions > button, .upload-control, .header-link,
-  .controls > button:not(.primary) { min-width: 44px; padding-left: 8px; padding-right: 8px; }
+  .header-actions > button, .header-actions > .menu-trigger > button, .upload-control, .header-link,
+  .controls > button:not(.primary), .controls > .menu-trigger > button { min-width: 44px; padding-left: 8px; padding-right: 8px; }
 
   /* Comfortable tap targets everywhere (Apple HIG: 44pt minimum), and 16px
      form-control text so Safari never zooms the page in on focus. */
@@ -911,7 +957,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 /* Smallest phones (iPhone SE / mini and narrower): trim padding further. */
 @media (max-width: 380px) {
   .main { padding: 10px; }
-  .controls > button, .header-actions > button, .upload-control, .header-link { min-width: 44px; padding-left: 6px; padding-right: 6px; }
+  .controls > button, .controls > .menu-trigger > button, .header-actions > button, .header-actions > .menu-trigger > button, .upload-control, .header-link { min-width: 44px; padding-left: 6px; padding-right: 6px; }
   .stats-grid, .bench-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
