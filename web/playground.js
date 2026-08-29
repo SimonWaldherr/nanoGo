@@ -1227,28 +1227,58 @@
       // Keep level 1 as the established green for binary demos. Palette-aware
       // programs may use levels 2..7 without changing their rendering path.
       const CANVAS_PALETTE = ['#080d13', '#10b981', '#0ea5e9', '#2563eb', '#7c3aed', '#ec4899', '#f97316', '#facc15'];
+      // Each palette entry packed as one little-endian RGBA uint32 (alpha
+      // forced opaque), computed once here rather than on every paint.
+      // Painting a cell is then a single 32-bit write into an ImageData
+      // buffer instead of a ctx.fillStyle/fillRect call pair -- see
+      // _flushCells. Assumes little-endian byte order (so R lands in the low
+      // byte, matching ImageData's R,G,B,A layout), which holds on every
+      // browser/OS this runs on.
+      const CANVAS_PALETTE_U32 = CANVAS_PALETTE.map(hex => {
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        return (255 << 24) | (b << 16) | (g << 8) | r;
+      });
       // Fallback frame interval (≈ 60 fps) used only when
       // requestAnimationFrame (rAF) is unavailable in this context (very old
       // browsers / certain worker scopes). Real browsers will hit the rAF
       // branch below.
       const FRAME_DELAY_MS = 16;
+      // Off-screen, one-pixel-per-cell canvas: _flushCells paints the whole
+      // logical grid into this at native resolution, then the VISIBLE #life
+      // canvas gets it in one scaled drawImage call. See resizeCanvasGrid,
+      // which (re)allocates all four of these together whenever the grid's
+      // dimensions change.
+      let _lifeOffscreen = null;
+      let _lifeOffCtx = null;
+      let _canvasImageData = null;
+      let _canvasImageData32 = null;
       function _flushCells() {
         _canvasRenderScheduled = false;
         const ctx = _getLifeCtx();
-        if (!ctx || _canvasGridW <= 0 || _canvasGridH <= 0) return;
+        if (!ctx || _canvasGridW <= 0 || _canvasGridH <= 0 || !_canvasImageData32) return;
         const cs = parseInt(scaleEl.value, 10) || 8;
-        ctx.fillStyle = CANVAS_PALETTE[0];
-        ctx.fillRect(0, 0, _canvasGridW * cs, _canvasGridH * cs);
-        for (let level = 1; level < CANVAS_PALETTE.length; level++) {
-          ctx.fillStyle = CANVAS_PALETTE[level];
-          for (let i = 0; i < _canvasCells.length; i++) {
-            if (_canvasCells[i] === level) {
-              const x = i % _canvasGridW;
-              const y = (i / _canvasGridW) | 0;
-              ctx.fillRect(x * cs, y * cs, cs, cs);
-            }
-          }
+        // One pass over the grid, one 32-bit write per cell -- replaces a
+        // scan of the ENTIRE grid once per palette color (8 full sweeps)
+        // plus one ctx.fillRect call per live cell, both of which used to
+        // run on every single animation frame regardless of grid size.
+        const cells = _canvasCells;
+        const data32 = _canvasImageData32;
+        const palette = CANVAS_PALETTE_U32;
+        for (let i = 0; i < cells.length; i++) {
+          data32[i] = palette[cells[i]];
         }
+        _lifeOffCtx.putImageData(_canvasImageData, 0, 0);
+        // Blowing the 1px-per-cell buffer up to display size is now one
+        // drawImage call handled by the browser's own (typically
+        // GPU-accelerated) image scaler, instead of a fillRect per cell.
+        // imageSmoothingEnabled must be set on every paint, not once at
+        // context creation: resizing #life's width/height (see the
+        // 'canvas-size' handler) resets all 2D context state, including
+        // this flag, back to its true default.
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(_lifeOffscreen, 0, 0, _canvasGridW, _canvasGridH, 0, 0, _canvasGridW * cs, _canvasGridH * cs);
       }
       function _scheduleCanvasRender() {
         if (_canvasRenderScheduled) return;
@@ -1260,6 +1290,21 @@
         _canvasGridW = Math.max(0, w | 0);
         _canvasGridH = Math.max(0, h | 0);
         _canvasCells = new Uint8Array(_canvasGridW * _canvasGridH);
+        if (_canvasGridW <= 0 || _canvasGridH <= 0) {
+          _canvasImageData = null;
+          _canvasImageData32 = null;
+          return;
+        }
+        if (!_lifeOffscreen) _lifeOffscreen = document.createElement('canvas');
+        _lifeOffscreen.width = _canvasGridW;
+        _lifeOffscreen.height = _canvasGridH;
+        _lifeOffCtx = _lifeOffscreen.getContext('2d', { alpha: false });
+        _canvasImageData = _lifeOffCtx.createImageData(_canvasGridW, _canvasGridH);
+        _canvasImageData32 = new Uint32Array(_canvasImageData.data.buffer);
+        // Prime every pixel with the background color so the first paint
+        // (before any cell has been explicitly set) isn't left at
+        // ImageData's own zero-initialized, fully-transparent default.
+        _canvasImageData32.fill(CANVAS_PALETTE_U32[0]);
       }
       function setCanvasCell(x, y, level) {
         x |= 0; y |= 0;
