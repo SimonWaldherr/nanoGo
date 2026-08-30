@@ -251,6 +251,11 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			}
 			return int(n), nil
 		case token.FLOAT:
+			if exec := vm.activeExecution; exec != nil {
+				if f, ok := exec.floatLitCache[ex]; ok {
+					return f, nil
+				}
+			}
 			f, err := strconv.ParseFloat(strings.ReplaceAll(ex.Value, "_", ""), 64)
 			if err != nil {
 				return 0.0, NewRuntimeError("invalid float literal: " + ex.Value)

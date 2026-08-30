@@ -43,32 +43,65 @@ func buildLitCaches(file *ast.File) (map[*ast.BasicLit]int, map[*ast.BasicLit]fl
 // finishes, which is especially valuable for algorithmic inner loops with
 // per-iteration locals. The set is immutable for the run and therefore safe
 // for concurrent guest reads.
+//
+// The old implementation called ast.Inspect once for every block and scanned
+// that block's full subtree for function literals. Deeply nested generated
+// source therefore paid quadratic AST-walk cost before it could run. The
+// visitor below records function-literal ancestry in one traversal instead.
 func buildReusableBlockSet(file *ast.File) map[*ast.BlockStmt]struct{} {
-	var blocks map[*ast.BlockStmt]struct{}
-	ast.Inspect(file, func(n ast.Node) bool {
-		block, ok := n.(*ast.BlockStmt)
-		if !ok {
-			return true
-		}
-		reusable := true
-		ast.Inspect(block, func(child ast.Node) bool {
-			if child != nil && child != block {
-				if _, isFuncLit := child.(*ast.FuncLit); isFuncLit {
-					reusable = false
-					return false
+	var state reusableBlockWalk
+	ast.Walk(reusableBlockVisitor{state: &state}, file)
+	if len(state.blocks) == 0 {
+		return nil
+	}
+	return state.blocks
+}
+
+type reusableBlockInfo struct {
+	block      *ast.BlockStmt
+	hasFuncLit bool
+}
+
+type reusableBlockWalk struct {
+	blocks map[*ast.BlockStmt]struct{}
+	stack  []*reusableBlockInfo
+}
+
+// reusableBlockVisitor uses a distinct visitor value for each entered block;
+// ast.Walk sends that value Visit(nil) after the block's descendants, giving
+// us a cheap postorder hook without a second traversal.
+type reusableBlockVisitor struct {
+	state *reusableBlockWalk
+	block *ast.BlockStmt
+}
+
+func (v reusableBlockVisitor) Visit(node ast.Node) ast.Visitor {
+	if node == nil {
+		if v.block != nil {
+			last := len(v.state.stack) - 1
+			info := v.state.stack[last]
+			v.state.stack = v.state.stack[:last]
+			if !info.hasFuncLit && blockNeedsOwnScope(info.block) {
+				if v.state.blocks == nil {
+					v.state.blocks = make(map[*ast.BlockStmt]struct{})
 				}
+				v.state.blocks[info.block] = struct{}{}
 			}
-			return reusable
-		})
-		if reusable && blockNeedsOwnScope(block) {
-			if blocks == nil {
-				blocks = make(map[*ast.BlockStmt]struct{})
-			}
-			blocks[block] = struct{}{}
 		}
-		return true
-	})
-	return blocks
+		return nil
+	}
+
+	if _, isFuncLit := node.(*ast.FuncLit); isFuncLit {
+		for _, info := range v.state.stack {
+			info.hasFuncLit = true
+		}
+	}
+	child := reusableBlockVisitor{state: v.state}
+	if block, isBlock := node.(*ast.BlockStmt); isBlock {
+		v.state.stack = append(v.state.stack, &reusableBlockInfo{block: block})
+		child.block = block
+	}
+	return child
 }
 
 // execution contains state that belongs to exactly one RunContext call.

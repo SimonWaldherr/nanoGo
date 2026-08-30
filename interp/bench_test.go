@@ -3,10 +3,38 @@ package interp
 
 import (
 	"context"
+	"go/parser"
+	"go/token"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+// BenchmarkASTPreparationDeepBlocks keeps Run's pre-execution AST analysis
+// measurable. Nested blocks previously made reusable-block discovery
+// quadratic because every block rescanned its descendants.
+func BenchmarkASTPreparationDeepBlocks(b *testing.B) {
+	var src strings.Builder
+	src.WriteString("package main\nfunc main() {\n")
+	for i := 0; i < 256; i++ {
+		src.WriteString("if true {\n")
+	}
+	src.WriteString("value := 1.25\n_ = value\n")
+	for i := 0; i < 256; i++ {
+		src.WriteString("}\n")
+	}
+	src.WriteString("}\n")
+	file, err := parser.ParseFile(token.NewFileSet(), "nested.go", src.String(), 0)
+	if err != nil {
+		b.Fatalf("ParseFile: %v", err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = buildLitCaches(file)
+		_ = buildReusableBlockSet(file)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Real Go benchmarks (`go test -bench`) for nanoGo's own host implementation.
