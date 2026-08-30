@@ -3089,11 +3089,17 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 
 	// Native function?
 	if fn.Native != nil || fn.NativeContext != nil {
-		var a []any
+		// Package functions already receive their arguments in exactly the
+		// representation a native needs. Rebuilding that slice used to add one
+		// allocation to every fmt/os/math/etc. call. Methods are the sole case
+		// that need a receiver prepended, so keep the common package-function
+		// path allocation-free.
+		a := args
 		if recv != nil {
-			a = append(a, *recv)
+			a = make([]any, len(args)+1)
+			a[0] = *recv
+			copy(a[1:], args)
 		}
-		a = append(a, args...)
 		if fn.NativeContext != nil {
 			return fn.NativeContext(vm.Context(), a)
 		}

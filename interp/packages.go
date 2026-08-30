@@ -108,6 +108,13 @@ func registerFmtPackage(vm *Interpreter) {
 	// --- fmt ---
 	fmtPkg := &Package{Name: "fmt", Funcs: map[string]*Function{}}
 	fmtPkg.Funcs["Println"] = &Function{Name: "Println", IsVariadic: true, Native: func(args []any) (any, error) {
+		if len(args) == 1 {
+			message := ToString(args[0])
+			if nfun, ok := vm.natives["ConsoleLog"]; ok {
+				_, _ = nfun([]any{message})
+			}
+			return len(message), nil
+		}
 		// Join with spaces. A Builder avoids the quadratic copying caused by
 		// repeated string concatenation in wide log/diagnostic lines.
 		var out strlib.Builder
@@ -129,13 +136,12 @@ func registerFmtPackage(vm *Interpreter) {
 			return 0, nil
 		}
 		format := ToString(args[0])
-		rest := args[1:]
 		// Use host-provided sprintf wrapper to avoid re-implementing format parsing
 		sp, ok := vm.natives["__hostSprintf"]
 		if !ok {
 			return 0, NewRuntimeError("host sprintf not available")
 		}
-		res, err := sp(append([]any{format}, rest...))
+		res, err := callHostSprintf(sp, args, format)
 		if err != nil {
 			return 0, err
 		}
@@ -150,18 +156,32 @@ func registerFmtPackage(vm *Interpreter) {
 			return "", nil
 		}
 		format := ToString(args[0])
-		rest := args[1:]
 		sp, ok := vm.natives["__hostSprintf"]
 		if !ok {
 			return "", NewRuntimeError("host sprintf not available")
 		}
-		res, err := sp(append([]any{format}, rest...))
+		res, err := callHostSprintf(sp, args, format)
 		if err != nil {
 			return "", err
 		}
 		return ToString(res), nil
 	}}
 	vm.RegisterPackage("fmt", fmtPkg)
+}
+
+// callHostSprintf preserves the native formatting contract (the first value
+// is always a Go string) without rebuilding the argument slice for normal
+// guest format strings. A copied slice is only needed for unusual dynamic
+// format values, so neither the caller's evaluated arguments nor a host
+// native's retained slice can observe a mutation.
+func callHostSprintf(sp func([]any) (any, error), args []any, format string) (any, error) {
+	if _, ok := args[0].(string); ok {
+		return sp(args)
+	}
+	formattedArgs := make([]any, len(args))
+	copy(formattedArgs, args)
+	formattedArgs[0] = format
+	return sp(formattedArgs)
 }
 
 func registerDebugPackage(vm *Interpreter) {
@@ -507,7 +527,7 @@ func registerUTF8Package(vm *Interpreter) {
 		"UTFMax":    utf8.UTFMax,
 	}}
 	utf8Pkg.Funcs["RuneCountInString"] = &Function{Name: "RuneCountInString", Params: []string{"s"}, Native: func(args []any) (any, error) {
-		return utf8.RuneCountInString(ToString(args[0])), nil
+		return utf8.RuneCountInString(nativeStringArg(args[0])), nil
 	}}
 	utf8Pkg.Funcs["RuneLen"] = &Function{Name: "RuneLen", Params: []string{"r"}, Native: func(args []any) (any, error) {
 		return utf8.RuneLen(rune(ToInt(args[0]))), nil
@@ -516,9 +536,19 @@ func registerUTF8Package(vm *Interpreter) {
 		return utf8.ValidRune(rune(ToInt(args[0]))), nil
 	}}
 	utf8Pkg.Funcs["ValidString"] = &Function{Name: "ValidString", Params: []string{"s"}, Native: func(args []any) (any, error) {
-		return utf8.ValidString(ToString(args[0])), nil
+		return utf8.ValidString(nativeStringArg(args[0])), nil
 	}}
 	vm.RegisterPackage("unicode/utf8", utf8Pkg)
+}
+
+// nativeStringArg is small enough to inline into native adapters. Guest
+// source strings are already Go strings, so UTF-8 and regexp calls skip the
+// broad dynamic conversion helper on their common path.
+func nativeStringArg(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return ToString(value)
 }
 
 func registerSyncPackage(vm *Interpreter) {
@@ -549,26 +579,32 @@ func registerRegexpPackage(vm *Interpreter) {
 	vm.types[regexType.Name] = regexType
 	regexType.Methods["MatchString"] = &Function{Name: "MatchString", RecvType: "Regexp", Params: []string{"s"}, Native: func(args []any) (any, error) {
 		r := ensureNativeRegexp(args[0])
-		return r.MatchString(ToString(args[1])), nil
+		return r.MatchString(nativeStringArg(args[1])), nil
 	}}
 	regexType.Methods["FindStringSubmatch"] = &Function{Name: "FindStringSubmatch", RecvType: "Regexp", Params: []string{"s"}, Native: func(args []any) (any, error) {
 		r := ensureNativeRegexp(args[0])
-		subs := r.FindStringSubmatch(ToString(args[1]))
-		// Convert to []string slice value
-		out := &SliceVal{ElementType: "string", Data: []any{}}
-		for _, s := range subs {
-			out.Data = append(out.Data, s)
+		subs := r.FindStringSubmatch(nativeStringArg(args[1]))
+		// The regexp package has already sized the result exactly. Preserve
+		// that shape in the guest container instead of growing an []any one
+		// element at a time for every match.
+		out := &SliceVal{ElementType: "string", Data: make([]any, len(subs))}
+		for i, s := range subs {
+			out.Data[i] = s
 		}
 		return out, nil
 	}}
 	regPkg := &Package{Name: "regexp", Funcs: map[string]*Function{}, Types: map[string]*TypeDef{"Regexp": regexType}}
 	regPkg.Funcs["Compile"] = &Function{Name: "Compile", Params: []string{"pattern"}, Native: func(args []any) (any, error) {
-		r, err := regexp.Compile(ToString(args[0]))
+		r, err := regexp.Compile(nativeStringArg(args[0]))
 		if err != nil {
 			return nil, err
 		}
-		// Store native pointer in field "__native"
-		return &StructVal{TypeName: "Regexp", Fields: map[string]any{"__native": r}}, nil
+		// Keep the compatibility field for guest struct plumbing and publish
+		// the same immutable regexp through StructVal's lock-free native slot.
+		// Match methods then avoid a map lookup on every invocation.
+		value := &StructVal{TypeName: "Regexp", Fields: map[string]any{"__native": r}}
+		value.nativeState.Store(&structNativeState{value: r})
+		return value, nil
 	}}
 	vm.RegisterPackage("regexp", regPkg)
 }
@@ -1122,6 +1158,7 @@ func newNativeTimer(ctx context.Context, milliseconds int, repeating bool) (*Str
 		typeName = "Ticker"
 	}
 	value := &StructVal{TypeName: typeName, Fields: map[string]any{"C": channel, "__nativeTimer": timer}}
+	value.nativeState.Store(&structNativeState{value: timer})
 
 	go func() {
 		if !repeating {
@@ -1154,6 +1191,11 @@ func newNativeTimer(ctx context.Context, milliseconds int, repeating bool) (*Str
 
 func stopNativeTimer(v any) bool {
 	if value, ok := v.(*StructVal); ok {
+		if state := value.nativeState.Load(); state != nil {
+			if timer, ok := state.value.(*nativeTimer); ok {
+				return timer.Stop()
+			}
+		}
 		if timer, ok := value.Fields["__nativeTimer"].(*nativeTimer); ok {
 			return timer.Stop()
 		}
@@ -1164,8 +1206,14 @@ func stopNativeTimer(v any) bool {
 // ensureNativeRegexp extracts the *regexp.Regexp from a StructVal.
 func ensureNativeRegexp(v any) *regexp.Regexp {
 	if sv, ok := v.(*StructVal); ok {
+		if state := sv.nativeState.Load(); state != nil {
+			if r, ok := state.value.(*regexp.Regexp); ok {
+				return r
+			}
+		}
 		if ri, ok := sv.Fields["__native"]; ok {
 			if r, ok := ri.(*regexp.Regexp); ok {
+				sv.nativeState.CompareAndSwap(nil, &structNativeState{value: r})
 				return r
 			}
 		}

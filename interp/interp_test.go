@@ -558,6 +558,24 @@ func main() {
 	s := fmt.Sprintf("x=%d y=%d", 10, 20)
 	fmt.Println(s)
 }
+
+func TestHostSprintfKeepsDynamicFormatArgumentsUnchanged(t *testing.T) {
+	args := []any{42, "value"}
+	var received []any
+	result, err := callHostSprintf(func(values []any) (any, error) {
+		received = append([]any(nil), values...)
+		return "ok", nil
+	}, args, "42")
+	if err != nil || result != "ok" {
+		t.Fatalf("callHostSprintf = %v, %v", result, err)
+	}
+	if got, want := args[0], any(42); got != want {
+		t.Fatalf("original format argument = %#v, want %#v", got, want)
+	}
+	if got, want := received[0], any("42"); got != want {
+		t.Fatalf("host format argument = %#v, want %#v", got, want)
+	}
+}
 `)
 	if !strings.Contains(out, "x=10 y=20") {
 		t.Errorf("expected 'x=10 y=20', got %q", out)
@@ -1614,6 +1632,24 @@ func main() {
 `)
 	if got, want := out, "/api/users\nusers.json .json true\n3 3 true true\n"; got != want {
 		t.Fatalf("path/utf8 output = %q, want %q", got, want)
+	}
+}
+
+func TestRegexpFindStringSubmatch(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import (
+    "fmt"
+    "regexp"
+)
+func main() {
+    re, err := regexp.Compile("(go)-(lang)")
+    if err != nil { fmt.Println("compile failed"); return }
+    values := re.FindStringSubmatch("go-lang")
+    fmt.Println(len(values), values[0], values[1], values[2])
+}`)
+	if got, want := strings.TrimSpace(out), "3 go-lang go lang"; got != want {
+		t.Fatalf("regexp submatches = %q, want %q", got, want)
 	}
 }
 

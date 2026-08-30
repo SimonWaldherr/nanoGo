@@ -60,7 +60,7 @@ func main() { fib(20) }
 func BenchmarkEvalExprArithmetic(b *testing.B) {
 	const src = `
 package main
-func main() {
+	func main() {
 	sum := 0
 	for i := 0; i < 100000; i++ {
 		sum = sum + i*2 - 1
@@ -131,6 +131,7 @@ func main() {
 	_ = total
 }`
 	vm, _ := newTestVM()
+	vm.RegisterNative("ConsoleLog", func([]any) (any, error) { return nil, nil })
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -444,6 +445,62 @@ func main() {
 }`
 	vm, _ := newTestVM()
 	vm.RegisterInternalNative("HTTPGetText", func([]any) (any, error) { return "ok", nil })
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := vm.Run(src); err != nil {
+			b.Fatalf("Run: %v", err)
+		}
+	}
+}
+
+// BenchmarkFmtFacade keeps the native package-call path measurable. It
+// exercises the no-receiver fast path and the common literal-format path used
+// by logging and user-facing diagnostics, without timing actual terminal I/O.
+func BenchmarkFmtFacade(b *testing.B) {
+	const src = `
+package main
+import "fmt"
+func main() {
+	for i := 0; i < 1000; i++ {
+		_ = fmt.Sprintf("value=%d", i)
+		fmt.Println("ok")
+	}
+	}`
+	vm, _ := newTestVM()
+	vm.RegisterNative("ConsoleLog", func([]any) (any, error) { return nil, nil })
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := vm.Run(src); err != nil {
+			b.Fatalf("Run: %v", err)
+		}
+	}
+}
+
+// BenchmarkUTF8TimeAndRegexpFacades tracks three allocation-sensitive native
+// facades. The regexp is compiled once so its method-state lookup and result
+// conversion are measured rather than compilation itself.
+func BenchmarkUTF8TimeAndRegexpFacades(b *testing.B) {
+	const src = `
+package main
+import (
+  "regexp"
+  "time"
+  "unicode/utf8"
+)
+func main() {
+  re, _ := regexp.Compile("(go)-(lang)")
+  start := time.Now()
+  for i := 0; i < 500; i++ {
+    _ = utf8.RuneCountInString("Go✓语言")
+    _ = utf8.ValidString("Go✓语言")
+    _ = re.MatchString("go-lang")
+    _ = re.FindStringSubmatch("go-lang")
+    _ = time.Since(start)
+  }
+}`
+	vm, _ := newTestVM()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

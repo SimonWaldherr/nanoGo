@@ -199,22 +199,24 @@ func (fs *VFS) WriteFile(p string, data []byte, mode int) error {
 	if !ok || !parentNode.isDir {
 		return fmt.Errorf("open %s: no such file or directory", p)
 	}
-	content := make([]byte, len(data))
-	copy(content, data)
 	if mode == 0 {
 		mode = 0644
 	}
 	// Rewriting an existing file is the dominant VFS pattern for temporary
 	// files, logs and generated assets. Its node is private to the VFS (all
 	// public metadata APIs return copies), so updating it in place avoids a
-	// short-lived vfsNode allocation and does not alter any observable alias.
+	// short-lived vfsNode allocation. Reusing its content backing store also
+	// removes the copy allocation for the common same-size log/temp-file
+	// rewrite without altering any observable alias.
 	if node, exists := fs.nodes[abs]; exists && !node.isDir {
-		node.content = content
+		node.content = append(node.content[:0], data...)
 		node.modTime = time.Now()
 		node.mode = mode
 		fs.revision++
 		return nil
 	}
+	content := make([]byte, len(data))
+	copy(content, data)
 	fs.nodes[abs] = &vfsNode{
 		name:    path.Base(abs),
 		content: content,
