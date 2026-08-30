@@ -23,6 +23,10 @@ type Env struct {
 	// avoids a second allocation per frame. Further values use Vars, retaining
 	// Env's compact size instead of making every scope permanently larger.
 	inlineIntVar intVar
+	// inlineFloatVars keeps hot floating-point locals unboxed. Numerical inner
+	// loops otherwise allocate once for every assignment merely to fit a
+	// float64 in any.
+	inlineFloats *inlineFloatEnv
 	// inlineVars does for non-integer bindings what inlineIntVar does for
 	// integers. A loop body that declares a struct, a slice, or a string —
 	// `p := P{...}` inside a for — used to allocate a whole Vars map per
@@ -54,6 +58,84 @@ type Env struct {
 type intVar struct {
 	name string
 	val  int
+}
+
+const envInlineFloats = 3
+
+type floatVar struct {
+	name string
+	val  float64
+}
+
+// inlineFloatEnv stays separate from Env so integer-only call frames keep the
+// compact layout they had before float specialization. Pooled scopes retain
+// and clear this small backing store for later numerical blocks.
+type inlineFloatEnv struct {
+	vars [envInlineFloats]floatVar
+	len  uint8
+}
+
+func lookupFloatVar(env *Env, name string) (float64, bool) {
+	floats := env.inlineFloats
+	if floats == nil {
+		return 0, false
+	}
+	for i := 0; i < int(floats.len); i++ {
+		if floats.vars[i].name == name {
+			return floats.vars[i].val, true
+		}
+	}
+	return 0, false
+}
+
+func setOrAppendFloatVar(env *Env, name string, value float64) {
+	floats := env.inlineFloats
+	if floats == nil {
+		floats = &inlineFloatEnv{}
+		env.inlineFloats = floats
+	}
+	for i := 0; i < int(floats.len); i++ {
+		if floats.vars[i].name == name {
+			floats.vars[i].val = value
+			return
+		}
+	}
+	if int(floats.len) < len(floats.vars) {
+		floats.vars[floats.len] = floatVar{name, value}
+		floats.len++
+		return
+	}
+	if env.Vars == nil {
+		env.Vars = make(map[string]any, 4)
+	}
+	env.Vars[name] = value
+}
+
+func removeFloatVar(env *Env, name string) {
+	floats := env.inlineFloats
+	if floats == nil {
+		return
+	}
+	for i := 0; i < int(floats.len); i++ {
+		if floats.vars[i].name == name {
+			last := int(floats.len) - 1
+			floats.vars[i] = floats.vars[last]
+			floats.vars[last] = floatVar{}
+			floats.len--
+			return
+		}
+	}
+}
+
+func clearInlineFloatVars(env *Env) {
+	floats := env.inlineFloats
+	if floats == nil {
+		return
+	}
+	for i := 0; i < int(floats.len); i++ {
+		floats.vars[i] = floatVar{}
+	}
+	floats.len = 0
 }
 
 func lookupIntVar(env *Env, name string) (int, bool) {
@@ -430,6 +512,9 @@ func lookupValueInEnv(env *Env, name string) (any, bool) {
 	if n, ok := lookupIntVar(env, name); ok {
 		return n, true
 	}
+	if f, ok := lookupFloatVar(env, name); ok {
+		return f, true
+	}
 	if v, ok := lookupInlineVar(env, name); ok {
 		return v, true
 	}
@@ -445,8 +530,12 @@ func lookupValueInEnv(env *Env, name string) (any, bool) {
 // lock-free path after it has joined all of its worker goroutines.
 func (vm *Interpreter) get(name string, env *Env) (any, bool) {
 	exec := vm.activeExecution
+	// As with getInt/getFloat, a guest goroutine cannot begin overlapping this
+	// lookup without reserveGoroutine publishing concurrency first. Snapshot
+	// once instead of doing an atomic load for every lexical parent.
+	concurrent := exec != nil && exec.concurrent.Load()
 	for e := env; e != nil; e = e.Parent {
-		if e.shared || (exec != nil && exec.concurrent.Load()) {
+		if e.shared || concurrent {
 			e.mu.RLock()
 			v, ok := lookupValueInEnv(e, name)
 			e.mu.RUnlock()
@@ -489,13 +578,36 @@ func (vm *Interpreter) getInt(name string, env *Env) (int, bool) {
 	return 0, false
 }
 
+// getFloat is getInt's float64 counterpart. It keeps numerical evaluator
+// paths from materializing a temporary interface value for each read.
+func (vm *Interpreter) getFloat(name string, env *Env) (float64, bool) {
+	exec := vm.activeExecution
+	concurrent := exec != nil && exec.concurrent.Load()
+	for e := env; e != nil; e = e.Parent {
+		if e.shared || concurrent {
+			e.mu.RLock()
+			f, ok := lookupFloatVar(e, name)
+			e.mu.RUnlock()
+			if ok {
+				return f, true
+			}
+			continue
+		}
+		if f, ok := lookupFloatVar(e, name); ok {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
 // getLocal looks up a binding only in env itself. PackageScope uses it when
 // exporting package-level declarations; unlike get, it must not fall through
 // to imported/global parent scopes.
 func (vm *Interpreter) getLocal(name string, env *Env) (any, bool) {
 	env.mu.RLock()
-	defer env.mu.RUnlock()
-	return lookupValueInEnv(env, name)
+	v, ok := lookupValueInEnv(env, name)
+	env.mu.RUnlock()
+	return v, ok
 }
 
 // hasLocalBinding reports whether name belongs to this exact scope. Short
@@ -503,27 +615,32 @@ func (vm *Interpreter) getLocal(name string, env *Env) (any, bool) {
 // deliberately shadowed by `x := ...` in an inner block.
 func (vm *Interpreter) hasLocalBinding(name string, env *Env) bool {
 	exec := vm.activeExecution
-	if env.shared || (exec != nil && exec.concurrent.Load()) {
+	concurrent := exec != nil && exec.concurrent.Load()
+	if env.shared || concurrent {
 		env.mu.RLock()
-		intOK, valueOK := lookupOwnershipInEnv(env, name)
+		intOK, floatOK, valueOK := lookupOwnershipInEnv(env, name)
 		env.mu.RUnlock()
-		return intOK || valueOK
+		return intOK || floatOK || valueOK
 	}
-	intOK, valueOK := lookupOwnershipInEnv(env, name)
-	return intOK || valueOK
+	intOK, floatOK, valueOK := lookupOwnershipInEnv(env, name)
+	return intOK || floatOK || valueOK
 }
 
 // lookupOwnershipInEnv reports whether name is stored directly in env, in
 // either table, without reading the (possibly large, for Vars) value —
 // set uses this to find which ancestor owns a name before deciding how to
 // update it.
-func lookupOwnershipInEnv(env *Env, name string) (intOK, valueOK bool) {
+func lookupOwnershipInEnv(env *Env, name string) (intOK, floatOK, valueOK bool) {
 	_, intOK = lookupIntVar(env, name)
 	if intOK {
-		return true, false
+		return true, false, false
+	}
+	_, floatOK = lookupFloatVar(env, name)
+	if floatOK {
+		return false, true, false
 	}
 	if _, ok := lookupInlineVar(env, name); ok {
-		return false, true
+		return false, false, true
 	}
 	_, valueOK = env.Vars[name]
 	return
@@ -534,13 +651,26 @@ func lookupOwnershipInEnv(env *Env, name string) (intOK, valueOK bool) {
 // name currently lives in; storing a value of the "wrong" kind for that
 // table moves it to the other one (e.g. assigning a string over what was
 // previously an int local).
-func updateInEnv(env *Env, name string, val any, intOK bool) {
+func updateInEnv(env *Env, name string, val any, intOK, floatOK bool) {
 	if intOK {
 		if n, ok := val.(int); ok {
 			setOrAppendIntVar(env, name, n)
 			return
 		}
 		removeIntVar(env, name)
+	}
+	if floatOK {
+		if f, ok := val.(float64); ok {
+			setOrAppendFloatVar(env, name, f)
+			return
+		}
+		removeFloatVar(env, name)
+	}
+	if f, ok := val.(float64); ok {
+		removeInlineVar(env, name)
+		delete(env.Vars, name)
+		setOrAppendFloatVar(env, name, f)
+		return
 	}
 	storeValueInEnv(env, name, val)
 }
@@ -549,12 +679,21 @@ func updateInEnv(env *Env, name string, val any, intOK bool) {
 // used by both declare and set's "not found anywhere" fallback.
 func declareInEnv(env *Env, name string, val any) {
 	if n, ok := val.(int); ok {
+		removeFloatVar(env, name)
 		removeInlineVar(env, name)
 		delete(env.Vars, name)
 		setOrAppendIntVar(env, name, n)
 		return
 	}
+	if f, ok := val.(float64); ok {
+		removeIntVar(env, name)
+		removeInlineVar(env, name)
+		delete(env.Vars, name)
+		setOrAppendFloatVar(env, name, f)
+		return
+	}
 	removeIntVar(env, name)
+	removeFloatVar(env, name)
 	storeValueInEnv(env, name, val)
 }
 
@@ -563,28 +702,32 @@ func (vm *Interpreter) set(name string, val any, env *Env) {
 	// function scopes execute. Lock per scope so those shared ancestors stay
 	// safe without making purely local assignments pay synchronization.
 	exec := vm.activeExecution
+	concurrent := exec != nil && exec.concurrent.Load()
 	for e := env; e != nil; e = e.Parent {
-		if e.shared || (exec != nil && exec.concurrent.Load()) {
-			e.mu.RLock()
-			intOK, valueOK := lookupOwnershipInEnv(e, name)
-			e.mu.RUnlock()
-			if !intOK && !valueOK {
+		if e.shared || concurrent {
+			// Taking the writer lock once avoids an RLock/RUnlock/Lock sequence
+			// for every successful concurrent assignment. It also makes the
+			// ownership check and the update one atomic operation, so another
+			// goroutine cannot change a binding's storage kind between them.
+			e.mu.Lock()
+			intOK, floatOK, valueOK := lookupOwnershipInEnv(e, name)
+			if !intOK && !floatOK && !valueOK {
+				e.mu.Unlock()
 				continue
 			}
-			e.mu.Lock()
-			updateInEnv(e, name, val, intOK)
+			updateInEnv(e, name, val, intOK, floatOK)
 			e.mu.Unlock()
 			return
 		}
 
-		intOK, valueOK := lookupOwnershipInEnv(e, name)
-		if !intOK && !valueOK {
+		intOK, floatOK, valueOK := lookupOwnershipInEnv(e, name)
+		if !intOK && !floatOK && !valueOK {
 			continue
 		}
-		updateInEnv(e, name, val, intOK)
+		updateInEnv(e, name, val, intOK, floatOK)
 		return
 	}
-	if env.shared || (exec != nil && exec.concurrent.Load()) {
+	if env.shared || concurrent {
 		env.mu.Lock()
 		declareInEnv(env, name, val)
 		env.mu.Unlock()
@@ -621,6 +764,7 @@ func (vm *Interpreter) undeclare(name string, env *Env) {
 	if env.shared {
 		env.mu.Lock()
 		removeIntVar(env, name)
+		removeFloatVar(env, name)
 		removeInlineVar(env, name)
 		delete(env.Vars, name)
 		env.mu.Unlock()
@@ -628,12 +772,14 @@ func (vm *Interpreter) undeclare(name string, env *Env) {
 	}
 	if exec := vm.activeExecution; exec == nil || !exec.concurrent.Load() {
 		removeIntVar(env, name)
+		removeFloatVar(env, name)
 		removeInlineVar(env, name)
 		delete(env.Vars, name)
 		return
 	}
 	env.mu.Lock()
 	removeIntVar(env, name)
+	removeFloatVar(env, name)
 	removeInlineVar(env, name)
 	delete(env.Vars, name)
 	env.mu.Unlock()
@@ -643,6 +789,7 @@ func (vm *Interpreter) declareInt(name string, value int, env *Env) {
 	if env.shared {
 		env.mu.Lock()
 		removeInlineVar(env, name)
+		removeFloatVar(env, name)
 		delete(env.Vars, name)
 		setOrAppendIntVar(env, name, value)
 		env.mu.Unlock()
@@ -650,14 +797,41 @@ func (vm *Interpreter) declareInt(name string, value int, env *Env) {
 	}
 	if exec := vm.activeExecution; exec == nil || !exec.concurrent.Load() {
 		removeInlineVar(env, name)
+		removeFloatVar(env, name)
 		delete(env.Vars, name)
 		setOrAppendIntVar(env, name, value)
 		return
 	}
 	env.mu.Lock()
 	removeInlineVar(env, name)
+	removeFloatVar(env, name)
 	delete(env.Vars, name)
 	setOrAppendIntVar(env, name, value)
+	env.mu.Unlock()
+}
+
+func (vm *Interpreter) declareFloat(name string, value float64, env *Env) {
+	if env.shared {
+		env.mu.Lock()
+		removeIntVar(env, name)
+		removeInlineVar(env, name)
+		delete(env.Vars, name)
+		setOrAppendFloatVar(env, name, value)
+		env.mu.Unlock()
+		return
+	}
+	if exec := vm.activeExecution; exec == nil || !exec.concurrent.Load() {
+		removeIntVar(env, name)
+		removeInlineVar(env, name)
+		delete(env.Vars, name)
+		setOrAppendFloatVar(env, name, value)
+		return
+	}
+	env.mu.Lock()
+	removeIntVar(env, name)
+	removeInlineVar(env, name)
+	delete(env.Vars, name)
+	setOrAppendFloatVar(env, name, value)
 	env.mu.Unlock()
 }
 
@@ -683,6 +857,31 @@ func (vm *Interpreter) setInt(name string, value int, env *Env) bool {
 		}
 		if _, ok := lookupIntVar(e, name); ok {
 			setOrAppendIntVar(e, name, value)
+			return true
+		}
+	}
+	return false
+}
+
+// setFloat updates only an existing unboxed float binding. A false result
+// leaves the caller to use the fully dynamic assignment path.
+func (vm *Interpreter) setFloat(name string, value float64, env *Env) bool {
+	exec := vm.activeExecution
+	concurrent := exec != nil && exec.concurrent.Load()
+	for e := env; e != nil; e = e.Parent {
+		if e.shared || concurrent {
+			e.mu.Lock()
+			_, ok := lookupFloatVar(e, name)
+			if ok {
+				setOrAppendFloatVar(e, name, value)
+				e.mu.Unlock()
+				return true
+			}
+			e.mu.Unlock()
+			continue
+		}
+		if _, ok := lookupFloatVar(e, name); ok {
+			setOrAppendFloatVar(e, name, value)
 			return true
 		}
 	}
@@ -891,6 +1090,14 @@ func (vm *Interpreter) collectLocalVars(env *Env) map[string]any {
 		if iv := e.inlineIntVar; iv.name != "" {
 			if _, seen := out[iv.name]; !seen {
 				out[iv.name] = iv.val
+			}
+		}
+		if floats := e.inlineFloats; floats != nil {
+			for i := 0; i < int(floats.len); i++ {
+				fv := floats.vars[i]
+				if _, seen := out[fv.name]; !seen {
+					out[fv.name] = fv.val
+				}
 			}
 		}
 		for i := 0; i < int(e.inlineLen); i++ {

@@ -229,7 +229,7 @@ func bridgeToGuest(value any) (any, error) {
 		}
 		return out, nil
 	case map[string]any:
-		out := &MapVal{KeyType: "string", ElementType: "any", Data: map[string]any{}, Keys: map[string]any{}}
+		out := &MapVal{KeyType: "string", ElementType: "any", Data: map[string]any{}}
 		for key, item := range v {
 			converted, err := bridgeToGuest(item)
 			if err != nil {
@@ -264,7 +264,7 @@ func bridgeToHost(value any) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			out[mapKeyToString(v.Keys[hashed])] = converted
+			out[mapKeyToString(v.originalKey(hashed))] = converted
 		}
 		return out, nil
 	case *StructVal:

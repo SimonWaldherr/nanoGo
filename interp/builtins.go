@@ -101,7 +101,7 @@ func zeroValue(typ string) any {
 		}
 		if strings.HasPrefix(typ, "map[") {
 			k, v := parseMapType(typ)
-			return &MapVal{KeyType: k, ElementType: v, Data: map[string]any{}, Keys: map[string]any{}}
+			return &MapVal{KeyType: k, ElementType: v, Data: map[string]any{}}
 		}
 		if strings.HasPrefix(typ, "chan ") {
 			return &ChannelVal{ElementType: typ[5:], C: make(chan any)}
@@ -208,7 +208,7 @@ func (vm *Interpreter) builtinMakeSizes(typ string, length, capacity, argc int) 
 			return nil, NewRuntimeError("make: size exceeds interpreter limit")
 		}
 		k, v := parseMapType(typ)
-		return &MapVal{KeyType: k, ElementType: v, Data: make(map[string]any, length), Keys: make(map[string]any, length)}, nil
+		return &MapVal{KeyType: k, ElementType: v, Data: make(map[string]any, length)}, nil
 	}
 	// Channels: make(chan T[, cap])
 	if strings.HasPrefix(typ, "chan ") {

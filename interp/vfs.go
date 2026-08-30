@@ -129,16 +129,18 @@ func cleanPath(p, cwd string) string {
 // Getwd returns the current working directory.
 func (fs *VFS) Getwd() string {
 	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-	return fs.cwd
+	cwd := fs.cwd
+	fs.mu.RUnlock()
+	return cwd
 }
 
 // ResolvePath returns p as a clean, absolute VFS path using the current
 // working directory. It performs no I/O and is useful for capability checks.
 func (fs *VFS) ResolvePath(p string) string {
 	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-	return cleanPath(p, fs.cwd)
+	resolved := cleanPath(p, fs.cwd)
+	fs.mu.RUnlock()
+	return resolved
 }
 
 // Revision reports the current source-tree revision. It lets higher-level
@@ -201,6 +203,17 @@ func (fs *VFS) WriteFile(p string, data []byte, mode int) error {
 	copy(content, data)
 	if mode == 0 {
 		mode = 0644
+	}
+	// Rewriting an existing file is the dominant VFS pattern for temporary
+	// files, logs and generated assets. Its node is private to the VFS (all
+	// public metadata APIs return copies), so updating it in place avoids a
+	// short-lived vfsNode allocation and does not alter any observable alias.
+	if node, exists := fs.nodes[abs]; exists && !node.isDir {
+		node.content = content
+		node.modTime = time.Now()
+		node.mode = mode
+		fs.revision++
+		return nil
 	}
 	fs.nodes[abs] = &vfsNode{
 		name:    path.Base(abs),
@@ -355,25 +368,26 @@ func (fs *VFS) ReadDir(p string) ([]*VFSFileInfo, error) {
 // Getenv returns the value of the environment variable.
 func (fs *VFS) Getenv(key string) string {
 	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-	return fs.env[key]
+	value := fs.env[key]
+	fs.mu.RUnlock()
+	return value
 }
 
 // Setenv sets an environment variable.
 func (fs *VFS) Setenv(key, val string) {
 	fs.mu.Lock()
-	defer fs.mu.Unlock()
 	fs.env[key] = val
+	fs.mu.Unlock()
 }
 
 // Environ returns all environment variables as a slice of "key=value" strings.
 func (fs *VFS) Environ() []string {
 	fs.mu.RLock()
-	defer fs.mu.RUnlock()
 	out := make([]string, 0, len(fs.env))
 	for k, v := range fs.env {
 		out = append(out, k+"="+v)
 	}
+	fs.mu.RUnlock()
 	sort.Strings(out)
 	return out
 }

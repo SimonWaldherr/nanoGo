@@ -4,8 +4,41 @@ package interp
 import (
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 )
+
+func TestTemplateCacheConcurrentParsePublishesOneEntry(t *testing.T) {
+	cache := &templateCache{}
+	const workers = 32
+	start := make(chan struct{})
+	results := make([]any, workers)
+	errs := make([]error, workers)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = cache.parse("{{.Name}}")
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	first := results[0]
+	if first == nil || errs[0] != nil {
+		t.Fatalf("first parse = %v, %v", first, errs[0])
+	}
+	for i := 1; i < workers; i++ {
+		if errs[i] != nil || results[i] != first {
+			t.Fatalf("worker %d = %v, %v; want cached template %v", i, results[i], errs[i], first)
+		}
+	}
+	snapshot := cache.snapshot.Load()
+	if snapshot == nil || len(snapshot.entries) != 1 {
+		t.Fatalf("cache entries = %#v, want exactly one", snapshot)
+	}
+}
 
 // Curated packages are constructed on first use rather than all at once by
 // RegisterBuiltinPackages (see builtinPackageBuilders). These tests pin the

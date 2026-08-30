@@ -6,27 +6,69 @@ import (
 	"go/ast"
 	"go/token"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
 
-// buildLitCache parses every integer literal in file once up front. Called
+// buildLitCaches parses numeric literals in file once up front. Called
 // single-threaded, before any guest goroutine can run, so the resulting map
 // is safe to read from multiple goroutines without synchronization for the
 // rest of the execution.
-func buildLitCache(file *ast.File) map[*ast.BasicLit]int {
-	cache := make(map[*ast.BasicLit]int)
+func buildLitCaches(file *ast.File) (map[*ast.BasicLit]int, map[*ast.BasicLit]float64) {
+	intCache := make(map[*ast.BasicLit]int)
+	floatCache := make(map[*ast.BasicLit]float64)
 	ast.Inspect(file, func(n ast.Node) bool {
 		lit, ok := n.(*ast.BasicLit)
-		if !ok || lit.Kind != token.INT {
+		if !ok {
 			return true
 		}
-		if v, err := strconv.ParseInt(lit.Value, 0, strconv.IntSize); err == nil {
-			cache[lit] = int(v)
+		switch lit.Kind {
+		case token.INT:
+			if v, err := strconv.ParseInt(lit.Value, 0, strconv.IntSize); err == nil {
+				intCache[lit] = int(v)
+			}
+		case token.FLOAT:
+			if v, err := strconv.ParseFloat(strings.ReplaceAll(lit.Value, "_", ""), 64); err == nil {
+				floatCache[lit] = v
+			}
 		}
 		return true
 	})
-	return cache
+	return intCache, floatCache
+}
+
+// buildReusableBlockSet marks lexical blocks that cannot escape through a
+// function literal. Their short-lived Env can be recycled after the block
+// finishes, which is especially valuable for algorithmic inner loops with
+// per-iteration locals. The set is immutable for the run and therefore safe
+// for concurrent guest reads.
+func buildReusableBlockSet(file *ast.File) map[*ast.BlockStmt]struct{} {
+	var blocks map[*ast.BlockStmt]struct{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		block, ok := n.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		reusable := true
+		ast.Inspect(block, func(child ast.Node) bool {
+			if child != nil && child != block {
+				if _, isFuncLit := child.(*ast.FuncLit); isFuncLit {
+					reusable = false
+					return false
+				}
+			}
+			return reusable
+		})
+		if reusable && blockNeedsOwnScope(block) {
+			if blocks == nil {
+				blocks = make(map[*ast.BlockStmt]struct{})
+			}
+			blocks[block] = struct{}{}
+		}
+		return true
+	})
+	return blocks
 }
 
 // execution contains state that belongs to exactly one RunContext call.
@@ -44,6 +86,15 @@ type execution struct {
 	// of the execution's life, including from guest goroutines, so it needs
 	// no lock.
 	litCache map[*ast.BasicLit]int
+	// floatLitCache is the float counterpart of litCache. Dense numeric guest
+	// workloads such as Mandelbrot revisit constants on every pixel iteration.
+	floatLitCache map[*ast.BasicLit]float64
+	// hasFloatLiterals lets integer-only programs skip all float fast-path
+	// probing in their binary expressions.
+	hasFloatLiterals bool
+	// reusableBlocks contains source blocks with no escaping function literal.
+	// Their scopes can share fastEnvPool with frame-free calls.
+	reusableBlocks map[*ast.BlockStmt]struct{}
 
 	killed    atomic.Bool
 	cancelled atomic.Bool // mirrors parent cancellation without a channel op on the hot path — see beginExecution

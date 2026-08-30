@@ -391,6 +391,22 @@ func main() {
 	delete(m, "x")
 	fmt.Println(len(m))
 }
+
+func TestStringMapLazilyStoresOriginalKeys(t *testing.T) {
+	m := &MapVal{KeyType: "string", ElementType: "int", Data: make(map[string]any)}
+	m.setByKey("alpha", 1)
+	if m.Keys != nil {
+		t.Fatal("string-only map allocated redundant original-key table")
+	}
+	m.setByKey(7, 2) // nanoGo permits dynamic key values at runtime.
+	if m.Keys == nil || m.originalKey("alpha") != "alpha" || m.originalKey(m.hash(7)) != 7 {
+		t.Fatalf("dynamic key fallback lost original keys: %#v", m.Keys)
+	}
+	native := ToNativeValue(m).(map[string]any)
+	if native["alpha"] != 1 || native["7"] != 2 {
+		t.Fatalf("native string map = %#v, want alpha and dynamic key values", native)
+	}
+}
 `)
 	if !strings.Contains(out, "1") {
 		t.Errorf("expected '1', got %q", out)
@@ -1221,6 +1237,25 @@ func TestVFSReadWrite(t *testing.T) {
 	}
 }
 
+func TestVFSWriteFileOverwriteUpdatesExistingNode(t *testing.T) {
+	fs := NewVFS()
+	if err := fs.WriteFile("/tmp/rewrite.txt", []byte("old"), 0600); err != nil {
+		t.Fatalf("initial WriteFile: %v", err)
+	}
+	before := fs.Revision()
+	if err := fs.WriteFile("/tmp/rewrite.txt", []byte("new value"), 0640); err != nil {
+		t.Fatalf("overwrite WriteFile: %v", err)
+	}
+	data, err := fs.ReadFile("/tmp/rewrite.txt")
+	if err != nil || string(data) != "new value" {
+		t.Fatalf("overwritten content = %q, %v", data, err)
+	}
+	info, err := fs.Stat("/tmp/rewrite.txt")
+	if err != nil || info.Mode != 0640 || fs.Revision() != before+1 {
+		t.Fatalf("overwrite metadata = %+v, revision=%d, err=%v", info, fs.Revision(), err)
+	}
+}
+
 func TestVFSMkdirAndReadDir(t *testing.T) {
 	fs := NewVFS()
 	if err := fs.MkdirAll("/tmp/a/b/c", 0755); err != nil {
@@ -1457,9 +1492,30 @@ func main() {
 	}
 	fmt.Println(content)
 }
-`)
+	`)
 	if !strings.Contains(out, "written content") {
 		t.Errorf("expected 'written content', got %q", out)
+	}
+}
+
+func TestOsWriteFileAcceptsGuestByteSlice(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import (
+	"fmt"
+	"os"
+)
+func main() {
+	data := make([]byte, 4)
+	data[0], data[1], data[2], data[3] = 'b', 'y', 't', 'e'
+	if err := os.WriteFile("/tmp/bytes.txt", data, 0644); err != nil { panic(err) }
+	text, err := os.ReadFile("/tmp/bytes.txt")
+	if err != nil { panic(err) }
+	fmt.Println(text)
+}
+`)
+	if got := strings.TrimSpace(out); got != "byte" {
+		t.Fatalf("os.WriteFile byte slice output = %q, want byte", got)
 	}
 }
 

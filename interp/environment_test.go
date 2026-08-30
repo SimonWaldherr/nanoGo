@@ -62,13 +62,32 @@ func main() {
 	x = 9
 	fmt.Println(x)
 }
-`)
+	`)
 	want := []string{"7", "seven", "8", "eight", "9"}
 	got := strings.Fields(strings.TrimSpace(out))
 	for i, w := range want {
 		if safeIndex(got, i) != w {
 			t.Errorf("line %d = %q, want %q (full output %q)", i, safeIndex(got, i), w, out)
 		}
+	}
+}
+
+func TestBindingMovesBetweenFloatAndDynamicStorage(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	x := 1.5
+	x = 2.25
+	fmt.Println(x)
+	x = "two"
+	fmt.Println(x)
+	x = 3.75
+	fmt.Println(x)
+}
+`)
+	if got, want := strings.Fields(strings.TrimSpace(out)), []string{"2.25", "two", "3.75"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Errorf("float/dynamic binding transitions = %q, want %q", got, want)
 	}
 }
 

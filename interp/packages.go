@@ -829,34 +829,48 @@ const maxCachedTemplates = 64
 // built and safe to execute from several goroutines at once, so entries can be
 // shared by every guest goroutine of the interpreter that owns the cache.
 type templateCache struct {
-	mu      sync.RWMutex
-	entries map[string]*template.Template
+	// snapshot is immutable after publication, letting repeated RenderString
+	// calls avoid an RWMutex acquisition altogether. Rendering one template
+	// per row is typically read-heavy, and guest goroutines may hit it in
+	// parallel.
+	snapshot atomic.Pointer[templateCacheSnapshot]
+	mu       sync.Mutex // serializes cache misses and snapshot publication
 }
+
+type templateCacheSnapshot struct{ entries map[string]*template.Template }
 
 // parse returns the compiled form of text, building and caching it on first
 // use. A template that fails to parse is not cached: the error is cheap to
 // reproduce, and caching failures would keep bad input alive for the life of
 // the interpreter.
 func (c *templateCache) parse(text string) (*template.Template, error) {
-	c.mu.RLock()
-	cached, ok := c.entries[text]
-	c.mu.RUnlock()
-	if ok {
-		return cached, nil
+	if snapshot := c.snapshot.Load(); snapshot != nil {
+		if cached, ok := snapshot.entries[text]; ok {
+			return cached, nil
+		}
 	}
 	compiled, err := template.New("tpl").Parse(text)
 	if err != nil {
 		return nil, err
 	}
 	c.mu.Lock()
-	if c.entries == nil {
-		c.entries = make(map[string]*template.Template, 8)
+	defer c.mu.Unlock()
+	if snapshot := c.snapshot.Load(); snapshot != nil {
+		if cached, ok := snapshot.entries[text]; ok {
+			return cached, nil
+		}
 	}
-	if len(c.entries) >= maxCachedTemplates {
-		c.entries = make(map[string]*template.Template, 8)
+	var entries map[string]*template.Template
+	if previous := c.snapshot.Load(); previous != nil && len(previous.entries) < maxCachedTemplates {
+		entries = make(map[string]*template.Template, len(previous.entries)+1)
+		for key, value := range previous.entries {
+			entries[key] = value
+		}
+	} else {
+		entries = make(map[string]*template.Template, 8)
 	}
-	c.entries[text] = compiled
-	c.mu.Unlock()
+	entries[text] = compiled
+	c.snapshot.Store(&templateCacheSnapshot{entries: entries})
 	return compiled, nil
 }
 
@@ -993,10 +1007,10 @@ func newNativeWaitGroup() *nativeWaitGroup {
 
 func (w *nativeWaitGroup) Add(delta int) error {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	previous := w.n
 	next := previous + delta
 	if next < 0 {
+		w.mu.Unlock()
 		return NewRuntimeError("sync: negative WaitGroup counter")
 	}
 	if previous == 0 && next > 0 {
@@ -1006,6 +1020,7 @@ func (w *nativeWaitGroup) Add(delta int) error {
 	if previous > 0 && next == 0 {
 		close(w.doneState.Load().ch)
 	}
+	w.mu.Unlock()
 	return nil
 }
 
@@ -1249,14 +1264,14 @@ func registerOsPackage(vm *Interpreter) {
 
 	// Helper: build a *SliceVal of DirEntry structs.
 	dirEntrySlice := func(entries []*VFSFileInfo) *SliceVal {
-		sv := &SliceVal{ElementType: "DirEntry", Data: []any{}}
-		for _, e := range entries {
-			sv.Data = append(sv.Data, &StructVal{TypeName: "DirEntry", Fields: map[string]any{
+		sv := &SliceVal{ElementType: "DirEntry", Data: make([]any, len(entries))}
+		for i, e := range entries {
+			sv.Data[i] = &StructVal{TypeName: "DirEntry", Fields: map[string]any{
 				"Name":  e.Name,
 				"Size":  e.Size,
 				"IsDir": e.IsDir,
 				"Mode":  e.Mode,
-			}})
+			}}
 		}
 		return sv
 	}
@@ -1264,9 +1279,9 @@ func registerOsPackage(vm *Interpreter) {
 	osPkg := &Package{Name: "os", Funcs: map[string]*Function{}, Vars: map[string]any{}}
 
 	// os.Args
-	argsSlice := &SliceVal{ElementType: "string", Data: []any{}}
-	for _, a := range vm.Args {
-		argsSlice.Data = append(argsSlice.Data, a)
+	argsSlice := &SliceVal{ElementType: "string", Data: make([]any, len(vm.Args))}
+	for i, a := range vm.Args {
+		argsSlice.Data[i] = a
 	}
 	osPkg.Vars["Args"] = argsSlice
 
@@ -1304,13 +1319,7 @@ func registerOsPackage(vm *Interpreter) {
 		if len(args) >= 3 {
 			mode = ToInt(args[2])
 		}
-		var data []byte
-		switch v := args[1].(type) {
-		case []byte:
-			data = v
-		default:
-			data = []byte(ToString(args[1]))
-		}
+		data := osWriteFileData(args[1])
 		return nil, vfs.WriteFile(filePath, data, mode)
 	}}
 
@@ -1431,9 +1440,9 @@ func registerOsPackage(vm *Interpreter) {
 			return nil, err
 		}
 		pairs := vfs.Environ()
-		sv := &SliceVal{ElementType: "string", Data: []any{}}
-		for _, p := range pairs {
-			sv.Data = append(sv.Data, p)
+		sv := &SliceVal{ElementType: "string", Data: make([]any, len(pairs))}
+		for i, p := range pairs {
+			sv.Data[i] = p
 		}
 		return sv, nil
 	}}
@@ -1475,4 +1484,24 @@ func registerOsPackage(vm *Interpreter) {
 	}}
 
 	vm.RegisterPackage("os", osPkg)
+}
+
+// osWriteFileData converts the guest representation used by os.WriteFile
+// directly to bytes. Byte slices used to take a detour through ToString,
+// allocating both a temporary byte buffer and a string before VFS.WriteFile
+// made its required ownership copy.
+func osWriteFileData(value any) []byte {
+	switch v := value.(type) {
+	case []byte:
+		return v
+	case *SliceVal:
+		if isByteType(v.ElementType) {
+			out := make([]byte, len(v.Data))
+			for i, element := range v.Data {
+				out[i] = byte(ToInt(element))
+			}
+			return out
+		}
+	}
+	return []byte(ToString(value))
 }

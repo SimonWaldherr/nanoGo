@@ -53,7 +53,9 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 	if err != nil {
 		return err
 	}
-	exec.litCache = buildLitCache(file)
+	exec.litCache, exec.floatLitCache = buildLitCaches(file)
+	exec.hasFloatLiterals = len(exec.floatLitCache) != 0
+	exec.reusableBlocks = buildReusableBlockSet(file)
 	if file.Name.Name != "main" {
 		return NewRuntimeError(`only "package main" is supported`)
 	}
@@ -385,6 +387,48 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		}
 
 	case *ast.BinaryExpr:
+		// Pure float expressions otherwise create an interface value for every
+		// intermediate node. Keep them as float64 through the whole expression
+		// tree; unlike the integer path below, this is gated by a structural
+		// scan so no effectful expression is speculatively evaluated.
+		if exec := vm.activeExecution; exec != nil && exec.hasFloatLiterals &&
+			(vm.mayStartFloatExpr(ex.X, env) || vm.mayStartFloatExpr(ex.Y, env)) {
+			if vm.mayEvalFloatExpr(ex, env) {
+				if isIntComparison(ex.Op) {
+					left, leftOK, err := vm.tryEvalFloatExpr(ex.X, env, true)
+					if err != nil {
+						return nil, err
+					}
+					if leftOK {
+						right, rightOK, err := vm.tryEvalFloatExpr(ex.Y, env, true)
+						if err != nil {
+							return nil, err
+						}
+						if rightOK {
+							switch ex.Op {
+							case token.EQL:
+								return left == right, nil
+							case token.NEQ:
+								return left != right, nil
+							case token.LSS:
+								return left < right, nil
+							case token.GTR:
+								return left > right, nil
+							case token.LEQ:
+								return left <= right, nil
+							case token.GEQ:
+								return left >= right, nil
+							}
+						}
+					}
+				} else if value, ok, err := vm.tryEvalFloatExpr(ex, env, false); err != nil {
+					return nil, err
+				} else if ok {
+					return value, nil
+				}
+			}
+		}
+
 		// Comparisons cannot be handled by the arithmetic-only path below.
 		// Check them first: loop conditions such as `i < limit` occur on every
 		// iteration, and previously paid for one guaranteed-to-fail
@@ -850,7 +894,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		}
 		if strings.HasPrefix(typ, "map[") {
 			k, v := parseMapType(typ)
-			lit := &MapVal{KeyType: k, ElementType: v, Data: map[string]any{}, Keys: map[string]any{}}
+			lit := &MapVal{KeyType: k, ElementType: v, Data: map[string]any{}}
 			for _, elt := range ex.Elts {
 				kv, ok := elt.(*ast.KeyValueExpr)
 				if !ok {
@@ -950,6 +994,166 @@ func (vm *Interpreter) evalMakeCall(call *ast.CallExpr, env *Env) (any, error) {
 		}
 	}
 	return vm.builtinMakeSizes(typ, length, capacity, len(call.Args)-1)
+}
+
+// mayEvalFloatExpr identifies the pure numeric subset safe to evaluate with
+// tryEvalFloatExpr. It deliberately rejects calls, indexing and selectors so
+// the fast path never duplicates a side effect before falling back.
+func (vm *Interpreter) mayEvalFloatExpr(e ast.Expr, env *Env) bool {
+	containsFloat, pure := vm.floatExprShape(e, env)
+	return containsFloat && pure
+}
+
+// mayStartFloatExpr is intentionally shallow: nearly all integer expressions
+// must bypass float analysis entirely. Once a direct float leaf is found, the
+// full structural check below verifies the whole expression before execution.
+// Parentheses are unwrapped because they are syntactic only.
+func (vm *Interpreter) mayStartFloatExpr(e ast.Expr, env *Env) bool {
+	for {
+		paren, ok := e.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		e = paren.X
+	}
+	switch ex := e.(type) {
+	case *ast.BasicLit:
+		return ex.Kind == token.FLOAT
+	case *ast.Ident:
+		// Integer identifiers dominate normal control flow. Probe their
+		// dedicated slot first so recursive integer algorithms do not walk the
+		// whole lexical chain looking for a float that cannot be there.
+		if _, ok := vm.getInt(ex.Name, env); ok {
+			return false
+		}
+		_, ok := vm.getFloat(ex.Name, env)
+		return ok
+	default:
+		return false
+	}
+}
+
+// floatExprShape identifies a side-effect-free numeric subtree. Keeping the
+// purity result separate prevents a partially matched expression from being
+// evaluated once by the fast path and again by the general evaluator.
+func (vm *Interpreter) floatExprShape(e ast.Expr, env *Env) (containsFloat, pure bool) {
+	switch ex := e.(type) {
+	case *ast.BasicLit:
+		switch ex.Kind {
+		case token.FLOAT:
+			return true, true
+		case token.INT:
+			return false, true
+		default:
+			return false, false
+		}
+	case *ast.Ident:
+		if _, ok := vm.getFloat(ex.Name, env); ok {
+			return true, true
+		}
+		if _, ok := vm.getInt(ex.Name, env); ok {
+			return false, true
+		}
+		return false, false
+	case *ast.ParenExpr:
+		return vm.floatExprShape(ex.X, env)
+	case *ast.BinaryExpr:
+		switch ex.Op {
+		case token.ADD, token.SUB, token.MUL, token.QUO,
+			token.EQL, token.NEQ, token.LSS, token.GTR, token.LEQ, token.GEQ:
+			leftFloat, leftPure := vm.floatExprShape(ex.X, env)
+			rightFloat, rightPure := vm.floatExprShape(ex.Y, env)
+			return leftFloat || rightFloat, leftPure && rightPure
+		default:
+			return false, false
+		}
+	case *ast.UnaryExpr:
+		if ex.Op != token.ADD && ex.Op != token.SUB {
+			return false, false
+		}
+		return vm.floatExprShape(ex.X, env)
+	default:
+		return false, false
+	}
+}
+
+// tryEvalFloatExpr is the float64 equivalent of tryEvalIntExpr. It handles
+// only the pure arithmetic subset identified by mayEvalFloatExpr and charges
+// exactly one checkpoint for each visited AST node.
+func (vm *Interpreter) tryEvalFloatExpr(e ast.Expr, env *Env, checkpoint bool) (float64, bool, error) {
+	if checkpoint {
+		if err := vm.executionError(); err != nil {
+			return 0, false, err
+		}
+	}
+	switch ex := e.(type) {
+	case *ast.BasicLit:
+		switch ex.Kind {
+		case token.FLOAT:
+			if exec := vm.activeExecution; exec != nil {
+				if value, ok := exec.floatLitCache[ex]; ok {
+					return value, true, nil
+				}
+			}
+			value, err := strconv.ParseFloat(strings.ReplaceAll(ex.Value, "_", ""), 64)
+			return value, err == nil, err
+		case token.INT:
+			if value, ok := parseFastDecimalInt(ex.Value); ok {
+				return float64(value), true, nil
+			}
+			if exec := vm.activeExecution; exec != nil {
+				if value, ok := exec.litCache[ex]; ok {
+					return float64(value), true, nil
+				}
+			}
+		}
+	case *ast.Ident:
+		if value, ok := vm.getFloat(ex.Name, env); ok {
+			return value, true, nil
+		}
+		if value, ok := vm.getInt(ex.Name, env); ok {
+			return float64(value), true, nil
+		}
+	case *ast.ParenExpr:
+		return vm.tryEvalFloatExpr(ex.X, env, true)
+	case *ast.UnaryExpr:
+		if ex.Op != token.ADD && ex.Op != token.SUB {
+			return 0, false, nil
+		}
+		value, ok, err := vm.tryEvalFloatExpr(ex.X, env, true)
+		if err != nil || !ok {
+			return 0, ok, err
+		}
+		if ex.Op == token.SUB {
+			return -value, true, nil
+		}
+		return value, true, nil
+	case *ast.BinaryExpr:
+		switch ex.Op {
+		case token.ADD, token.SUB, token.MUL, token.QUO:
+		default:
+			return 0, false, nil
+		}
+		left, leftOK, err := vm.tryEvalFloatExpr(ex.X, env, true)
+		if err != nil || !leftOK {
+			return 0, leftOK, err
+		}
+		right, rightOK, err := vm.tryEvalFloatExpr(ex.Y, env, true)
+		if err != nil || !rightOK {
+			return 0, rightOK, err
+		}
+		switch ex.Op {
+		case token.ADD:
+			return left + right, true, nil
+		case token.SUB:
+			return left - right, true, nil
+		case token.MUL:
+			return left * right, true, nil
+		default:
+			return left / right, true, nil
+		}
+	}
+	return 0, false, nil
 }
 
 // tryEvalIntExpr evaluates the integer-only subset without allocating an any
@@ -1501,6 +1705,17 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 						}
 						return controlFlow{}, nil
 					}
+					f, floatOK, err := vm.tryEvalFloatExpr(st.Rhs[0], env, true)
+					if err != nil {
+						return controlFlow{}, err
+					}
+					if floatOK {
+						vm.declareFloat(id.Name, f, env)
+						if vm.trackingVariables() {
+							vm.recordVariable(id.Name, f, id, env)
+						}
+						return controlFlow{}, nil
+					}
 				case token.ASSIGN:
 					n, intOK, err := vm.tryEvalIntExpr(st.Rhs[0], env, true)
 					if err != nil {
@@ -1509,6 +1724,16 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 					if intOK && vm.setInt(id.Name, n, env) {
 						if vm.trackingVariables() {
 							vm.recordVariable(id.Name, n, id, env)
+						}
+						return controlFlow{}, nil
+					}
+					f, floatOK, err := vm.tryEvalFloatExpr(st.Rhs[0], env, true)
+					if err != nil {
+						return controlFlow{}, err
+					}
+					if floatOK && vm.setFloat(id.Name, f, env) {
+						if vm.trackingVariables() {
+							vm.recordVariable(id.Name, f, id, env)
 						}
 						return controlFlow{}, nil
 					}
@@ -1808,10 +2033,23 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		// itself, so correctness (in particular per-iteration closure
 		// isolation for a block that DOES declare) is unchanged either way.
 		local := env
+		pooled := false
 		if blockNeedsOwnScope(st) {
-			local = NewEnv(env)
+			if exec := vm.activeExecution; exec != nil {
+				if _, reusable := exec.reusableBlocks[st]; reusable {
+					local = vm.acquireFastEnv(env)
+					pooled = true
+				}
+			}
+			if !pooled {
+				local = NewEnv(env)
+			}
 		}
-		return vm.execStmtList(st.List, local)
+		c, err := vm.execStmtList(st.List, local)
+		if pooled {
+			vm.releaseFastEnv(local)
+		}
+		return c, err
 
 	case *ast.LabeledStmt:
 		// Stacked labels on the same loop (`A:\nB:\nfor {...}`) are valid Go
@@ -2195,8 +2433,8 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 			}
 		}
 	case *MapVal:
-		for hk, key := range s.Keys {
-			val := s.Data[hk]
+		for hk, val := range s.Data {
+			key := s.originalKey(hk)
 			vm.bindRangeValue(keyBinding, key, local, trackVariables)
 			vm.bindRangeValue(valueBinding, val, local, trackVariables)
 			if c, err, stop := handleBody(st.Body); stop {
@@ -2982,15 +3220,7 @@ func (vm *Interpreter) canFastCall(fn *Function) bool {
 func (vm *Interpreter) callFrameFreeFunction(fn *Function, recv *any, args []any) (any, error) {
 	var local *Env
 	if fn.envReusable {
-		if pooled := vm.fastEnvPool.Get(); pooled == nil {
-			local = &Env{}
-		} else {
-			local = pooled.(*Env)
-		}
-		local.Parent = fn.Env
-		if fn.Env != nil {
-			local.frame = fn.Env.frame
-		}
+		local = vm.acquireFastEnv(fn.Env)
 		defer vm.releaseFastEnv(local)
 	} else {
 		local = NewEnv(fn.Env)
@@ -3023,6 +3253,24 @@ func (vm *Interpreter) callFrameFreeFunction(fn *Function, recv *any, args []any
 	return nil, nil
 }
 
+// acquireFastEnv initializes a recycled scope. Callers must only use it when
+// static analysis proves no closure can retain that scope past completion.
+func (vm *Interpreter) acquireFastEnv(parent *Env) *Env {
+	if pooled := vm.fastEnvPool.Get(); pooled != nil {
+		env := pooled.(*Env)
+		env.Parent = parent
+		if parent != nil {
+			env.frame = parent.frame
+		}
+		return env
+	}
+	env := &Env{Parent: parent}
+	if parent != nil {
+		env.frame = parent.frame
+	}
+	return env
+}
+
 // releaseFastEnv removes every reference owned by a completed call before
 // making its Env available to a later invocation. envReusable guarantees no
 // closure can still reach it; sync.Pool also keeps this safe when guest
@@ -3030,6 +3278,7 @@ func (vm *Interpreter) callFrameFreeFunction(fn *Function, recv *any, args []any
 func (vm *Interpreter) releaseFastEnv(env *Env) {
 	env.Vars = nil
 	env.inlineIntVar = intVar{}
+	clearInlineFloatVars(env)
 	clearInlineVars(env)
 	env.Parent = nil
 	env.frame = nil

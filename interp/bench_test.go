@@ -140,6 +140,71 @@ func main() {
 	}
 }
 
+// BenchmarkClassicAlgorithms is a compact, representative suite of guest
+// algorithms: recursive call-heavy work (Fibonacci/Quicksort) and dense
+// floating-point branch work (Mandelbrot). Keeping these together makes CPU
+// profiles point to shared interpreter costs rather than one synthetic loop.
+func BenchmarkClassicAlgorithms(b *testing.B) {
+	algorithms := []struct {
+		name string
+		src  string
+	}{
+		{"Fibonacci", `package main
+func fib(n int) int { if n < 2 { return n }; return fib(n-1) + fib(n-2) }
+func main() { _ = fib(20) }`},
+		{"Quicksort", `package main
+func quick(a []int, lo int, hi int) {
+	if lo >= hi { return }
+	pivot := a[(lo+hi)/2]
+	i, j := lo, hi
+	for i <= j {
+		for a[i] < pivot { i++ }
+		for a[j] > pivot { j-- }
+		if i <= j { t := a[i]; a[i] = a[j]; a[j] = t; i++; j-- }
+	}
+	if lo < j { quick(a, lo, j) }
+	if i < hi { quick(a, i, hi) }
+}
+func main() {
+	a := []int{}
+	for i := 0; i < 256; i++ { a = append(a, (i*7919+17)%257) }
+	quick(a, 0, len(a)-1)
+	}`},
+		{"Mandelbrot", `package main
+func main() {
+	inside := 0
+	for y := 0; y < 32; y++ {
+		cy := float64(y)/16.0 - 1.0
+		for x := 0; x < 48; x++ {
+			cx := float64(x)/24.0 - 1.5
+			zx, zy := 0.0, 0.0
+			iter := 0
+			for iter < 40 && zx*zx+zy*zy <= 4.0 {
+				nx := zx*zx - zy*zy + cx
+				zy = 2.0*zx*zy + cy
+				zx = nx
+				iter++
+			}
+			if iter == 40 { inside++ }
+		}
+	}
+	_ = inside
+	}`},
+	}
+	for _, algorithm := range algorithms {
+		b.Run(algorithm.name, func(b *testing.B) {
+			vm, _ := newTestVM()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := vm.Run(algorithm.src); err != nil {
+					b.Fatalf("Run: %v", err)
+				}
+			}
+		})
+	}
+}
+
 // guestWorkloads are whole guest programs, each dominated by one distinct
 // part of the evaluator, so a change can be attributed instead of just
 // observed. BenchmarkFibRecursive and BenchmarkEvalExprArithmetic above cover
@@ -282,6 +347,62 @@ func BenchmarkChannelBufferedRoundTrip(b *testing.B) {
 	}
 }
 
+// BenchmarkConcurrentEnvAccess isolates the lock path used after a guest
+// program starts a goroutine. It intentionally bypasses parsing and AST
+// dispatch so regressions in Env's synchronization are visible directly.
+func BenchmarkConcurrentEnvAccess(b *testing.B) {
+	vm, _ := newTestVM()
+	exec := &execution{}
+	exec.concurrent.Store(true)
+	vm.activeExecution = exec
+	b.Cleanup(func() { vm.activeExecution = nil })
+
+	b.Run("Read", func(b *testing.B) {
+		env := NewEnv(vm.globals)
+		vm.declare("value", "x", env)
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				if _, ok := vm.get("value", env); !ok {
+					b.Fatal("missing binding")
+				}
+			}
+		})
+	})
+
+	b.Run("Write", func(b *testing.B) {
+		env := NewEnv(vm.globals)
+		vm.declare("value", "x", env)
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				vm.set("value", "x", env)
+			}
+		})
+	})
+}
+
+// BenchmarkTemplateCacheParallelHit measures the read-mostly package-cache
+// path directly. A cache hit must remain lock-free even with many guest
+// goroutines rendering the same template.
+func BenchmarkTemplateCacheParallelHit(b *testing.B) {
+	cache := &templateCache{}
+	if _, err := cache.parse("{{.Name}} {{.Count}}"); err != nil {
+		b.Fatalf("warm cache: %v", err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if _, err := cache.parse("{{.Name}} {{.Count}}"); err != nil {
+				b.Fatalf("cache hit: %v", err)
+			}
+		}
+	})
+}
+
 // BenchmarkDebugQNoObserver keeps the common production case measurable:
 // debug.Q must evaluate its arguments, but without a tracer it must not pay
 // for building diagnostic strings or formatting expression ASTs.
@@ -345,6 +466,61 @@ func BenchmarkVFSReadWrite(b *testing.B) {
 		}
 		if _, err := fs.ReadFile("/tmp/bench.txt"); err != nil {
 			b.Fatalf("ReadFile: %v", err)
+		}
+	}
+}
+
+// BenchmarkVFSEnvironment covers the small operations behind os.Getenv,
+// os.Setenv and os.Environ without evaluator dispatch obscuring VFS locking
+// and sorting costs.
+func BenchmarkVFSEnvironment(b *testing.B) {
+	fs := NewVFS()
+	b.Run("GetSet", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			fs.Setenv("BENCH", "value")
+			if fs.Getenv("BENCH") != "value" {
+				b.Fatal("missing environment value")
+			}
+		}
+	})
+	b.Run("Environ", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if len(fs.Environ()) == 0 {
+				b.Fatal("missing environment")
+			}
+		}
+	})
+}
+
+// BenchmarkOSWriteFileByteSlice exercises the byte-slice conversion path
+// exposed to guest programs, including the required defensive VFS copy.
+func BenchmarkOSWriteFileByteSlice(b *testing.B) {
+	vm, _ := newTestVM()
+	if err := vm.Run(`package main
+import "os"
+func main() {
+	data := make([]byte, 7)
+	data[0], data[1], data[2], data[3], data[4], data[5], data[6] = 'p', 'a', 'y', 'l', 'o', 'a', 'd'
+	_ = os.WriteFile("/tmp/bytes.txt", data, 0644)
+}`); err != nil {
+		b.Fatalf("warm run: %v", err)
+	}
+	const src = `package main
+import "os"
+func main() {
+	data := make([]byte, 7)
+	data[0], data[1], data[2], data[3], data[4], data[5], data[6] = 'p', 'a', 'y', 'l', 'o', 'a', 'd'
+	_ = os.WriteFile("/tmp/bytes.txt", data, 0644)
+}`
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := vm.Run(src); err != nil {
+			b.Fatalf("Run: %v", err)
 		}
 	}
 }

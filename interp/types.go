@@ -115,7 +115,10 @@ type SliceVal struct {
 type MapVal struct {
 	KeyType, ElementType string
 	Data                 map[string]any // hashed key -> value
-	Keys                 map[string]any // hashed key -> original key
+	// Keys is needed only when the internal hash differs from the guest key.
+	// String-keyed maps keep their raw string as Data's key, so the common
+	// map[string]T form leaves this nil and avoids duplicating every key.
+	Keys map[string]any // hashed key -> original key, lazily allocated
 }
 
 // hash renders k as this map's internal Data/Keys key. hashKey's type prefix
@@ -137,8 +140,39 @@ func (m *MapVal) getByKey(k any) (any, bool) {
 	v, ok := m.Data[h]
 	return v, ok
 }
-func (m *MapVal) setByKey(k, v any) { h := m.hash(k); m.Data[h] = v; m.Keys[h] = k }
-func (m *MapVal) deleteByKey(k any) { h := m.hash(k); delete(m.Data, h); delete(m.Keys, h) }
+func (m *MapVal) setByKey(k, v any) {
+	h := m.hash(k)
+	// A string map normally has h == k. Preserve nanoGo's permissive dynamic
+	// behavior if a caller nevertheless supplies another key type by lazily
+	// materializing original-key storage and reconstructing prior string keys.
+	if m.Keys == nil {
+		if _, stringKey := k.(string); !stringKey || m.KeyType != "string" {
+			m.Keys = make(map[string]any, len(m.Data)+1)
+			for existing := range m.Data {
+				m.Keys[existing] = existing
+			}
+		}
+	}
+	m.Data[h] = v
+	if m.Keys != nil {
+		m.Keys[h] = k
+	}
+}
+
+func (m *MapVal) deleteByKey(k any) {
+	h := m.hash(k)
+	delete(m.Data, h)
+	if m.Keys != nil {
+		delete(m.Keys, h)
+	}
+}
+
+func (m *MapVal) originalKey(hashed string) any {
+	if m.Keys == nil {
+		return hashed
+	}
+	return m.Keys[hashed]
+}
 
 // ToNativeValue converts nanoGo's internal container values into ordinary Go
 // values. Native packages use it before handing data to libraries that do not
@@ -148,7 +182,7 @@ func ToNativeValue(v any) any {
 	case *MapVal:
 		out := make(map[string]any, len(x.Data))
 		for hashedKey, value := range x.Data {
-			out[mapKeyToString(x.Keys[hashedKey])] = ToNativeValue(value)
+			out[mapKeyToString(x.originalKey(hashedKey))] = ToNativeValue(value)
 		}
 		return out
 	case *SliceVal:
