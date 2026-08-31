@@ -42,7 +42,7 @@ playground still creates one interpreter per run and exposes **Stop**.
 ### Core Capabilities
 - ✅ **Supported Go subset**: Variables, functions, structs, slices, maps, interfaces, channels, and selected control-flow constructs
 - ✅ **Concurrency**: Goroutines and channels, including cancellation-aware waits
-- ✅ **Built-in Packages**: Curated subsets of `fmt`, `time`, `sync`, `math`, `math/rand`, `strings`, `regexp`, `sort`, `strconv`, `path`, `unicode/utf8`, `encoding/json`/`json`, `os`, `fs`, and `testing`
+- ✅ **Built-in Packages**: Curated subsets of `fmt`, `time`, `sync`, `math`, `math/rand`, `strings`, `regexp`, `sort`, `strconv`, `path`, `unicode/utf8`, `encoding/json`/`json`, `encoding/gob`, `os`, `fs`, and `testing`
 - ✅ **Browser Integration**: Special `browser` package for DOM manipulation and canvas drawing
 - ✅ **HTTP facade**: Browser code can use nanoGo's `http.GetText`/`PostText` facade, subject to CORS; embedded hosts must provide and authorize a transport native
 - ✅ **Template helper**: `text/template.RenderString` expands a template; it does not provide `html/template` escaping
@@ -922,10 +922,10 @@ nanoGo implements a **tree-walking interpreter** that parses Go source code into
 nanoGo includes a curated set of built-in packages:
 
 - **Core**: `fmt`, `sync`, `time`
-- **Data**: `encoding/json` (also available as `json`), `strings`, `regexp`, `sort`, `strconv`, `path`, `unicode/utf8`
+- **Data**: `encoding/json` (also available as `json`), `encoding/gob`, `strings`, `regexp`, `sort`, `strconv`, `path`, `unicode/utf8`
 - **Math**: selected `math` and `math/rand` functions
 - **Text & tooling**: `text/template`, `debug`, and a supported subset of `testing`
-- **Host-bound APIs**: `browser`, `storage`, `fs`, `os`, and `http`; filesystem/network calls require `Capabilities`, while APIs that reach host resources require the corresponding host native
+- **Host-bound APIs**: `browser`, `storage`, `fs`, `os`, `http`, `protobuf`, and `grpc`; filesystem/network calls require `Capabilities`, while APIs that reach host resources require the corresponding host native
 
 This is deliberately not the full Go standard library: each listed package is
 a subset with only the functions described by its registration in
@@ -935,6 +935,14 @@ pointer, so guest code should follow nanoGo's API rather than assume complete
 stdlib compatibility. `path` provides `Base`, `Clean`, `Dir`, `Ext`, `IsAbs`,
 and `Join`; `unicode/utf8` provides `RuneCountInString`, `RuneLen`,
 `ValidRune`, and `ValidString`, plus `RuneError`, `RuneSelf`, and `UTFMax`.
+
+`encoding/gob` provides nanoGo-style `Encode(value)` and `Decode(data)` helpers
+which exchange byte slices. `protobuf.Marshal`/`Unmarshal` delegate to private
+`ProtoMarshal`/`ProtoUnmarshal` host natives, allowing generated host messages
+to stay opaque to guest code. `grpc.Invoke(target, method, request)` delegates
+to a context-aware `GRPCInvoke` host native and applies the normal network
+capability check to `target`; hosts retain ownership of stubs, TLS and pooled
+connections.
 
 ### Text Templates
 

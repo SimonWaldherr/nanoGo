@@ -4,6 +4,7 @@ package interp
 import (
 	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -47,6 +48,9 @@ func init() {
 		"math":          registerMathPackage,
 		"math/rand":     registerRandPackage,
 		"encoding/json": registerJSONPackage,
+		"encoding/gob":  registerGobPackage,
+		"protobuf":      registerProtobufPackage,
+		"grpc":          registerGRPCPackage,
 		// json is a convenience alias for encoding/json; the builder registers
 		// the same *Package object under both names.
 		"json":          registerJSONPackage,
@@ -358,6 +362,103 @@ func registerJSONPackage(vm *Interpreter) {
 	}}
 	vm.RegisterPackage("encoding/json", jsonPkg)
 	vm.RegisterPackage("json", jsonPkg) // convenience alias
+}
+
+// registerGobPackage exposes compact binary serialization for values that can
+// cross nanoGo's host bridge. Unlike JSON this keeps a byte slice throughout
+// the guest runtime, avoiding a binary-to-string round trip.
+func registerGobPackage(vm *Interpreter) {
+	gobPkg := &Package{Name: "encoding/gob", Funcs: map[string]*Function{}}
+	gobPkg.Funcs["Encode"] = &Function{Name: "Encode", Params: []string{"value"}, Native: func(args []any) (any, error) {
+		if len(args) == 0 {
+			return nil, NewRuntimeError("gob.Encode: missing value")
+		}
+		var buffer bytes.Buffer
+		if err := gob.NewEncoder(&buffer).Encode(gobEnvelope{Value: ToNativeValue(args[0])}); err != nil {
+			return nil, err
+		}
+		return byteSliceValue(buffer.Bytes()), nil
+	}}
+	gobPkg.Funcs["Decode"] = &Function{Name: "Decode", Params: []string{"data"}, Native: func(args []any) (any, error) {
+		if len(args) == 0 {
+			return nil, NewRuntimeError("gob.Decode: missing data")
+		}
+		var envelope gobEnvelope
+		if err := gob.NewDecoder(bytes.NewReader(binaryArg(args[0]))).Decode(&envelope); err != nil {
+			return nil, err
+		}
+		return bridgeToGuest(envelope.Value)
+	}}
+	vm.RegisterPackage("encoding/gob", gobPkg)
+}
+
+// gobEnvelope makes Decode's dynamic result self-describing. Gob can only
+// restore a value into an interface when the sender encoded an interface too.
+type gobEnvelope struct{ Value any }
+
+// registerProtobufPackage delegates schema-aware message handling to an
+// explicit host adapter. Guest structs are dynamic and cannot implement
+// proto.Message themselves; a host can pass generated messages opaquely and
+// register ProtoMarshal/ProtoUnmarshal without exposing either primitive as a
+// guest-callable bare identifier.
+func registerProtobufPackage(vm *Interpreter) {
+	protoPkg := &Package{Name: "protobuf", Funcs: map[string]*Function{}}
+	protoPkg.Funcs["Marshal"] = hostBridgeFunction(vm, "ProtoMarshal", "protobuf.Marshal")
+	protoPkg.Funcs["Unmarshal"] = hostBridgeFunction(vm, "ProtoUnmarshal", "protobuf.Unmarshal")
+	vm.RegisterPackage("protobuf", protoPkg)
+}
+
+// registerGRPCPackage provides a cancellation-aware unary-call bridge. The
+// host owns generated stubs, TLS and connection pooling; nanoGo only checks
+// the target capability and forwards values without reflection or copies.
+func registerGRPCPackage(vm *Interpreter) {
+	grpcPkg := &Package{Name: "grpc", Funcs: map[string]*Function{}}
+	grpcPkg.Funcs["Invoke"] = &Function{Name: "Invoke", Params: []string{"target", "method", "request"}, Native: func(args []any) (any, error) {
+		if len(args) < 3 {
+			return nil, NewRuntimeError("grpc.Invoke: need target, method and request")
+		}
+		if err := vm.requireHTTP(nativeStringArg(args[0])); err != nil {
+			return nil, err
+		}
+		native, ok := vm.hostNative("GRPCInvoke")
+		if !ok {
+			return nil, NewRuntimeError("grpc.Invoke: host bridge not available")
+		}
+		return native(args)
+	}}
+	vm.RegisterPackage("grpc", grpcPkg)
+}
+
+func hostBridgeFunction(vm *Interpreter, nativeName, operation string) *Function {
+	return &Function{Name: operation, IsVariadic: true, Native: func(args []any) (any, error) {
+		native, ok := vm.hostNative(nativeName)
+		if !ok {
+			return nil, NewRuntimeError(operation + ": host bridge not available")
+		}
+		return native(args)
+	}}
+}
+
+func byteSliceValue(data []byte) *SliceVal {
+	values := make([]any, len(data))
+	for i, value := range data {
+		values[i] = int(value)
+	}
+	return &SliceVal{ElementType: "byte", Data: values}
+}
+
+func binaryArg(value any) []byte {
+	if data, ok := value.([]byte); ok {
+		return data
+	}
+	if slice, ok := value.(*SliceVal); ok && isByteType(slice.ElementType) {
+		data := make([]byte, len(slice.Data))
+		for i, element := range slice.Data {
+			data[i] = byte(ToInt(element))
+		}
+		return data
+	}
+	return []byte(ToString(value))
 }
 
 func registerStringsPackage(vm *Interpreter) {

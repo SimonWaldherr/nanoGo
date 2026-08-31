@@ -1653,6 +1653,41 @@ func main() {
 	}
 }
 
+func TestGobAndTransportBridgePackages(t *testing.T) {
+	vm, out := newTestVM()
+	vm.RegisterInternalNative("ProtoMarshal", func(args []any) (any, error) {
+		return "proto:" + ToString(args[0]), nil
+	})
+	vm.RegisterInternalNative("ProtoUnmarshal", func(args []any) (any, error) {
+		return "decoded:" + ToString(args[0]), nil
+	})
+	vm.RegisterInternalNative("GRPCInvoke", func(args []any) (any, error) {
+		return ToString(args[1]) + ":" + ToString(args[2]), nil
+	})
+	if err := vm.Run(`package main
+import (
+  "encoding/gob"
+  "fmt"
+  "grpc"
+  "protobuf"
+)
+func main() {
+  data, _ := gob.Encode("hello")
+  value, _ := gob.Decode(data)
+  fmt.Println(value)
+  wire, _ := protobuf.Marshal("message")
+  decoded, _ := protobuf.Unmarshal(wire)
+  fmt.Println(decoded)
+  response, _ := grpc.Invoke("https://example.com", "/echo.Service/Call", "body")
+  fmt.Println(response)
+}`); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := out.String(), "hello\ndecoded:proto:message\n/echo.Service/Call:body\n"; got != want {
+		t.Fatalf("bridge output = %q, want %q", got, want)
+	}
+}
+
 // --------------- multi-return error capture tests ---------------
 
 func TestMultiReturnErrorCapture(t *testing.T) {
