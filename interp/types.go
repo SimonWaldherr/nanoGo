@@ -39,11 +39,12 @@ func (e *panicError) Error() string { return fmt.Sprintf("panic: %v", e.value) }
 type FieldDef struct{ Name, Type string }
 
 type TypeDef struct {
-	Name       string
-	Kind       string // "struct", "interface", "chan", "alias"
-	Underlying string // scalar representation for a named or alias type
-	Fields     []FieldDef
-	Methods    map[string]*Function
+	Name         string
+	Kind         string // "struct", "interface", "chan", "alias"
+	Underlying   string // scalar representation for a named or alias type
+	Fields       []FieldDef
+	Methods      map[string]*Function
+	allIntFields bool
 	// InterfaceMethods names the method set of a Kind=="interface" TypeDef
 	// (nil/empty for the empty interface). It has no *Function bodies —
 	// an interface declares signatures, not implementations — so a type
@@ -94,12 +95,170 @@ type Function struct {
 type StructVal struct {
 	TypeName string
 	Fields   map[string]any
+	// packedType/packedFields are used by guest struct literals. Field order is
+	// already fixed by the TypeDef, so a compact slice avoids allocating and
+	// hashing a map for every short-lived value. Host-created StructVals keep
+	// using the exported Fields map unchanged.
+	packedType   *TypeDef
+	packedFields []any
+	packedInts   []int
 
 	// nativeState mirrors the private __native field once it has been read or
 	// initialized. It makes repeated native-method calls lock-free while
 	// nativeMu prevents two guest goroutines from racing the first map access.
 	nativeMu    sync.Mutex
 	nativeState atomic.Pointer[structNativeState]
+}
+
+func newPackedStruct(td *TypeDef) *StructVal {
+	if td.allIntFields && len(td.Fields) != 0 {
+		return &StructVal{TypeName: td.Name, packedType: td, packedInts: make([]int, len(td.Fields))}
+	}
+	return &StructVal{TypeName: td.Name, packedType: td, packedFields: make([]any, len(td.Fields))}
+}
+
+const (
+	maxArenaStructBlocks = 256
+	maxArenaStructFields = 16
+)
+
+func (e *execution) newPackedStruct(td *TypeDef) *StructVal {
+	// Bound execution-lifetime retention. Very wide structs and executions
+	// creating more than 65k values use normal GC-managed allocations.
+	if len(td.Fields) > maxArenaStructFields ||
+		(len(e.structBlocks) == maxArenaStructBlocks && e.structBlockIndex == len(e.structBlocks[len(e.structBlocks)-1])) {
+		return newPackedStruct(td)
+	}
+	if len(e.structBlocks) == 0 || e.structBlockIndex == len(e.structBlocks[len(e.structBlocks)-1]) {
+		e.structBlocks = append(e.structBlocks, new([256]StructVal))
+		e.structBlockIndex = 0
+	}
+	block := e.structBlocks[len(e.structBlocks)-1]
+	value := &block[e.structBlockIndex]
+	e.structBlockIndex++
+	value.TypeName = td.Name
+	value.packedType = td
+
+	fieldCount := len(td.Fields)
+	if fieldCount == 0 {
+		return value
+	}
+	if td.allIntFields {
+		value.packedInts = e.allocateStructInts(fieldCount)
+		return value
+	}
+	if fieldCount > 1024 {
+		value.packedFields = make([]any, fieldCount)
+		return value
+	}
+	if len(e.fieldBlocks) == 0 || e.fieldBlockIndex+fieldCount > len(e.fieldBlocks[len(e.fieldBlocks)-1]) {
+		e.fieldBlocks = append(e.fieldBlocks, new([1024]any))
+		e.fieldBlockIndex = 0
+	}
+	fields := e.fieldBlocks[len(e.fieldBlocks)-1]
+	value.packedFields = fields[e.fieldBlockIndex : e.fieldBlockIndex+fieldCount : e.fieldBlockIndex+fieldCount]
+	e.fieldBlockIndex += fieldCount
+	return value
+}
+
+func (e *execution) allocateStructInts(count int) []int {
+	if count > 2048 {
+		return make([]int, count)
+	}
+	if len(e.intFieldBlocks) == 0 || e.intFieldBlockIndex+count > len(e.intFieldBlocks[len(e.intFieldBlocks)-1]) {
+		e.intFieldBlocks = append(e.intFieldBlocks, new([2048]int))
+		e.intFieldBlockIndex = 0
+	}
+	fields := e.intFieldBlocks[len(e.intFieldBlocks)-1]
+	result := fields[e.intFieldBlockIndex : e.intFieldBlockIndex+count : e.intFieldBlockIndex+count]
+	e.intFieldBlockIndex += count
+	return result
+}
+
+func (vm *Interpreter) newPackedStruct(td *TypeDef) *StructVal {
+	if exec := vm.activeExecution; exec != nil && !exec.concurrent.Load() {
+		return exec.newPackedStruct(td)
+	}
+	return newPackedStruct(td)
+}
+
+func (s *StructVal) field(name string) (any, bool) {
+	if s == nil {
+		return nil, false
+	}
+	if s.packedType != nil {
+		for i := range s.packedType.Fields {
+			if s.packedType.Fields[i].Name == name {
+				if s.packedInts != nil {
+					return s.packedInts[i], true
+				}
+				return s.packedFields[i], true
+			}
+		}
+	}
+	value, ok := s.Fields[name]
+	return value, ok
+}
+
+func (s *StructVal) setField(name string, value any) {
+	if s.packedType != nil {
+		for i := range s.packedType.Fields {
+			if s.packedType.Fields[i].Name == name {
+				if s.packedInts != nil {
+					s.packedInts[i] = ToInt(value)
+					return
+				}
+				s.packedFields[i] = value
+				return
+			}
+		}
+	}
+	if s.Fields == nil {
+		s.Fields = make(map[string]any, 1)
+	}
+	s.Fields[name] = value
+}
+
+func (s *StructVal) setIntField(name string, value int) bool {
+	if s == nil || s.packedType == nil || s.packedInts == nil {
+		return false
+	}
+	for i := range s.packedType.Fields {
+		if s.packedType.Fields[i].Name == name {
+			s.packedInts[i] = value
+			return true
+		}
+	}
+	return false
+}
+
+func (s *StructVal) fieldCount() int {
+	if s == nil {
+		return 0
+	}
+	count := len(s.Fields)
+	if s.packedType != nil {
+		count += len(s.packedType.Fields)
+	}
+	return count
+}
+
+func (s *StructVal) forEachField(visit func(string, any)) {
+	if s == nil {
+		return
+	}
+	if s.packedType != nil {
+		for i, field := range s.packedType.Fields {
+			if s.packedInts != nil {
+				visit(field.Name, s.packedInts[i])
+			} else {
+				visit(field.Name, s.packedFields[i])
+			}
+		}
+	}
+	for name, value := range s.Fields {
+		visit(name, value)
+	}
 }
 
 type structNativeState struct{ value any }
@@ -192,10 +351,8 @@ func ToNativeValue(v any) any {
 		}
 		return out
 	case *StructVal:
-		out := make(map[string]any, len(x.Fields))
-		for name, value := range x.Fields {
-			out[name] = ToNativeValue(value)
-		}
+		out := make(map[string]any, x.fieldCount())
+		x.forEachField(func(name string, value any) { out[name] = ToNativeValue(value) })
 		return out
 	case map[string]any:
 		out := make(map[string]any, len(x))
@@ -263,6 +420,18 @@ func hashKey(v any) string {
 		b.WriteString("struct:")
 		b.WriteString(t.TypeName)
 		b.WriteByte(':')
+		if t.packedType != nil {
+			for i, field := range t.packedType.Fields {
+				b.WriteString(field.Name)
+				b.WriteByte('=')
+				if t.packedInts != nil {
+					b.WriteString(hashKey(t.packedInts[i]))
+				} else {
+					b.WriteString(hashKey(t.packedFields[i]))
+				}
+				b.WriteByte(';')
+			}
+		}
 		names := make([]string, 0, len(t.Fields))
 		for k := range t.Fields {
 			names = append(names, k)

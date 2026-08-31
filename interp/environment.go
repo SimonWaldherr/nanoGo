@@ -963,7 +963,8 @@ func (r lvalueRef) get() any {
 		v, _ := r.m.getByKey(r.k)
 		return v
 	case lvalueField:
-		return r.sv.Fields[r.name]
+		v, _ := r.sv.field(r.name)
+		return v
 	default:
 		return nil
 	}
@@ -982,7 +983,7 @@ func (r lvalueRef) set(v any) error {
 			r.m.setByKey(r.k, v)
 		}
 	case lvalueField:
-		r.sv.Fields[r.name] = v
+		r.sv.setField(r.name, v)
 	}
 	return nil
 }
@@ -1027,8 +1028,8 @@ type fieldRef struct {
 	name string
 }
 
-func (r *fieldRef) Get() any        { return r.s.Fields[r.name] }
-func (r *fieldRef) Set(v any) error { r.s.Fields[r.name] = v; return nil }
+func (r *fieldRef) Get() any        { v, _ := r.s.field(r.name); return v }
+func (r *fieldRef) Set(v any) error { r.s.setField(r.name, v); return nil }
 
 // ------------------- Call frames for defer/panic ------------------
 

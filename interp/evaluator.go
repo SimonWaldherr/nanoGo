@@ -110,6 +110,7 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 								td.Fields = append(td.Fields, FieldDef{Name: n.Name, Type: ft})
 							}
 						}
+						td.allIntFields = structFieldsAreInts(td.Fields)
 						vm.types[td.Name] = td
 					case *ast.InterfaceType:
 						// No implementation to store here — see
@@ -848,7 +849,8 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		if !ok {
 			return nil, NewRuntimeError("selector on non-struct")
 		}
-		return sv.Fields[ex.Sel.Name], nil
+		value, _ := sv.field(ex.Sel.Name)
+		return value, nil
 
 	case *ast.CompositeLit:
 		// Struct, slice, map literals.
@@ -956,9 +958,11 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		if td == nil || td.Kind != "struct" {
 			return nil, NewRuntimeError("unknown struct type: " + typ)
 		}
-		obj := &StructVal{TypeName: typ, Fields: make(map[string]any, len(td.Fields))}
-		for _, f := range td.Fields {
-			obj.Fields[f.Name] = vm.zeroValueForType(f.Type)
+		obj := vm.newPackedStruct(td)
+		if !td.allIntFields {
+			for i, f := range td.Fields {
+				obj.packedFields[i] = vm.zeroValueForType(f.Type)
+			}
 		}
 		for _, elt := range ex.Elts {
 			kv, ok := elt.(*ast.KeyValueExpr)
@@ -966,11 +970,21 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 				continue
 			}
 			key := kv.Key.(*ast.Ident).Name
+			if td.allIntFields {
+				val, intOK, err := vm.tryEvalIntExpr(kv.Value, env, true)
+				if err != nil {
+					return nil, err
+				}
+				if intOK {
+					obj.setIntField(key, val)
+					continue
+				}
+			}
 			val, err := vm.evalExpr(kv.Value, env)
 			if err != nil {
 				return nil, err
 			}
-			obj.Fields[key] = val
+			obj.setField(key, val)
 		}
 		return obj, nil
 
@@ -1271,6 +1285,33 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 		}
 		n, ok := sv.Data[idx].(int)
 		return n, ok, nil
+
+	case *ast.SelectorExpr:
+		id, ok := ex.X.(*ast.Ident)
+		if !ok {
+			return 0, false, nil
+		}
+		container, ok := vm.get(id.Name, env)
+		if !ok {
+			return 0, false, nil
+		}
+		sv, ok := container.(*StructVal)
+		if !ok || sv.packedInts == nil || sv.packedType == nil {
+			return 0, false, nil
+		}
+		// The generic selector visits its identifier child as a separate AST
+		// node. Preserve that exact checkpoint only after establishing that the
+		// fast path can handle the expression; a failed speculative probe must
+		// not change step-limit accounting.
+		if err := vm.executionError(); err != nil {
+			return 0, true, err
+		}
+		for i := range sv.packedType.Fields {
+			if sv.packedType.Fields[i].Name == ex.Sel.Name {
+				return sv.packedInts[i], true, nil
+			}
+		}
+		return 0, false, nil
 
 	case *ast.CallExpr:
 		// len(x)/cap(x) on a plain variable. `for i := 0; i < len(s); i++` is

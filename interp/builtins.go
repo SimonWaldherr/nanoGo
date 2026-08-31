@@ -123,6 +123,15 @@ func (vm *Interpreter) zeroValueForType(typ string) any {
 			// below — there is no implementation to default-construct.
 			return nil
 		}
+		if td.Kind == "struct" {
+			value := vm.newPackedStruct(td)
+			if !td.allIntFields {
+				for i, field := range td.Fields {
+					value.packedFields[i] = vm.zeroValueForType(field.Type)
+				}
+			}
+			return value
+		}
 	}
 	return zeroValue(typ)
 }
@@ -535,4 +544,18 @@ func isBuiltinType(name string) bool {
 	default:
 		return false
 	}
+}
+
+func structFieldsAreInts(fields []FieldDef) bool {
+	if len(fields) == 0 {
+		return false
+	}
+	for _, field := range fields {
+		switch field.Type {
+		case "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune":
+		default:
+			return false
+		}
+	}
+	return true
 }

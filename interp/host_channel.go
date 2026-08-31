@@ -332,16 +332,24 @@ func bridgeToHost(value any) (any, error) {
 		}
 		return out, nil
 	case *StructVal:
-		out := make(map[string]any, len(v.Fields))
-		for name, item := range v.Fields {
+		out := make(map[string]any, v.fieldCount())
+		var bridgeErr error
+		v.forEachField(func(name string, item any) {
+			if bridgeErr != nil {
+				return
+			}
 			if strings.HasPrefix(name, "__") {
-				continue
+				return
 			}
 			converted, err := bridgeToHost(item)
 			if err != nil {
-				return nil, err
+				bridgeErr = err
+				return
 			}
 			out[name] = converted
+		})
+		if bridgeErr != nil {
+			return nil, bridgeErr
 		}
 		return out, nil
 	default:

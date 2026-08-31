@@ -151,6 +151,18 @@ type execution struct {
 	// The map is immutable after parse and safe for concurrent guest reads.
 	interfaceMethods map[*ast.InterfaceType][]string
 
+	// Guest struct literals usually live only for this RunContext call. Store
+	// their headers and field slots in stable heap blocks while execution is
+	// single-goroutine, turning thousands of tiny allocator/GC operations into
+	// a handful of block allocations. Once guest concurrency starts, creation
+	// uses the ordinary independent-allocation path instead.
+	structBlocks       []*[256]StructVal
+	structBlockIndex   int
+	fieldBlocks        []*[1024]any
+	fieldBlockIndex    int
+	intFieldBlocks     []*[2048]int
+	intFieldBlockIndex int
+
 	killed    atomic.Bool
 	cancelled atomic.Bool // mirrors parent cancellation without a channel op on the hot path — see beginExecution
 	// stopped is the single healthy-path status read made by err. The detailed

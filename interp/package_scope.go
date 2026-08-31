@@ -105,6 +105,7 @@ func (ps *PackageScope) CollectDecls(file *ast.File, fset *token.FileSet) error 
 							td.Fields = append(td.Fields, FieldDef{Name: n.Name, Type: ft})
 						}
 					}
+					td.allIntFields = structFieldsAreInts(td.Fields)
 					vm.types[td.Name] = td
 					ps.declaredTypes[td.Name] = true
 				case *ast.InterfaceType:
