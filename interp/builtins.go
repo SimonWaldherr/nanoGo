@@ -197,8 +197,12 @@ func (vm *Interpreter) builtinMakeSizes(typ string, length, capacity, argc int) 
 			return nil, NewRuntimeError("make: size exceeds interpreter limit")
 		}
 		data := make([]any, length, capacity)
-		for i := 0; i < length; i++ {
-			data[i] = vm.zeroValueForType(elem)
+		// []any/interface{} is already nil-initialized by make. Avoid a
+		// second full pass for this common dynamically typed container.
+		if elem != "any" && elem != "interface{}" {
+			for i := 0; i < length; i++ {
+				data[i] = vm.zeroValueForType(elem)
+			}
 		}
 		return &SliceVal{ElementType: elem, Data: data}, nil
 	}

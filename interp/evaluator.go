@@ -56,6 +56,7 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 	exec.litCache, exec.floatLitCache = buildLitCaches(file)
 	exec.hasFloatLiterals = len(exec.floatLitCache) != 0
 	exec.reusableBlocks = buildReusableBlockSet(file)
+	exec.interfaceMethods = buildInterfaceMethodCache(file)
 	if file.Name.Name != "main" {
 		return NewRuntimeError(`only "package main" is supported`)
 	}
@@ -176,7 +177,12 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 			// Method receiver?
 			if d.Recv != nil && len(d.Recv.List) > 0 {
 				rcv := d.Recv.List[0]
-				fn.RecvName = rcv.Names[0].Name
+				// A receiver name is optional in Go (`func (T) M()`), and an
+				// unnamed receiver cannot be referenced from the body anyway.
+				// Keep RecvName empty instead of indexing an empty Names slice.
+				if len(rcv.Names) > 0 {
+					fn.RecvName = rcv.Names[0].Name
+				}
 				fn.RecvType = strings.TrimPrefix(typeString(rcv.Type), "*")
 				td := vm.types[fn.RecvType]
 				if td == nil {
@@ -663,8 +669,10 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			if fn == nil {
 				return nil, NewRuntimeError("method not found: " + recvType + "." + sel.Sel.Name)
 			}
-			args := make([]any, 1+len(ex.Args))
-			args[0] = recv
+			// callFunction receives the receiver separately. Keeping it out of
+			// the argument slice avoids allocating a one-element []any for the
+			// extremely common zero-argument guest method call (p.Sum()).
+			args := make([]any, 0, len(ex.Args))
 			// Evaluate args (support last ... expansion)
 			if ex.Ellipsis != token.NoPos && len(ex.Args) > 0 {
 				for i, a := range ex.Args {
@@ -683,19 +691,19 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 						if err != nil {
 							return nil, err
 						}
-						args[i+1] = v
+						args = append(args, v)
 					}
 				}
 			} else {
-				for i, a := range ex.Args {
+				for _, a := range ex.Args {
 					v, err := vm.evalExpr(a, env)
 					if err != nil {
 						return nil, err
 					}
-					args[i+1] = v
+					args = append(args, v)
 				}
 			}
-			return vm.callFunction(fn, env, &recv, args[1:])
+			return vm.callFunction(fn, env, &recv, args)
 		}
 
 		// Normal function call
@@ -866,6 +874,31 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 					data[i] = vm.zeroValueForType(elem)
 				}
 			}
+			// Most literals are the compact sequential form []T{a, b, c}.
+			// Avoid the keyed-literal bounds/growth machinery for it: pre-size
+			// once and write each evaluated element directly by its known index.
+			sequential := true
+			for _, elt := range ex.Elts {
+				if _, keyed := elt.(*ast.KeyValueExpr); keyed {
+					sequential = false
+					break
+				}
+			}
+			if sequential {
+				if !fixed {
+					data = make([]any, len(ex.Elts))
+				} else if len(ex.Elts) > len(data) {
+					return nil, NewRuntimeError("array literal index out of bounds")
+				}
+				for i, valueExpr := range ex.Elts {
+					v, err := vm.evalExpr(valueExpr, env)
+					if err != nil {
+						return nil, err
+					}
+					data[i] = vm.coerceToType(v, elem)
+				}
+				return &SliceVal{ElementType: elem, Data: data, Fixed: fixed}, nil
+			}
 			next := 0
 			for _, elt := range ex.Elts {
 				index := next
@@ -899,7 +932,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		}
 		if strings.HasPrefix(typ, "map[") {
 			k, v := parseMapType(typ)
-			lit := &MapVal{KeyType: k, ElementType: v, Data: map[string]any{}}
+			lit := &MapVal{KeyType: k, ElementType: v, Data: make(map[string]any, len(ex.Elts))}
 			for _, elt := range ex.Elts {
 				kv, ok := elt.(*ast.KeyValueExpr)
 				if !ok {
@@ -923,7 +956,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		if td == nil || td.Kind != "struct" {
 			return nil, NewRuntimeError("unknown struct type: " + typ)
 		}
-		obj := &StructVal{TypeName: typ, Fields: map[string]any{}}
+		obj := &StructVal{TypeName: typ, Fields: make(map[string]any, len(td.Fields))}
 		for _, f := range td.Fields {
 			obj.Fields[f.Name] = vm.zeroValueForType(f.Type)
 		}
@@ -3688,12 +3721,24 @@ func isFloat(v any) bool { _, ok := v.(float64); return ok }
 func typeOfValue(vm *Interpreter, v any) string {
 	switch x := v.(type) {
 	case *StructVal:
+		if x == nil {
+			return "<nil>"
+		}
 		return x.TypeName
 	case *SliceVal:
+		if x == nil {
+			return "<nil>"
+		}
 		return "[]" + x.ElementType
 	case *MapVal:
+		if x == nil {
+			return "<nil>"
+		}
 		return "map[" + x.KeyType + "]" + x.ElementType
 	case *ChannelVal:
+		if x == nil {
+			return "<nil>"
+		}
 		return "chan " + x.ElementType
 	case int:
 		return "int"
@@ -3734,7 +3779,7 @@ func (vm *Interpreter) evalTypeAssert(ex *ast.TypeAssertExpr, env *Env) (asserte
 	}
 	switch t := ex.Type.(type) {
 	case *ast.InterfaceType:
-		names := interfaceMethodNames(t)
+		names := vm.cachedInterfaceMethodNames(t)
 		if len(names) == 0 {
 			return dyn, dyn, true, nil // interface{} / inline empty interface
 		}
@@ -3779,6 +3824,15 @@ func interfaceMethodNames(it *ast.InterfaceType) []string {
 	return names
 }
 
+func (vm *Interpreter) cachedInterfaceMethodNames(it *ast.InterfaceType) []string {
+	if exec := vm.activeExecution; exec != nil {
+		if names, ok := exec.interfaceMethods[it]; ok {
+			return names
+		}
+	}
+	return interfaceMethodNames(it)
+}
+
 func namesOf(f *ast.Field) []string {
 	names := make([]string, 0, len(f.Names))
 	for _, n := range f.Names {
@@ -3793,6 +3847,24 @@ func namesOf(f *ast.Field) []string {
 // a declaration for) satisfies only the empty method set.
 func (vm *Interpreter) valueSatisfiesMethods(v any, names []string) bool {
 	if len(names) == 0 {
+		return true
+	}
+	// Named structs dominate non-empty interface assertions. Their type name
+	// is already stored on the value, so avoid typeOfValue's wider dynamic
+	// type switch and its fallback formatting path.
+	if value, ok := v.(*StructVal); ok {
+		if value == nil {
+			return false
+		}
+		td := vm.types[value.TypeName]
+		if td == nil || td.Methods == nil {
+			return false
+		}
+		for _, method := range names {
+			if _, has := td.Methods[method]; !has {
+				return false
+			}
+		}
 		return true
 	}
 	td := vm.types[typeOfValue(vm, v)]

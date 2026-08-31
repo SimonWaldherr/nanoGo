@@ -142,6 +142,22 @@ func main() {
 	}
 }
 
+func TestTypeAssertTypedNilStructPointerFailsWithoutPanicking(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+type Point struct{ X int }
+func main() {
+	var point *Point
+	var value any = point
+	_, ok := value.(Point)
+	fmt.Println(ok)
+}`)
+	if got, want := out, "false\n"; got != want {
+		t.Fatalf("typed nil assertion = %q, want %q", got, want)
+	}
+}
+
 func TestTypeAssertErrorInterfaceFromNativeError(t *testing.T) {
 	// Calling .Error() on the resulting value isn't exercised here: nanoGo
 	// has no generic method dispatch for arbitrary native Go values (only

@@ -57,6 +57,25 @@ func buildReusableBlockSet(file *ast.File) map[*ast.BlockStmt]struct{} {
 	return state.blocks
 }
 
+// buildInterfaceMethodCache records inline interface method sets once per
+// parsed file. A type assertion in a loop otherwise reconstructs its []string
+// method list from the AST on every iteration.
+func buildInterfaceMethodCache(file *ast.File) map[*ast.InterfaceType][]string {
+	var methods map[*ast.InterfaceType][]string
+	ast.Inspect(file, func(node ast.Node) bool {
+		it, ok := node.(*ast.InterfaceType)
+		if !ok {
+			return true
+		}
+		if methods == nil {
+			methods = make(map[*ast.InterfaceType][]string)
+		}
+		methods[it] = interfaceMethodNames(it)
+		return true
+	})
+	return methods
+}
+
 type reusableBlockInfo struct {
 	block      *ast.BlockStmt
 	hasFuncLit bool
@@ -128,6 +147,9 @@ type execution struct {
 	// reusableBlocks contains source blocks with no escaping function literal.
 	// Their scopes can share fastEnvPool with frame-free calls.
 	reusableBlocks map[*ast.BlockStmt]struct{}
+	// interfaceMethods caches method names for inline interface assertions.
+	// The map is immutable after parse and safe for concurrent guest reads.
+	interfaceMethods map[*ast.InterfaceType][]string
 
 	killed    atomic.Bool
 	cancelled atomic.Bool // mirrors parent cancellation without a channel op on the hot path — see beginExecution

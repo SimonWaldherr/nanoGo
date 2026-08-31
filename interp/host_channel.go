@@ -228,14 +228,40 @@ func bridgeToGuest(value any) (any, error) {
 			out.Data[i] = v[i]
 		}
 		return out, nil
+	case []float64:
+		out := &SliceVal{ElementType: "float64", Data: make([]any, len(v))}
+		for i := range v {
+			out.Data[i] = v[i]
+		}
+		return out, nil
+	case []bool:
+		out := &SliceVal{ElementType: "bool", Data: make([]any, len(v))}
+		for i := range v {
+			out.Data[i] = v[i]
+		}
+		return out, nil
 	case map[string]any:
-		out := &MapVal{KeyType: "string", ElementType: "any", Data: map[string]any{}}
+		out := &MapVal{KeyType: "string", ElementType: "any", Data: make(map[string]any, len(v))}
 		for key, item := range v {
 			converted, err := bridgeToGuest(item)
 			if err != nil {
 				return nil, err
 			}
-			out.setByKey(key, converted)
+			// String-keyed maps use the raw key as their internal key, so the
+			// bridge can bypass MapVal's dynamic-key compatibility machinery.
+			out.Data[key] = converted
+		}
+		return out, nil
+	case map[string]string:
+		out := &MapVal{KeyType: "string", ElementType: "string", Data: make(map[string]any, len(v))}
+		for key, value := range v {
+			out.Data[key] = value
+		}
+		return out, nil
+	case map[string]int:
+		out := &MapVal{KeyType: "string", ElementType: "int", Data: make(map[string]any, len(v))}
+		for key, value := range v {
+			out.Data[key] = value
 		}
 		return out, nil
 	default:
@@ -248,6 +274,44 @@ func bridgeToHost(value any) (any, error) {
 	case nil, bool, string, int, int64, float64:
 		return v, nil
 	case *SliceVal:
+		if v == nil {
+			return nil, nil
+		}
+		// Preserve the natural host representation for scalar containers.
+		// This avoids per-element recursive calls and interface boxing for the
+		// byte/int/string payloads most tools exchange with nanoGo.
+		switch v.ElementType {
+		case "byte", "uint8":
+			out := make([]byte, len(v.Data))
+			for i, item := range v.Data {
+				out[i] = byte(ToInt(item))
+			}
+			return out, nil
+		case "int":
+			out := make([]int, len(v.Data))
+			for i, item := range v.Data {
+				out[i] = ToInt(item)
+			}
+			return out, nil
+		case "float64":
+			out := make([]float64, len(v.Data))
+			for i, item := range v.Data {
+				out[i] = ToFloat(item)
+			}
+			return out, nil
+		case "bool":
+			out := make([]bool, len(v.Data))
+			for i, item := range v.Data {
+				out[i] = ToBool(item)
+			}
+			return out, nil
+		case "string":
+			out := make([]string, len(v.Data))
+			for i, item := range v.Data {
+				out[i] = ToString(item)
+			}
+			return out, nil
+		}
 		out := make([]any, len(v.Data))
 		for i, item := range v.Data {
 			converted, err := bridgeToHost(item)
@@ -293,5 +357,6 @@ func bridgeToHost(value any) (any, error) {
 func BridgeToGuest(value any) (any, error) { return bridgeToGuest(value) }
 
 // BridgeToHost converts a nanoGo runtime value back into ordinary Go values
-// (e.g. *SliceVal -> []any), the inverse of BridgeToGuest.
+// (e.g. *SliceVal -> []byte, []int, []string, or []any), the inverse of
+// BridgeToGuest while retaining concrete scalar slice types where possible.
 func BridgeToHost(value any) (any, error) { return bridgeToHost(value) }

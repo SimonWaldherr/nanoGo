@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1688,6 +1689,19 @@ func main() {
 	}
 }
 
+func TestMakeAnySliceKeepsNilElements(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	values := make([]any, 2)
+	fmt.Println(values[0] == nil, values[1] == nil)
+}`)
+	if got, want := out, "true true\n"; got != want {
+		t.Fatalf("make([]any) output = %q, want %q", got, want)
+	}
+}
+
 // --------------- multi-return error capture tests ---------------
 
 func TestMultiReturnErrorCapture(t *testing.T) {
@@ -2858,5 +2872,33 @@ func main() {
 	want := "0\n10\n20\n"
 	if out != want {
 		t.Fatalf("closures over per-iteration block locals = %q, want %q", out, want)
+	}
+}
+
+func TestBridgePreservesCommonToolContainerTypes(t *testing.T) {
+	cases := []struct {
+		input any
+		want  any
+	}{
+		{[]byte{1, 2, 3}, []byte{1, 2, 3}},
+		{[]int{4, 5}, []int{4, 5}},
+		{[]string{"a", "b"}, []string{"a", "b"}},
+		{[]float64{1.5}, []float64{1.5}},
+		{[]bool{true, false}, []bool{true, false}},
+		{map[string]string{"kind": "tool"}, map[string]any{"kind": "tool"}},
+		{map[string]int{"count": 3}, map[string]any{"count": 3}},
+	}
+	for _, tc := range cases {
+		guest, err := BridgeToGuest(tc.input)
+		if err != nil {
+			t.Fatalf("BridgeToGuest(%T): %v", tc.input, err)
+		}
+		host, err := BridgeToHost(guest)
+		if err != nil {
+			t.Fatalf("BridgeToHost(%T): %v", guest, err)
+		}
+		if !reflect.DeepEqual(host, tc.want) {
+			t.Errorf("round trip %T = %#v (%T), want %#v (%T)", tc.input, host, host, tc.want, tc.want)
+		}
 	}
 }

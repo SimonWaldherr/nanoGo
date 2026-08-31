@@ -3,6 +3,7 @@ package interp
 
 import (
 	"context"
+	"fmt"
 	"go/parser"
 	"go/token"
 	"strconv"
@@ -535,6 +536,60 @@ func main() {
 		if err := vm.Run(src); err != nil {
 			b.Fatalf("Run: %v", err)
 		}
+	}
+}
+
+// BenchmarkInterfaceAssertions keeps dynamic type checks and inline interface
+// method-set caching visible. The interface literal is intentionally inside a
+// loop, where rebuilding its method list used to allocate on every iteration.
+func BenchmarkInterfaceAssertions(b *testing.B) {
+	const src = `
+package main
+type Stringer interface { String() string }
+type Value struct{}
+func (Value) String() string { return "value" }
+func main() {
+	var value any = Value{}
+	matched := 0
+	for i := 0; i < 5000; i++ {
+		if _, ok := value.(interface { String() string }); ok { matched++ }
+	}
+	_ = matched
+}`
+	vm, _ := newTestVM()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := vm.Run(src); err != nil {
+			b.Fatalf("Run: %v", err)
+		}
+	}
+}
+
+// BenchmarkBridgeScalarContainers measures the host-tool boundary without
+// evaluator or channel scheduling overhead. Concrete scalar slices should
+// remain concrete after a guest round trip rather than becoming []any.
+func BenchmarkBridgeScalarContainers(b *testing.B) {
+	values := []any{
+		[]byte("payload"),
+		[]int{1, 2, 3, 4},
+		[]string{"tool", "input"},
+		map[string]any{"request": "id", "count": 2},
+	}
+	for _, value := range values {
+		guest, err := BridgeToGuest(value)
+		if err != nil {
+			b.Fatalf("BridgeToGuest(%T): %v", value, err)
+		}
+		b.Run(fmt.Sprintf("%T", value), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := BridgeToHost(guest); err != nil {
+					b.Fatalf("BridgeToHost: %v", err)
+				}
+			}
+		})
 	}
 }
 
