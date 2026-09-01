@@ -61,6 +61,9 @@ func init() {
 		"unicode/utf8":  registerUTF8Package,
 		"sync":          registerSyncPackage,
 		"regexp":        registerRegexpPackage,
+		"reflect":       registerReflectPackage,
+		"runtime":       registerRuntimePackage,
+		"runtime/debug": registerRuntimeDebugPackage,
 		"browser":       registerBrowserPackage,
 		"text/template": registerTemplatePackage,
 		"http":          registerHTTPPackage,
@@ -73,8 +76,9 @@ func init() {
 
 // RegisterBuiltinPackages makes nanoGo's tiny, curated set of std-like
 // packages available to guest code: fmt, time, math, encoding/json, sync,
-// regexp, strings, sort, strconv, math/rand, path, unicode/utf8, browser,
-// text/template, http, fs, os, storage, testing, and debug. Each package
+// regexp, reflect, runtime, runtime/debug, strings, sort, strconv, math/rand,
+// path, unicode/utf8, browser, text/template, http, fs, os, storage, testing,
+// and debug. Each package
 // intentionally exposes only the functions registered below; this is not a
 // full Go standard library.
 //

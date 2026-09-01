@@ -99,6 +99,132 @@ func TestBuiltinPackagesAreBuiltOnlyWhenNeeded(t *testing.T) {
 	}
 }
 
+func TestReflectPackageGuestTypesAndValues(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import (
+	"fmt"
+	"reflect"
+)
+type Point struct { X int; Name string }
+type Other struct { X int; Name string }
+func main() {
+	p := Point{X: 7, Name: "nano"}
+	t := reflect.TypeOf(p)
+	v := reflect.ValueOf(p)
+	f := t.Field(0)
+	fv := v.FieldByName("X")
+	fmt.Println(t.Name(), t.Kind() == reflect.Struct, t.NumField(), f.Name)
+	fmt.Println(fv.Int(), fv.Type().Kind() == reflect.Int, v.Field(1).String())
+	fmt.Println(reflect.DeepEqual(p, Point{X: 7, Name: "nano"}), reflect.DeepEqual(p, Other{X: 7, Name: "nano"}), reflect.Zero(t).IsZero())
+	fmt.Println(reflect.DeepEqual(t, reflect.TypeOf(p)), reflect.DeepEqual(t, reflect.TypeOf("nano")))
+	m := map[string]int{"answer": 42}
+	mv := reflect.ValueOf(m).MapIndex(reflect.ValueOf("answer"))
+	fmt.Println(mv.IsValid(), mv.Int(), reflect.ValueOf([]int{1, 2, 3}).Len())
+}
+`)
+	want := "Point true 2 X\n7 true nano\ntrue false true\ntrue false\ntrue 42 3\n"
+	if out != want {
+		t.Fatalf("reflect output = %q, want %q", out, want)
+	}
+}
+
+func TestStructTagsDriveJSONAndAreAvailableThroughReflect(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import (
+	"encoding/json"
+	"fmt"
+	"reflect"
+)
+type Account struct {
+	ID       int    `+"`json:\"id\"`"+`
+	Name     string `+"`json:\"name,omitempty\" validate:\"required,min=3\"`"+`
+	Password string `+"`json:\"-\"`"+`
+}
+func main() {
+	a := Account{ID: 7, Password: "secret"}
+	s, _ := json.Marshal(a)
+	f := reflect.TypeOf(a).Field(1)
+	fmt.Println(s)
+	fmt.Println(f.Tag.Get("json"), f.Tag.Get("validate"))
+}
+`)
+	want := "{\"id\":7}\nname,omitempty required,min=3\n"
+	if out != want {
+		t.Fatalf("output = %q, want %q", out, want)
+	}
+}
+
+func TestReflectTypeValuesAreCached(t *testing.T) {
+	vm := NewInterpreter()
+	RegisterBuiltinPackages(vm)
+	pkg, ok := vm.Package("reflect")
+	if !ok {
+		t.Fatal("reflect package did not resolve")
+	}
+	first, err := pkg.Funcs["TypeOf"].Native([]any{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := pkg.Funcs["TypeOf"].Native([]any{2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatal("TypeOf(int) did not reuse its immutable Type value")
+	}
+}
+
+func TestRuntimeAndRuntimeDebugUseGuestState(t *testing.T) {
+	var stdout, stderr strings.Builder
+	vm := NewInterpreter()
+	vm.RegisterNative("ConsoleLog", func(args []any) (any, error) {
+		for i, arg := range args {
+			if i > 0 {
+				stdout.WriteByte(' ')
+			}
+			stdout.WriteString(ToString(arg))
+		}
+		stdout.WriteByte('\n')
+		return nil, nil
+	})
+	vm.RegisterNative("ConsoleError", func(args []any) (any, error) {
+		if len(args) != 0 {
+			stderr.WriteString(ToString(args[0]))
+		}
+		return nil, nil
+	})
+	RegisterBuiltinPackages(vm)
+	err := vm.Run(`
+package main
+import (
+	"fmt"
+	"runtime"
+	debug "runtime/debug"
+)
+func leaf() {
+	buf := make([]byte, 256)
+	n := runtime.Stack(buf, false)
+	stack := debug.Stack()
+	fmt.Println(runtime.GOOS != "", runtime.GOARCH != "", runtime.NumCPU() > 0, runtime.GOMAXPROCS(0) > 0)
+	fmt.Println(n > 0, len(stack) > 0, string(buf[:n]))
+	debug.PrintStack()
+}
+func middle() { leaf() }
+func main() { middle() }
+`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "true true true true\n") || !strings.Contains(stdout.String(), "#0 leaf") || !strings.Contains(stdout.String(), "#1 middle") {
+		t.Fatalf("runtime output missing guest stack/runtime state: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "#0 leaf") || !strings.Contains(stderr.String(), "#2 main") {
+		t.Fatalf("PrintStack output missing guest frames: %q", stderr.String())
+	}
+}
+
 // TestImportBuildsPackageWithoutHostRegistration preserves the long-standing
 // behavior that a plain Run/RunContext caller gets the curated packages from
 // an import statement alone, without the host calling

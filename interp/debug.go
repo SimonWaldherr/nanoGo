@@ -357,6 +357,68 @@ func callStackString(frame *callFrame) string {
 	return strings.TrimRight(buf.String(), "\n")
 }
 
+func guestByteSlice(text string) *SliceVal {
+	data := make([]any, len(text))
+	for i := range text {
+		data[i] = int(text[i])
+	}
+	return &SliceVal{ElementType: "byte", Data: data}
+}
+
+// traceRuntimeStack implements runtime.Stack against nanoGo's call frames.
+// Reporting host goroutines would both leak host details and misrepresent the
+// guest scheduler, so all is evaluated for side effects but intentionally
+// does not widen the snapshot beyond the active guest call chain.
+func (vm *Interpreter) traceRuntimeStack(call *ast.CallExpr, env *Env) (any, error) {
+	if len(call.Args) != 2 {
+		return nil, NewRuntimeError("runtime.Stack: expected buffer and all arguments")
+	}
+	buffer, err := vm.evalExpr(call.Args[0], env)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := vm.evalExpr(call.Args[1], env); err != nil {
+		return nil, err
+	}
+	slice, ok := buffer.(*SliceVal)
+	if !ok || !isByteType(slice.ElementType) {
+		return nil, NewRuntimeError("runtime.Stack: buffer must be []byte")
+	}
+	stack := callStackString(env.frame)
+	n := len(stack)
+	if n > len(slice.Data) {
+		n = len(slice.Data)
+	}
+	for i := 0; i < n; i++ {
+		slice.Data[i] = int(stack[i])
+	}
+	vm.emitTrace("debug_stack", "runtime.Stack", stack, call)
+	return n, nil
+}
+
+func (vm *Interpreter) traceRuntimeDebugStack(call *ast.CallExpr, env *Env) (any, error) {
+	if len(call.Args) != 0 {
+		return nil, NewRuntimeError("runtime/debug.Stack: expected no arguments")
+	}
+	stack := callStackString(env.frame)
+	vm.emitTrace("debug_stack", "runtime/debug.Stack", stack, call)
+	return guestByteSlice(stack), nil
+}
+
+func (vm *Interpreter) traceRuntimeDebugPrintStack(call *ast.CallExpr, env *Env) (any, error) {
+	if len(call.Args) != 0 {
+		return nil, NewRuntimeError("runtime/debug.PrintStack: expected no arguments")
+	}
+	stack := callStackString(env.frame)
+	if output, ok := vm.natives["ConsoleError"]; ok {
+		_, _ = output([]any{stack})
+	} else if output, ok := vm.natives["ConsoleLog"]; ok {
+		_, _ = output([]any{stack})
+	}
+	vm.emitTrace("debug_stack", "runtime/debug.PrintStack", stack, call)
+	return nil, nil
+}
+
 // traceDebugVars backs debug.Vars(), returning a snapshot of every local
 // binding visible at the call site (innermost scope wins on shadowing),
 // formatted as sorted "name = value" lines. Also intercepted directly in

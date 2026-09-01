@@ -42,7 +42,7 @@ playground still creates one interpreter per run and exposes **Stop**.
 ### Core Capabilities
 - ✅ **Supported Go subset**: Variables, functions, structs, slices, maps, interfaces, channels, and selected control-flow constructs
 - ✅ **Concurrency**: Goroutines and channels, including cancellation-aware waits
-- ✅ **Built-in Packages**: Curated subsets of `fmt`, `time`, `sync`, `math`, `math/rand`, `strings`, `regexp`, `sort`, `strconv`, `path`, `unicode/utf8`, `encoding/json`/`json`, `encoding/gob`, `os`, `fs`, and `testing`
+- ✅ **Built-in Packages**: Curated subsets of `fmt`, `time`, `sync`, `math`, `math/rand`, `strings`, `regexp`, `sort`, `strconv`, `path`, `unicode/utf8`, `encoding/json`/`json`, `encoding/gob`, `reflect`, `runtime`, `runtime/debug`, `os`, `fs`, and `testing`
 - ✅ **Browser Integration**: Special `browser` package for DOM manipulation and canvas drawing
 - ✅ **HTTP facade**: Browser code can use nanoGo's `http.GetText`/`PostText` facade, subject to CORS; embedded hosts must provide and authorize a transport native
 - ✅ **Template helper**: `text/template.RenderString` expands a template; it does not provide `html/template` escaping
@@ -921,7 +921,7 @@ nanoGo implements a **tree-walking interpreter** that parses Go source code into
 
 nanoGo includes a curated set of built-in packages:
 
-- **Core**: `fmt`, `sync`, `time`
+- **Core**: `fmt`, `sync`, `time`, `reflect`, `runtime`, `runtime/debug`
 - **Data**: `encoding/json` (also available as `json`), `encoding/gob`, `strings`, `regexp`, `sort`, `strconv`, `path`, `unicode/utf8`
 - **Math**: selected `math` and `math/rand` functions
 - **Text & tooling**: `text/template`, `debug`, and a supported subset of `testing`
@@ -943,6 +943,14 @@ to stay opaque to guest code. `grpc.Invoke(target, method, request)` delegates
 to a context-aware `GRPCInvoke` host native and applies the normal network
 capability check to `target`; hosts retain ownership of stubs, TLS and pooled
 connections.
+
+The `reflect` facade covers type/kind inspection, struct fields, container
+length/index access, `ValueOf`, `Zero`, and `DeepEqual`. Immutable
+`reflect.Type` results are cached per interpreter. `runtime.Stack` and
+`runtime/debug.Stack` report guest frames rather than leaking the host Go
+process; GC tuning through `runtime/debug` is interpreter-local. These are
+intentional, sandbox-safe subsets rather than drop-in replacements for every
+standard-library API.
 
 ### Text Templates
 
@@ -1387,10 +1395,10 @@ your own workload.
 
 ## 📝 Limitations
 
-- **Subset of Go**: Not all Go features are supported (reflection, CGO, unsafe)
+- **Subset of Go**: Not all Go features are supported (advanced reflection, CGO, unsafe)
 - **Performance**: Interpreted execution is slower than compiled WASM
 - **Standard Library**: Limited subset of Go's stdlib available
-- **No Reflection**: Advanced reflection features not implemented
+- **Limited Reflection**: Inspection is supported, but mutation and dynamic type construction are not
 - **Browser-Only WASM**: Desktop WASM runtimes not tested
 
 ## 🗺️ Roadmap

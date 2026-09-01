@@ -23,6 +23,11 @@ type Env struct {
 	// avoids a second allocation per frame. Further values use Vars, retaining
 	// Env's compact size instead of making every scope permanently larger.
 	inlineIntVar intVar
+	// inlineInts supplies three more unboxed integer bindings only to scopes
+	// that need them. Keeping it behind a pointer preserves the compact Env
+	// layout for the ubiquitous one-counter scope, while numeric kernels avoid
+	// spilling coordinates and accumulators into map[string]any.
+	inlineInts *inlineIntEnv
 	// inlineFloatVars keeps hot floating-point locals unboxed. Numerical inner
 	// loops otherwise allocate once for every assignment merely to fit a
 	// float64 in any.
@@ -58,6 +63,13 @@ type Env struct {
 type intVar struct {
 	name string
 	val  int
+}
+
+const envExtraInlineInts = 3
+
+type inlineIntEnv struct {
+	vars [envExtraInlineInts]intVar
+	len  uint8
 }
 
 const envInlineFloats = 3
@@ -142,6 +154,13 @@ func lookupIntVar(env *Env, name string) (int, bool) {
 	if env.inlineIntVar.name == name && name != "" {
 		return env.inlineIntVar.val, true
 	}
+	if ints := env.inlineInts; ints != nil {
+		for i := 0; i < int(ints.len); i++ {
+			if ints.vars[i].name == name {
+				return ints.vars[i].val, true
+			}
+		}
+	}
 	return 0, false
 }
 
@@ -150,8 +169,26 @@ func setOrAppendIntVar(env *Env, name string, value int) {
 		env.inlineIntVar.val = value
 		return
 	}
+	if ints := env.inlineInts; ints != nil {
+		for i := 0; i < int(ints.len); i++ {
+			if ints.vars[i].name == name {
+				ints.vars[i].val = value
+				return
+			}
+		}
+	}
 	if env.inlineIntVar.name == "" {
 		env.inlineIntVar = intVar{name, value}
+		return
+	}
+	ints := env.inlineInts
+	if ints == nil {
+		ints = &inlineIntEnv{}
+		env.inlineInts = ints
+	}
+	if int(ints.len) < len(ints.vars) {
+		ints.vars[ints.len] = intVar{name, value}
+		ints.len++
 		return
 	}
 	if env.Vars == nil {
@@ -162,7 +199,36 @@ func setOrAppendIntVar(env *Env, name string, value int) {
 
 func removeIntVar(env *Env, name string) {
 	if env.inlineIntVar.name == name {
-		env.inlineIntVar = intVar{}
+		if ints := env.inlineInts; ints != nil && ints.len > 0 {
+			last := int(ints.len) - 1
+			env.inlineIntVar = ints.vars[last]
+			ints.vars[last] = intVar{}
+			ints.len--
+		} else {
+			env.inlineIntVar = intVar{}
+		}
+		return
+	}
+	if ints := env.inlineInts; ints != nil {
+		for i := 0; i < int(ints.len); i++ {
+			if ints.vars[i].name == name {
+				last := int(ints.len) - 1
+				ints.vars[i] = ints.vars[last]
+				ints.vars[last] = intVar{}
+				ints.len--
+				return
+			}
+		}
+	}
+}
+
+func clearInlineIntVars(env *Env) {
+	env.inlineIntVar = intVar{}
+	if ints := env.inlineInts; ints != nil {
+		for i := 0; i < int(ints.len); i++ {
+			ints.vars[i] = intVar{}
+		}
+		ints.len = 0
 	}
 }
 
@@ -1091,6 +1157,14 @@ func (vm *Interpreter) collectLocalVars(env *Env) map[string]any {
 		if iv := e.inlineIntVar; iv.name != "" {
 			if _, seen := out[iv.name]; !seen {
 				out[iv.name] = iv.val
+			}
+		}
+		if ints := e.inlineInts; ints != nil {
+			for i := 0; i < int(ints.len); i++ {
+				iv := ints.vars[i]
+				if _, seen := out[iv.name]; !seen {
+					out[iv.name] = iv.val
+				}
 			}
 		}
 		if floats := e.inlineFloats; floats != nil {

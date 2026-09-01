@@ -877,6 +877,22 @@ func main() {
 	}
 }
 
+func TestForRangeAssignmentUsesOuterBindings(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	values := []int{4, 5, 6}
+	index, value, sum := -1, -1, 0
+	for index, value = range values { sum = sum + index + value }
+	fmt.Println(index, value, sum)
+}
+`)
+	if strings.TrimSpace(out) != "2 6 18" {
+		t.Errorf("expected outer range bindings to be updated, got %q", out)
+	}
+}
+
 func TestForRangeMap(t *testing.T) {
 	out := runAndCapture(t, `
 package main
@@ -2872,6 +2888,25 @@ func main() {
 	want := "0\n10\n20\n"
 	if out != want {
 		t.Fatalf("closures over per-iteration block locals = %q, want %q", out, want)
+	}
+}
+
+func TestForHeaderClosurePreventsScopeReuse(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	var saved func() int
+	for i := 0; func() bool {
+		saved = func() int { return i }
+		return i < 1
+	}(); i++ {}
+	for j := 0; j < 5; j++ {}
+	fmt.Println(saved())
+}
+`)
+	if out != "1\n" {
+		t.Fatalf("closure over for scope after later loop = %q, want %q", out, "1\n")
 	}
 }
 

@@ -36,7 +36,35 @@ type panicError struct{ value any }
 func (e *panicError) Error() string { return fmt.Sprintf("panic: %v", e.value) }
 
 // FieldDef/TypeDef describe simple struct types (name, fields, methods).
-type FieldDef struct{ Name, Type string }
+// Tag holds the unquoted source tag, for example `json:"user_name,omitempty"`.
+// Tags are metadata: packages such as encoding/json and reflect decide how to
+// interpret them.
+type FieldDef struct {
+	Name string
+	Type string
+	Tag  string
+
+	// JSON options are derived once when a guest type is registered. Keeping
+	// them beside the field definition makes JSON marshaling a linear walk with
+	// no tag parsing or field-name lookup in its hot path.
+	jsonName      string
+	jsonOmitEmpty bool
+	jsonSkip      bool
+	jsonPrepared  bool
+}
+
+func newFieldDef(name, typ, tag string) FieldDef {
+	jsonName, jsonOmitEmpty, jsonSkip := jsonFieldOptions(name, tag)
+	return FieldDef{
+		Name:          name,
+		Type:          typ,
+		Tag:           tag,
+		jsonName:      jsonName,
+		jsonOmitEmpty: jsonOmitEmpty,
+		jsonSkip:      jsonSkip,
+		jsonPrepared:  true,
+	}
+}
 
 type TypeDef struct {
 	Name         string
@@ -351,9 +379,7 @@ func ToNativeValue(v any) any {
 		}
 		return out
 	case *StructVal:
-		out := make(map[string]any, x.fieldCount())
-		x.forEachField(func(name string, value any) { out[name] = ToNativeValue(value) })
-		return out
+		return nativeStructValue(x)
 	case map[string]any:
 		out := make(map[string]any, len(x))
 		for key, value := range x {
@@ -369,6 +395,121 @@ func ToNativeValue(v any) any {
 	default:
 		return v
 	}
+}
+
+// nativeStructValue applies the subset of encoding/json struct-tag behavior
+// that matters when guest structs cross into native packages. Other tags stay
+// available through reflect and are intentionally not given implicit meaning.
+func nativeStructValue(x *StructVal) map[string]any {
+	out := make(map[string]any, x.fieldCount())
+	if x.packedType == nil {
+		x.forEachField(func(name string, value any) { out[name] = ToNativeValue(value) })
+		return out
+	}
+	for i := range x.packedType.Fields {
+		field := &x.packedType.Fields[i]
+		var value any
+		if x.packedInts != nil {
+			value = x.packedInts[i]
+		} else {
+			value = x.packedFields[i]
+		}
+		name, omitEmpty, skip := field.jsonName, field.jsonOmitEmpty, field.jsonSkip
+		// FieldDefs assembled directly by hosts predate tag metadata. Preserve
+		// their behavior without penalizing parsed guest types.
+		if !field.jsonPrepared {
+			name, omitEmpty, skip = jsonFieldOptions(field.Name, field.Tag)
+		}
+		if skip || (omitEmpty && isEmptyJSONValue(value)) {
+			continue
+		}
+		out[name] = ToNativeValue(value)
+	}
+	return out
+}
+
+func jsonFieldOptions(defaultName, tag string) (name string, omitEmpty, skip bool) {
+	name = defaultName
+	raw, ok := structTagValue(tag, "json")
+	if !ok {
+		return name, false, false
+	}
+	parts := strings.Split(raw, ",")
+	if parts[0] == "-" {
+		return "", false, true
+	}
+	if parts[0] != "" {
+		name = parts[0]
+	}
+	for _, option := range parts[1:] {
+		if option == "omitempty" {
+			omitEmpty = true
+		}
+	}
+	return name, omitEmpty, false
+}
+
+// structTagValue is the equivalent of reflect.StructTag.Get for the simple
+// key/value lookup used by nanoGo's curated packages.
+func structTagValue(tag, key string) (string, bool) {
+	for tag != "" {
+		tag = strings.TrimLeft(tag, " ")
+		i := strings.IndexByte(tag, ':')
+		if i <= 0 || i+1 >= len(tag) || tag[i+1] != '"' {
+			return "", false
+		}
+		name := tag[:i]
+		tag = tag[i+1:]
+		end := 1
+		for end < len(tag) {
+			if tag[end] == '\\' {
+				end += 2 // skip an escaped quote or backslash
+				continue
+			}
+			if tag[end] == '"' {
+				break
+			}
+			end++
+		}
+		if end == len(tag) {
+			return "", false
+		}
+		value, err := strconv.Unquote(tag[:end+1])
+		if err != nil {
+			return "", false
+		}
+		if name == key {
+			return value, true
+		}
+		tag = tag[end+1:]
+	}
+	return "", false
+}
+
+func isEmptyJSONValue(value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return true
+	case bool:
+		return !v
+	case int:
+		return v == 0
+	case int64:
+		return v == 0
+	case float64:
+		return v == 0
+	case string:
+		return v == ""
+	case *SliceVal:
+		return len(v.Data) == 0
+	case *MapVal:
+		return len(v.Data) == 0
+	case []any:
+		return len(v) == 0
+	case map[string]any:
+		return len(v) == 0
+	}
+	return false
 }
 
 // ChannelVal models a typed channel with a Go channel underneath.

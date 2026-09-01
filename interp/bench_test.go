@@ -11,6 +11,50 @@ import (
 	"testing"
 )
 
+// BenchmarkReflectTypeHotPath isolates the cached reflection path used by
+// serializers and host tooling. The immutable Type wrapper should be reused;
+// only ValueOf creates a per-value wrapper.
+func BenchmarkReflectTypeHotPath(b *testing.B) {
+	vm := NewInterpreter()
+	RegisterBuiltinPackages(vm)
+	pkg, ok := vm.Package("reflect")
+	if !ok {
+		b.Fatal("reflect package did not resolve")
+	}
+	typeOf := pkg.Funcs["TypeOf"].Native
+	valueOf := pkg.Funcs["ValueOf"].Native
+	typeArgs := []any{1}
+	typeValue, err := typeOf(typeArgs)
+	if err != nil {
+		b.Fatal(err)
+	}
+	kind := vm.types["reflect.Type"].Methods["Kind"].Native
+	kindArgs := []any{typeValue}
+	b.Run("TypeOfKind", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			typeArgs[0] = i
+			typeValue, err = typeOf(typeArgs)
+			if err != nil {
+				b.Fatal(err)
+			}
+			kindArgs[0] = typeValue
+			if _, err = kind(kindArgs); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("ValueOf", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			typeArgs[0] = i
+			if _, err = valueOf(typeArgs); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 // BenchmarkASTPreparationDeepBlocks keeps Run's pre-execution AST analysis
 // measurable. Nested blocks previously made reusable-block discovery
 // quadratic because every block rescanned its descendants.
@@ -220,6 +264,48 @@ func main() {
 	}
 	_ = inside
 	}`},
+		{"CGoL", `package main
+func lifeStep(g [][]int) [][]int {
+	h := len(g)
+	w := len(g[0])
+	next := make([][]int, h)
+	for y := 0; y < h; y++ {
+		row := make([]int, w)
+		for x := 0; x < w; x++ {
+			n := 0
+			for dy := -1; dy <= 1; dy++ {
+				for dx := -1; dx <= 1; dx++ {
+					if dx == 0 && dy == 0 { continue }
+					yy := (y+dy+h)%h
+					xx := (x+dx+w)%w
+					if g[yy][xx] == 1 { n++ }
+				}
+			}
+			if g[y][x] == 1 {
+				if n == 2 || n == 3 { row[x] = 1 }
+			} else if n == 3 {
+				row[x] = 1
+			}
+		}
+		next[y] = row
+	}
+	return next
+}
+func main() {
+	w, h := 12, 8
+	grid := make([][]int, h)
+	for y := 0; y < h; y++ {
+		row := make([]int, w)
+		for x := 0; x < w; x++ {
+			if (x*17+y*31+x*y)%7 < 3 { row[x] = 1 }
+		}
+		grid[y] = row
+	}
+	for generation := 0; generation < 50; generation++ {
+		grid = lifeStep(grid)
+	}
+	_ = grid
+}`},
 	}
 	for _, algorithm := range algorithms {
 		b.Run(algorithm.name, func(b *testing.B) {

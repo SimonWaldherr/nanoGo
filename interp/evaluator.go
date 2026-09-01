@@ -55,7 +55,7 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 	}
 	exec.litCache, exec.floatLitCache = buildLitCaches(file)
 	exec.hasFloatLiterals = len(exec.floatLitCache) != 0
-	exec.reusableBlocks = buildReusableBlockSet(file)
+	exec.reusableBlocks, exec.reusableFors = buildReusableScopeSets(file)
 	exec.interfaceMethods = buildInterfaceMethodCache(file)
 	if file.Name.Name != "main" {
 		return NewRuntimeError(`only "package main" is supported`)
@@ -106,8 +106,9 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 						td := &TypeDef{Name: ts.Name.Name, Kind: "struct", Fields: []FieldDef{}, Methods: map[string]*Function{}}
 						for _, f := range tt.Fields.List {
 							ft := typeString(f.Type)
+							tag := astStructTag(f.Tag)
 							for _, n := range f.Names {
-								td.Fields = append(td.Fields, FieldDef{Name: n.Name, Type: ft})
+								td.Fields = append(td.Fields, newFieldDef(n.Name, ft, tag))
 							}
 						}
 						td.allIntFields = structFieldsAreInts(td.Fields)
@@ -403,41 +404,51 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		// intermediate node. Keep them as float64 through the whole expression
 		// tree; unlike the integer path below, this is gated by a structural
 		// scan so no effectful expression is speculatively evaluated.
-		if exec := vm.activeExecution; exec != nil && exec.hasFloatLiterals &&
-			(vm.mayStartFloatExpr(ex.X, env) || vm.mayStartFloatExpr(ex.Y, env)) {
-			if vm.mayEvalFloatExpr(ex, env) {
-				if isIntComparison(ex.Op) {
-					left, leftOK, err := vm.tryEvalFloatExpr(ex.X, env, true)
-					if err != nil {
-						return nil, err
-					}
-					if leftOK {
-						right, rightOK, err := vm.tryEvalFloatExpr(ex.Y, env, true)
-						if err != nil {
-							return nil, err
-						}
-						if rightOK {
-							switch ex.Op {
-							case token.EQL:
-								return left == right, nil
-							case token.NEQ:
-								return left != right, nil
-							case token.LSS:
-								return left < right, nil
-							case token.GTR:
-								return left > right, nil
-							case token.LEQ:
-								return left <= right, nil
-							case token.GEQ:
-								return left >= right, nil
-							}
-						}
-					}
-				} else if value, ok, err := vm.tryEvalFloatExpr(ex, env, false); err != nil {
-					return nil, err
-				} else if ok {
-					return value, nil
+		exec := vm.activeExecution
+		floatExpr := false
+		floatNodes := uint32(0)
+		if exec != nil && exec.hasFloatLiterals {
+			cacheIndex := uint(ex.Pos()) & (uint(len(exec.floatExprs)) - 1)
+			cacheEntry := exec.floatExprs[cacheIndex]
+			floatExpr = cacheEntry.expr == ex
+			floatNodes = cacheEntry.nodes
+			if !floatExpr && (vm.mayStartFloatExpr(ex.X, env) || vm.mayStartFloatExpr(ex.Y, env)) &&
+				vm.mayEvalFloatExpr(ex, env) {
+				floatExpr = true
+				floatNodes = floatExprNodeCount(ex)
+				if !exec.concurrent.Load() {
+					exec.floatExprs[cacheIndex] = floatExprCacheEntry{expr: ex, nodes: floatNodes}
 				}
+			}
+		}
+		if floatExpr {
+			// evalExpr already charged the root. The remaining nodes are pure and
+			// adjacent, so charging them as one batch preserves exact step limits
+			// without polling execution state at every arithmetic leaf.
+			if floatNodes > 1 {
+				if err := exec.checkpoints(uint64(floatNodes - 1)); err != nil {
+					return nil, err
+				}
+			}
+			if isIntComparison(ex.Op) {
+				left := vm.evalPureFloatExpr(ex.X, env)
+				right := vm.evalPureFloatExpr(ex.Y, env)
+				switch ex.Op {
+				case token.EQL:
+					return left == right, nil
+				case token.NEQ:
+					return left != right, nil
+				case token.LSS:
+					return left < right, nil
+				case token.GTR:
+					return left > right, nil
+				case token.LEQ:
+					return left <= right, nil
+				case token.GEQ:
+					return left >= right, nil
+				}
+			} else {
+				return vm.evalPureFloatExpr(ex, env), nil
 			}
 		}
 
@@ -608,6 +619,17 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 							return vm.traceDebugStack(ex, env)
 						case "Vars":
 							return vm.traceDebugVars(ex, env)
+						}
+					}
+					if p.Name == "runtime" && sel.Sel.Name == "Stack" {
+						return vm.traceRuntimeStack(ex, env)
+					}
+					if p.Name == "runtime/debug" {
+						switch sel.Sel.Name {
+						case "Stack":
+							return vm.traceRuntimeDebugStack(ex, env)
+						case "PrintStack":
+							return vm.traceRuntimeDebugPrintStack(ex, env)
 						}
 					}
 					member, ok2 := vm.resolvePackageSelector(p, sel.Sel.Name)
@@ -1056,10 +1078,330 @@ func (vm *Interpreter) mayEvalFloatExpr(e ast.Expr, env *Env) bool {
 	return containsFloat && pure
 }
 
+type floatExprCacheEntry struct {
+	expr  *ast.BinaryExpr
+	nodes uint32
+}
+
+func floatExprNodeCount(e ast.Expr) uint32 {
+	switch ex := e.(type) {
+	case *ast.ParenExpr:
+		return 1 + floatExprNodeCount(ex.X)
+	case *ast.UnaryExpr:
+		return 1 + floatExprNodeCount(ex.X)
+	case *ast.BinaryExpr:
+		return 1 + floatExprNodeCount(ex.X) + floatExprNodeCount(ex.Y)
+	default:
+		return 1
+	}
+}
+
+// evalPureFloatExpr evaluates only trees already accepted by floatExprShape.
+// Their checkpoints are charged in one exact batch by the caller, allowing
+// this recursion to contain only arithmetic and typed lexical reads.
+func (vm *Interpreter) evalPureFloatExpr(e ast.Expr, env *Env) float64 {
+	switch ex := e.(type) {
+	case *ast.BasicLit:
+		if ex.Kind == token.FLOAT {
+			if exec := vm.activeExecution; exec != nil {
+				if value, ok := exec.floatLitCache[ex]; ok {
+					return value
+				}
+			}
+			value, _ := strconv.ParseFloat(strings.ReplaceAll(ex.Value, "_", ""), 64)
+			return value
+		}
+		if value, ok := parseFastDecimalInt(ex.Value); ok {
+			return float64(value)
+		}
+		if exec := vm.activeExecution; exec != nil {
+			return float64(exec.litCache[ex])
+		}
+		value, _ := strconv.ParseInt(ex.Value, 0, strconv.IntSize)
+		return float64(value)
+	case *ast.Ident:
+		if value, ok := vm.getFloatIdent(ex, env); ok {
+			return value
+		}
+		value, _ := vm.getIntIdent(ex, env)
+		return float64(value)
+	case *ast.ParenExpr:
+		return vm.evalPureFloatExpr(ex.X, env)
+	case *ast.UnaryExpr:
+		value := vm.evalPureFloatExpr(ex.X, env)
+		if ex.Op == token.SUB {
+			return -value
+		}
+		return value
+	case *ast.BinaryExpr:
+		left := vm.evalPureFloatExpr(ex.X, env)
+		right := vm.evalPureFloatExpr(ex.Y, env)
+		switch ex.Op {
+		case token.ADD:
+			return left + right
+		case token.SUB:
+			return left - right
+		case token.MUL:
+			return left * right
+		default:
+			return left / right
+		}
+	default:
+		return 0
+	}
+}
+
 // mayStartFloatExpr is intentionally shallow: nearly all integer expressions
 // must bypass float analysis entirely. Once a direct float leaf is found, the
 // full structural check below verifies the whole expression before execution.
 // Parentheses are unwrapped because they are syntactic only.
+type lexicalBinding struct {
+	depth uint16
+	slot  uint8
+}
+
+type intBindingCacheEntry struct {
+	ident   *ast.Ident
+	binding lexicalBinding
+}
+
+func cachedIntBinding(exec *execution, id *ast.Ident) (lexicalBinding, bool) {
+	if exec == nil {
+		return lexicalBinding{}, false
+	}
+	entry := exec.intBindings[uint(id.Pos())&(uint(len(exec.intBindings))-1)]
+	return entry.binding, entry.ident == id
+}
+
+func cacheIntBinding(exec *execution, id *ast.Ident, binding lexicalBinding) {
+	exec.intBindings[uint(id.Pos())&(uint(len(exec.intBindings))-1)] = intBindingCacheEntry{ident: id, binding: binding}
+}
+
+func intFromBinding(target *Env, binding lexicalBinding) (int, bool) {
+	if binding.slot == 0 {
+		if target.inlineIntVar.name == "" {
+			return 0, false
+		}
+		return target.inlineIntVar.val, true
+	}
+	ints := target.inlineInts
+	slot := int(binding.slot) - 1
+	if ints == nil || slot >= int(ints.len) {
+		return 0, false
+	}
+	return ints.vars[slot].val, true
+}
+
+func (vm *Interpreter) getIntIdent(id *ast.Ident, env *Env) (int, bool) {
+	exec := vm.activeExecution
+	concurrent := exec != nil && exec.concurrent.Load()
+	if binding, ok := cachedIntBinding(exec, id); ok {
+		target := env
+		for depth := uint16(0); depth < binding.depth && target != nil; depth++ {
+			target = target.Parent
+		}
+		if target != nil {
+			if target.shared || concurrent {
+				target.mu.RLock()
+				value, ok := intFromBinding(target, binding)
+				target.mu.RUnlock()
+				if ok {
+					return value, true
+				}
+			} else if value, ok := intFromBinding(target, binding); ok {
+				return value, true
+			}
+		}
+	}
+
+	depth := 0
+	for current := env; current != nil; current = current.Parent {
+		if current.shared || concurrent {
+			current.mu.RLock()
+			if current.inlineIntVar.name == id.Name && id.Name != "" {
+				value := current.inlineIntVar.val
+				multiInt := current.inlineInts != nil
+				current.mu.RUnlock()
+				if multiInt && exec != nil && !concurrent && depth <= int(^uint16(0)) {
+					cacheIntBinding(exec, id, lexicalBinding{depth: uint16(depth)})
+				}
+				return value, true
+			}
+			if ints := current.inlineInts; ints != nil {
+				for slot := 0; slot < int(ints.len); slot++ {
+					if ints.vars[slot].name == id.Name {
+						value := ints.vars[slot].val
+						current.mu.RUnlock()
+						if exec != nil && !concurrent && depth <= int(^uint16(0)) {
+							cacheIntBinding(exec, id, lexicalBinding{depth: uint16(depth), slot: uint8(slot + 1)})
+						}
+						return value, true
+					}
+				}
+			}
+			current.mu.RUnlock()
+		} else {
+			if current.inlineIntVar.name == id.Name && id.Name != "" {
+				if current.inlineInts != nil && exec != nil && depth <= int(^uint16(0)) {
+					cacheIntBinding(exec, id, lexicalBinding{depth: uint16(depth)})
+				}
+				return current.inlineIntVar.val, true
+			}
+			if ints := current.inlineInts; ints != nil {
+				for slot := 0; slot < int(ints.len); slot++ {
+					if ints.vars[slot].name == id.Name {
+						if exec != nil && depth <= int(^uint16(0)) {
+							cacheIntBinding(exec, id, lexicalBinding{depth: uint16(depth), slot: uint8(slot + 1)})
+						}
+						return ints.vars[slot].val, true
+					}
+				}
+			}
+		}
+		depth++
+	}
+	return 0, false
+}
+
+type floatBindingCacheEntry struct {
+	ident   *ast.Ident
+	binding lexicalBinding
+}
+
+func cachedFloatBinding(exec *execution, id *ast.Ident) (lexicalBinding, bool) {
+	if exec == nil {
+		return lexicalBinding{}, false
+	}
+	entry := exec.floatBindings[uint(id.Pos())&(uint(len(exec.floatBindings))-1)]
+	return entry.binding, entry.ident == id
+}
+
+func cacheFloatBinding(exec *execution, id *ast.Ident, binding lexicalBinding) {
+	exec.floatBindings[uint(id.Pos())&(uint(len(exec.floatBindings))-1)] = floatBindingCacheEntry{ident: id, binding: binding}
+}
+
+// getFloatIdent resolves an identifier's lexical owner once, then reads its
+// unboxed float slot directly on subsequent visits. An ast.Ident has one
+// lexical binding in valid Go source, and reusable scopes rebuild the same
+// declaration order, so depth and slot stay stable across loop iterations
+// and frame-pool reuse.
+func (vm *Interpreter) getFloatIdent(id *ast.Ident, env *Env) (float64, bool) {
+	exec := vm.activeExecution
+	concurrent := exec != nil && exec.concurrent.Load()
+	if binding, ok := cachedFloatBinding(exec, id); ok {
+		target := env
+		for depth := uint16(0); depth < binding.depth && target != nil; depth++ {
+			target = target.Parent
+		}
+		if target != nil {
+			if target.shared || concurrent {
+				target.mu.RLock()
+				floats := target.inlineFloats
+				if floats != nil && int(binding.slot) < int(floats.len) {
+					value := floats.vars[binding.slot].val
+					target.mu.RUnlock()
+					return value, true
+				}
+				target.mu.RUnlock()
+			} else if floats := target.inlineFloats; floats != nil && int(binding.slot) < int(floats.len) {
+				return floats.vars[binding.slot].val, true
+			}
+		}
+	}
+
+	depth := 0
+	for current := env; current != nil; current = current.Parent {
+		var floats *inlineFloatEnv
+		if current.shared || concurrent {
+			current.mu.RLock()
+			floats = current.inlineFloats
+			if floats != nil {
+				for slot := 0; slot < int(floats.len); slot++ {
+					if floats.vars[slot].name == id.Name {
+						value := floats.vars[slot].val
+						current.mu.RUnlock()
+						if exec != nil && !concurrent && depth <= int(^uint16(0)) {
+							cacheFloatBinding(exec, id, lexicalBinding{depth: uint16(depth), slot: uint8(slot)})
+						}
+						return value, true
+					}
+				}
+			}
+			current.mu.RUnlock()
+		} else if floats = current.inlineFloats; floats != nil {
+			for slot := 0; slot < int(floats.len); slot++ {
+				if floats.vars[slot].name == id.Name {
+					if exec != nil && depth <= int(^uint16(0)) {
+						cacheFloatBinding(exec, id, lexicalBinding{depth: uint16(depth), slot: uint8(slot)})
+					}
+					return floats.vars[slot].val, true
+				}
+			}
+		}
+		depth++
+	}
+	return 0, false
+}
+
+func (vm *Interpreter) setFloatIdent(id *ast.Ident, value float64, env *Env) bool {
+	exec := vm.activeExecution
+	concurrent := exec != nil && exec.concurrent.Load()
+	if binding, ok := cachedFloatBinding(exec, id); ok {
+		target := env
+		for depth := uint16(0); depth < binding.depth && target != nil; depth++ {
+			target = target.Parent
+		}
+		if target != nil {
+			if target.shared || concurrent {
+				target.mu.Lock()
+				floats := target.inlineFloats
+				if floats != nil && int(binding.slot) < int(floats.len) {
+					floats.vars[binding.slot].val = value
+					target.mu.Unlock()
+					return true
+				}
+				target.mu.Unlock()
+			} else if floats := target.inlineFloats; floats != nil && int(binding.slot) < int(floats.len) {
+				floats.vars[binding.slot].val = value
+				return true
+			}
+		}
+	}
+
+	depth := 0
+	for current := env; current != nil; current = current.Parent {
+		if current.shared || concurrent {
+			current.mu.Lock()
+			floats := current.inlineFloats
+			if floats != nil {
+				for slot := 0; slot < int(floats.len); slot++ {
+					if floats.vars[slot].name == id.Name {
+						floats.vars[slot].val = value
+						current.mu.Unlock()
+						if exec != nil && !concurrent && depth <= int(^uint16(0)) {
+							cacheFloatBinding(exec, id, lexicalBinding{depth: uint16(depth), slot: uint8(slot)})
+						}
+						return true
+					}
+				}
+			}
+			current.mu.Unlock()
+		} else if floats := current.inlineFloats; floats != nil {
+			for slot := 0; slot < int(floats.len); slot++ {
+				if floats.vars[slot].name == id.Name {
+					floats.vars[slot].val = value
+					if exec != nil && depth <= int(^uint16(0)) {
+						cacheFloatBinding(exec, id, lexicalBinding{depth: uint16(depth), slot: uint8(slot)})
+					}
+					return true
+				}
+			}
+		}
+		depth++
+	}
+	return false
+}
+
 func (vm *Interpreter) mayStartFloatExpr(e ast.Expr, env *Env) bool {
 	for {
 		paren, ok := e.(*ast.ParenExpr)
@@ -1075,10 +1417,10 @@ func (vm *Interpreter) mayStartFloatExpr(e ast.Expr, env *Env) bool {
 		// Integer identifiers dominate normal control flow. Probe their
 		// dedicated slot first so recursive integer algorithms do not walk the
 		// whole lexical chain looking for a float that cannot be there.
-		if _, ok := vm.getInt(ex.Name, env); ok {
+		if _, ok := vm.getIntIdent(ex, env); ok {
 			return false
 		}
-		_, ok := vm.getFloat(ex.Name, env)
+		_, ok := vm.getFloatIdent(ex, env)
 		return ok
 	default:
 		return false
@@ -1100,10 +1442,10 @@ func (vm *Interpreter) floatExprShape(e ast.Expr, env *Env) (containsFloat, pure
 			return false, false
 		}
 	case *ast.Ident:
-		if _, ok := vm.getFloat(ex.Name, env); ok {
+		if _, ok := vm.getFloatIdent(ex, env); ok {
 			return true, true
 		}
-		if _, ok := vm.getInt(ex.Name, env); ok {
+		if _, ok := vm.getIntIdent(ex, env); ok {
 			return false, true
 		}
 		return false, false
@@ -1160,10 +1502,10 @@ func (vm *Interpreter) tryEvalFloatExpr(e ast.Expr, env *Env, checkpoint bool) (
 			}
 		}
 	case *ast.Ident:
-		if value, ok := vm.getFloat(ex.Name, env); ok {
+		if value, ok := vm.getFloatIdent(ex, env); ok {
 			return value, true, nil
 		}
-		if value, ok := vm.getInt(ex.Name, env); ok {
+		if value, ok := vm.getIntIdent(ex, env); ok {
 			return float64(value), true, nil
 		}
 	case *ast.ParenExpr:
@@ -1214,6 +1556,39 @@ func (vm *Interpreter) tryEvalFloatExpr(e ast.Expr, env *Env, checkpoint bool) (
 //
 // The initial call from evalExprNode has already consumed its checkpoint;
 // recursive calls must checkpoint their own nodes just as evalExpr would.
+func (vm *Interpreter) tryEvalSliceExpr(e ast.Expr, env *Env, checkpoint bool) (*SliceVal, bool, error) {
+	if checkpoint {
+		if err := vm.executionError(); err != nil {
+			return nil, true, err
+		}
+	}
+	switch ex := e.(type) {
+	case *ast.Ident:
+		value, ok := vm.get(ex.Name, env)
+		if !ok {
+			return nil, false, nil
+		}
+		slice, ok := value.(*SliceVal)
+		return slice, ok, nil
+	case *ast.IndexExpr:
+		container, ok, err := vm.tryEvalSliceExpr(ex.X, env, true)
+		if err != nil || !ok {
+			return nil, ok, err
+		}
+		index, ok, err := vm.tryEvalIntExpr(ex.Index, env, true)
+		if err != nil || !ok {
+			return nil, ok, err
+		}
+		if index < 0 || index >= len(container.Data) {
+			return nil, true, &panicError{value: fmt.Sprintf("runtime error: index out of range [%d] with length %d", index, len(container.Data))}
+		}
+		slice, ok := container.Data[index].(*SliceVal)
+		return slice, ok, nil
+	default:
+		return nil, false, nil
+	}
+}
+
 func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (value int, handled bool, err error) {
 	if checkpoint {
 		if err := vm.executionError(); err != nil {
@@ -1243,7 +1618,7 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 		return int(n), true, nil
 
 	case *ast.Ident:
-		n, ok := vm.getInt(ex.Name, env)
+		n, ok := vm.getIntIdent(ex, env)
 		return n, ok, nil
 
 	case *ast.ParenExpr:
@@ -1257,22 +1632,26 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 		// the general evaluator simply evaluates the same expression again and
 		// nothing has happened twice. Without this, every `a[j] > a[j+1]` or
 		// `sum += a[i]` boxed its operands on the heap.
-		id, ok := ex.X.(*ast.Ident)
-		if !ok {
-			return 0, false, nil
-		}
-		// Establish that this really is an indexable slice before evaluating
-		// the index. Doing it the other way round would charge a checkpoint
-		// for the index of every expression that then turns out not to
-		// qualify — a map read like m["k"], say — inflating the step count
-		// of programs this fast path never applies to.
-		container, ok := vm.get(id.Name, env)
-		if !ok {
-			return 0, false, nil
-		}
-		sv, ok := container.(*SliceVal)
-		if !ok {
-			return 0, false, nil
+		var sv *SliceVal
+		if id, ok := ex.X.(*ast.Ident); ok {
+			// Establish that this really is an indexable slice before evaluating
+			// the index. A map read like m["k"] must not consume speculative
+			// checkpoints before the generic evaluator handles it.
+			container, found := vm.get(id.Name, env)
+			if !found {
+				return 0, false, nil
+			}
+			sv, ok = container.(*SliceVal)
+			if !ok {
+				return 0, false, nil
+			}
+		} else {
+			var ok bool
+			var err error
+			sv, ok, err = vm.tryEvalSliceExpr(ex.X, env, true)
+			if err != nil || !ok {
+				return 0, ok, err
+			}
 		}
 		idx, idxOK, err := vm.tryEvalIntExpr(ex.Index, env, true)
 		if err != nil || !idxOK {
@@ -1810,7 +2189,7 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 					if err != nil {
 						return controlFlow{}, err
 					}
-					if floatOK && vm.setFloat(id.Name, f, env) {
+					if floatOK && vm.setFloatIdent(id, f, env) {
 						if vm.trackingVariables() {
 							vm.recordVariable(id.Name, f, id, env)
 						}
@@ -2420,7 +2799,18 @@ func (vm *Interpreter) evalForStmt(st *ast.ForStmt, env *Env, label string) (con
 	// it needs one, so reusing env avoids one Env allocation per loop entry.
 	local := env
 	if st.Init != nil {
-		local = NewEnv(env)
+		pooled := false
+		if exec := vm.activeExecution; exec != nil {
+			if _, reusable := exec.reusableFors[st]; reusable {
+				local = vm.acquireFastEnv(env)
+				pooled = true
+			}
+		}
+		if !pooled {
+			local = NewEnv(env)
+		} else {
+			defer vm.releaseFastEnv(local)
+		}
 		if _, err := vm.evalStmt(st.Init, local); err != nil {
 			return controlFlow{}, err
 		}
@@ -2470,7 +2860,14 @@ func (vm *Interpreter) evalForStmt(st *ast.ForStmt, env *Env, label string) (con
 // evalRangeStmt evaluates a (possibly labeled) range statement; see
 // evalForStmt for the label semantics, which are identical here.
 func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) (controlFlow, error) {
-	local := NewEnv(env)
+	// A range statement only introduces its own scope for := bindings. For
+	// `for key, value = range ...`, the bindings already live in the caller's
+	// scope, so reusing env avoids an Env allocation on every execution of a
+	// range loop (especially useful when the loop sits inside another loop).
+	local := env
+	if st.Tok == token.DEFINE {
+		local = NewEnv(env)
+	}
 	x, err := vm.evalExpr(st.X, local)
 	if err != nil {
 		return controlFlow{}, err
@@ -2478,36 +2875,12 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 	keyBinding := makeRangeBinding(st.Key)
 	valueBinding := makeRangeBinding(st.Value)
 	trackVariables := vm.trackingVariables()
-	// handleBody runs the loop body and translates its controlFlow into what
-	// the range loop over any of the container kinds below should do:
-	// "stop=true" means the whole range statement is done evaluating (its
-	// own return value is c/err), "stop=false" means keep ranging.
-	handleBody := func(body *ast.BlockStmt) (c controlFlow, err error, stop bool) {
-		c, err = vm.evalStmt(body, local)
-		if err != nil {
-			return controlFlow{}, err, true
-		}
-		switch c.kind {
-		case controlBreak:
-			if c.label == "" || c.label == label {
-				return controlFlow{}, nil, true
-			}
-			return c, nil, true
-		case controlReturn, controlGoto:
-			return c, nil, true
-		case controlContinue:
-			if c.label != "" && c.label != label {
-				return c, nil, true
-			}
-		}
-		return controlFlow{}, nil, false
-	}
 	switch s := x.(type) {
 	case *SliceVal:
 		for i := 0; i < len(s.Data); i++ {
 			vm.bindRangeInt(keyBinding, i, local, trackVariables)
 			vm.bindRangeValue(valueBinding, s.Data[i], local, trackVariables)
-			if c, err, stop := handleBody(st.Body); stop {
+			if c, err, stop := vm.evalRangeBody(st.Body, local, label); stop {
 				return c, err
 			}
 		}
@@ -2516,7 +2889,7 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 			key := s.originalKey(hk)
 			vm.bindRangeValue(keyBinding, key, local, trackVariables)
 			vm.bindRangeValue(valueBinding, val, local, trackVariables)
-			if c, err, stop := handleBody(st.Body); stop {
+			if c, err, stop := vm.evalRangeBody(st.Body, local, label); stop {
 				return c, err
 			}
 		}
@@ -2527,7 +2900,7 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 		for i, r := range s {
 			vm.bindRangeInt(keyBinding, i, local, trackVariables)
 			vm.bindRangeInt(valueBinding, int(r), local, trackVariables)
-			if c, err, stop := handleBody(st.Body); stop {
+			if c, err, stop := vm.evalRangeBody(st.Body, local, label); stop {
 				return c, err
 			}
 		}
@@ -2536,7 +2909,7 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 		// loop form that maps well to firmware-style TinyGo code.
 		for i := 0; i < s; i++ {
 			vm.bindRangeInt(keyBinding, i, local, trackVariables)
-			if c, err, stop := handleBody(st.Body); stop {
+			if c, err, stop := vm.evalRangeBody(st.Body, local, label); stop {
 				return c, err
 			}
 		}
@@ -2550,7 +2923,7 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 				break
 			}
 			vm.bindRangeValue(keyBinding, v, local, trackVariables)
-			if c, err, stop := handleBody(st.Body); stop {
+			if c, err, stop := vm.evalRangeBody(st.Body, local, label); stop {
 				return c, err
 			}
 		}
@@ -2558,6 +2931,31 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 		return controlFlow{}, NewRuntimeError("range over unsupported type")
 	}
 	return controlFlow{}, nil
+}
+
+// evalRangeBody keeps range's control-flow translation out of a closure. It
+// is called once per iteration, so the range statement itself needs no
+// closure allocation or captured loop scope while preserving labeled break
+// and continue behavior.
+func (vm *Interpreter) evalRangeBody(body *ast.BlockStmt, env *Env, label string) (controlFlow, error, bool) {
+	c, err := vm.evalStmt(body, env)
+	if err != nil {
+		return controlFlow{}, err, true
+	}
+	switch c.kind {
+	case controlBreak:
+		if c.label == "" || c.label == label {
+			return controlFlow{}, nil, true
+		}
+		return c, nil, true
+	case controlReturn, controlGoto:
+		return c, nil, true
+	case controlContinue:
+		if c.label != "" && c.label != label {
+			return c, nil, true
+		}
+	}
+	return controlFlow{}, nil, false
 }
 
 type rangeBinding struct {
@@ -3362,7 +3760,7 @@ func (vm *Interpreter) acquireFastEnv(parent *Env) *Env {
 // goroutines execute independent reusable functions concurrently.
 func (vm *Interpreter) releaseFastEnv(env *Env) {
 	env.Vars = nil
-	env.inlineIntVar = intVar{}
+	clearInlineIntVars(env)
 	clearInlineFloatVars(env)
 	clearInlineVars(env)
 	env.Parent = nil
@@ -3372,7 +3770,7 @@ func (vm *Interpreter) releaseFastEnv(env *Env) {
 
 // analyzeFunctionMetadata returns function-call optimization metadata:
 // frameFree indicates whether this function can use the fast call path,
-// needsFrames whether debug.Stack/debug.Vars calls appear in this body,
+// needsFrames whether a stack/variable inspection call appears in this body,
 // and reusable whether the frame can be safely returned to the fast env pool.
 func analyzeFunctionMetadata(body *ast.BlockStmt) (frameFree bool, needsFrames bool, reusable bool) {
 	frameFree = true
@@ -3392,7 +3790,7 @@ func analyzeFunctionMetadata(body *ast.BlockStmt) (frameFree bool, needsFrames b
 				frameFree = false
 				return true
 			}
-			if sel, ok := n.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Stack" || sel.Sel.Name == "Vars") {
+			if sel, ok := n.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Stack" || sel.Sel.Name == "PrintStack" || sel.Sel.Name == "Vars") {
 				frameFree = false
 				needsFrames = true
 				// No further traversal needed: caller already must force full
@@ -3436,7 +3834,7 @@ func sourceMayInspectStack(node ast.Node) bool {
 	needsFrames := false
 	ast.Inspect(node, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Stack" || sel.Sel.Name == "Vars") {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Stack" || sel.Sel.Name == "PrintStack" || sel.Sel.Name == "Vars") {
 				needsFrames = true
 				return false
 			}

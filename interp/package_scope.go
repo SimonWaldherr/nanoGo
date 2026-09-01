@@ -101,8 +101,9 @@ func (ps *PackageScope) CollectDecls(file *ast.File, fset *token.FileSet) error 
 					td := &TypeDef{Name: ts.Name.Name, Kind: "struct", Fields: []FieldDef{}, Methods: map[string]*Function{}}
 					for _, f := range tt.Fields.List {
 						ft := typeString(f.Type)
+						tag := astStructTag(f.Tag)
 						for _, n := range f.Names {
-							td.Fields = append(td.Fields, FieldDef{Name: n.Name, Type: ft})
+							td.Fields = append(td.Fields, newFieldDef(n.Name, ft, tag))
 						}
 					}
 					td.allIntFields = structFieldsAreInts(td.Fields)

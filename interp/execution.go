@@ -48,13 +48,17 @@ func buildLitCaches(file *ast.File) (map[*ast.BasicLit]int, map[*ast.BasicLit]fl
 // that block's full subtree for function literals. Deeply nested generated
 // source therefore paid quadratic AST-walk cost before it could run. The
 // visitor below records function-literal ancestry in one traversal instead.
-func buildReusableBlockSet(file *ast.File) map[*ast.BlockStmt]struct{} {
+func buildReusableScopeSets(file *ast.File) (map[*ast.BlockStmt]struct{}, map[*ast.ForStmt]struct{}) {
 	var state reusableBlockWalk
 	ast.Walk(reusableBlockVisitor{state: &state}, file)
-	if len(state.blocks) == 0 {
-		return nil
-	}
-	return state.blocks
+	return state.blocks, state.fors
+}
+
+// buildReusableBlockSet remains the focused helper used by metadata tests and
+// its preparation benchmark; execution setup uses the combined one-pass form.
+func buildReusableBlockSet(file *ast.File) map[*ast.BlockStmt]struct{} {
+	blocks, _ := buildReusableScopeSets(file)
+	return blocks
 }
 
 // buildInterfaceMethodCache records inline interface method sets once per
@@ -82,8 +86,15 @@ type reusableBlockInfo struct {
 }
 
 type reusableBlockWalk struct {
-	blocks map[*ast.BlockStmt]struct{}
-	stack  []*reusableBlockInfo
+	blocks   map[*ast.BlockStmt]struct{}
+	stack    []*reusableBlockInfo
+	fors     map[*ast.ForStmt]struct{}
+	forStack []*reusableForInfo
+}
+
+type reusableForInfo struct {
+	loop       *ast.ForStmt
+	hasFuncLit bool
 }
 
 // reusableBlockVisitor uses a distinct visitor value for each entered block;
@@ -92,6 +103,7 @@ type reusableBlockWalk struct {
 type reusableBlockVisitor struct {
 	state *reusableBlockWalk
 	block *ast.BlockStmt
+	loop  *ast.ForStmt
 }
 
 func (v reusableBlockVisitor) Visit(node ast.Node) ast.Visitor {
@@ -107,6 +119,17 @@ func (v reusableBlockVisitor) Visit(node ast.Node) ast.Visitor {
 				v.state.blocks[info.block] = struct{}{}
 			}
 		}
+		if v.loop != nil {
+			last := len(v.state.forStack) - 1
+			info := v.state.forStack[last]
+			v.state.forStack = v.state.forStack[:last]
+			if !info.hasFuncLit && info.loop.Init != nil {
+				if v.state.fors == nil {
+					v.state.fors = make(map[*ast.ForStmt]struct{})
+				}
+				v.state.fors[info.loop] = struct{}{}
+			}
+		}
 		return nil
 	}
 
@@ -114,11 +137,18 @@ func (v reusableBlockVisitor) Visit(node ast.Node) ast.Visitor {
 		for _, info := range v.state.stack {
 			info.hasFuncLit = true
 		}
+		for _, info := range v.state.forStack {
+			info.hasFuncLit = true
+		}
 	}
 	child := reusableBlockVisitor{state: v.state}
 	if block, isBlock := node.(*ast.BlockStmt); isBlock {
 		v.state.stack = append(v.state.stack, &reusableBlockInfo{block: block})
 		child.block = block
+	}
+	if loop, isFor := node.(*ast.ForStmt); isFor {
+		v.state.forStack = append(v.state.forStack, &reusableForInfo{loop: loop})
+		child.loop = loop
 	}
 	return child
 }
@@ -147,9 +177,18 @@ type execution struct {
 	// reusableBlocks contains source blocks with no escaping function literal.
 	// Their scopes can share fastEnvPool with frame-free calls.
 	reusableBlocks map[*ast.BlockStmt]struct{}
+	reusableFors   map[*ast.ForStmt]struct{}
 	// interfaceMethods caches method names for inline interface assertions.
 	// The map is immutable after parse and safe for concurrent guest reads.
 	interfaceMethods map[*ast.InterfaceType][]string
+	// floatBindings resolves a source identifier to its stable lexical slot
+	// after the first lookup. Valid Go variables retain their type and lexical
+	// owner, while pooled Env instances recreate the same layout each visit.
+	floatBindings [64]floatBindingCacheEntry
+	intBindings   [128]intBindingCacheEntry
+	// floatExprs contains expressions already proven pure and floating-point.
+	// It avoids repeating floatExprShape's complete subtree walk in hot loops.
+	floatExprs [64]floatExprCacheEntry
 
 	// Guest struct literals usually live only for this RunContext call. Store
 	// their headers and field slots in stable heap blocks while execution is
