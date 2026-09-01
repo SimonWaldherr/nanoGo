@@ -952,6 +952,23 @@ process; GC tuning through `runtime/debug` is interpreter-local. These are
 intentional, sandbox-safe subsets rather than drop-in replacements for every
 standard-library API.
 
+### Struct tags
+
+Struct tags are retained as metadata. `encoding/json.Marshal` recognizes the
+common `json:"name"`, `json:",omitempty"`, and `json:"-"` forms; custom tags
+remain available through `reflect.StructField.Tag.Get`.
+
+```go
+type Account struct {
+    ID       int    `json:"id"`
+    Name     string `json:"name,omitempty" validate:"required,min=3"`
+    Password string `json:"-"`
+}
+```
+
+`json.Unmarshal` still follows nanoGo's documented convenience API and
+returns a decoded value rather than populating a destination pointer.
+
 ### Text Templates
 
 `text/template.RenderString(text, data)` is nanoGo's entire template surface.
@@ -1244,6 +1261,12 @@ while `samples/` intentionally contains multiple independent `main` programs.
 Use `make build-wasm` to verify the WASM target instead.
 
 ## ⚡ Performance & Deployment
+
+The interpreter keeps common guest-code paths allocation-conscious: tight
+integer expressions, static string-keyed map counters, and supported `strconv`
+calls use direct execution paths. These optimizations preserve source-level
+semantics while avoiding temporary interpreter values; use the benchmarks in
+`interp/bench_test.go` to measure your workload on its target hardware.
 
 The size of `nanogo.wasm` depends on the Go toolchain and build inputs. Use
 `make size-report` after a local build instead of relying on a fixed size. A

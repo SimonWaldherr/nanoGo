@@ -909,6 +909,21 @@ func main() {
 	}
 }
 
+func TestStringMapCounterReadModifyWrite(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+func main() {
+	counts := map[string]int{}
+	for i := 0; i < 5; i++ { counts["hits"] = counts["hits"] + i }
+	fmt.Println(counts["hits"])
+}
+`)
+	if strings.TrimSpace(out) != "10" {
+		t.Errorf("map counter = %q, want 10", out)
+	}
+}
+
 func TestStringIndexAndSlice(t *testing.T) {
 	out := runAndCapture(t, `
 package main
@@ -1122,6 +1137,23 @@ func main() {
 `)
 	if !strings.Contains(out, "true") || !strings.Contains(out, "false") {
 		t.Errorf("expected 'true' and 'false', got %q", out)
+	}
+}
+
+func TestStrconvFormatFloatAcceptsStringAndByteFormat(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import (
+	"fmt"
+	"strconv"
+)
+func main() {
+	fmt.Println(strconv.FormatFloat(3.5, "f", 1, 64))
+	fmt.Println(strconv.FormatFloat(3.5, 101, 1, 64))
+}
+`)
+	if strings.TrimSpace(out) != "3.5\n3.5e+00" {
+		t.Errorf("FormatFloat output = %q, want string and byte format forms", out)
 	}
 }
 

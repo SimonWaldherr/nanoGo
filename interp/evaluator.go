@@ -609,6 +609,11 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 				// vm.globals is always an ancestor of env, so this is
 				// behavior-preserving there.
 				if p, ok := vm.packageForSelector(pid.Name, env); ok {
+					if p.Name == "strconv" {
+						if value, handled, err := vm.evalStrconvCall(sel.Sel.Name, ex.Args, env); handled {
+							return value, err
+						}
+					}
 					if p.Name == "debug" {
 						switch sel.Sel.Name {
 						case "Q":
@@ -1043,6 +1048,69 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 	default:
 		return nil, NewRuntimeError(fmt.Sprintf("unsupported expr: %T", e))
 	}
+}
+
+// evalStrconvCall keeps the small, frequently used strconv facade out of
+// generic package-call dispatch. The latter must allocate an []any for every
+// call; these direct forms evaluate the same arguments and return the same
+// values/errors without that interpreter overhead.
+func (vm *Interpreter) evalStrconvCall(name string, args []ast.Expr, env *Env) (any, bool, error) {
+	if len(args) == 1 {
+		value, err := vm.evalExpr(args[0], env)
+		if err != nil {
+			return nil, true, err
+		}
+		switch name {
+		case "Itoa":
+			return strconv.Itoa(ToInt(value)), true, nil
+		case "Atoi":
+			n, err := strconv.Atoi(ToString(value))
+			return n, true, err
+		case "FormatBool":
+			return strconv.FormatBool(ToBool(value)), true, nil
+		case "ParseBool":
+			parsed, err := strconv.ParseBool(ToString(value))
+			return parsed, true, err
+		}
+		return nil, false, nil
+	}
+	if len(args) == 2 {
+		first, err := vm.evalExpr(args[0], env)
+		if err != nil {
+			return nil, true, err
+		}
+		second, err := vm.evalExpr(args[1], env)
+		if err != nil {
+			return nil, true, err
+		}
+		switch name {
+		case "FormatInt":
+			return strconv.FormatInt(int64(ToInt(first)), ToInt(second)), true, nil
+		case "ParseFloat":
+			parsed, err := strconv.ParseFloat(ToString(first), ToInt(second))
+			return parsed, true, err
+		}
+	}
+	if name != "FormatFloat" || len(args) != 4 {
+		return nil, false, nil
+	}
+	values := [4]any{}
+	for i := range args {
+		value, err := vm.evalExpr(args[i], env)
+		if err != nil {
+			return nil, true, err
+		}
+		values[i] = value
+	}
+	format := byte('f')
+	if text, ok := values[1].(string); ok {
+		if len(text) > 0 {
+			format = text[0]
+		}
+	} else {
+		format = byte(ToInt(values[1]) & 0xFF)
+	}
+	return strconv.FormatFloat(ToFloat(values[0]), format, ToInt(values[2]), ToInt(values[3])), true, nil
 }
 
 // evalMakeCall is the direct-call counterpart of evalBuiltinArgs("make").
@@ -1632,6 +1700,39 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 		// the general evaluator simply evaluates the same expression again and
 		// nothing has happened twice. Without this, every `a[j] > a[j+1]` or
 		// `sum += a[i]` boxed its operands on the heap.
+		// `m["key"]` is a very common counter/accumulator operand. A static
+		// string key is side-effect free, so an already-present integer value
+		// can stay on the integer path instead of being boxed into any and sent
+		// through applyBinaryOp. Dynamic map keys deliberately use the general
+		// evaluator to retain its complete key semantics.
+		if id, ok := ex.X.(*ast.Ident); ok {
+			if container, found := vm.get(id.Name, env); found {
+				if m, isMap := container.(*MapVal); isMap && m.KeyType == "string" {
+					if lit, isString := ex.Index.(*ast.BasicLit); isString && lit.Kind == token.STRING {
+						key, unquoteErr := strconv.Unquote(lit.Value)
+						if unquoteErr == nil {
+							stored, exists := m.Data[key]
+							n, isInt := stored.(int)
+							// A missing entry in a statically integer map has the
+							// same zero value as the generic ToInt(nil) path.
+							if !exists && isIntegerStorageType(m.ElementType) {
+								n, isInt = 0, true
+							}
+							if isInt {
+								// The root IndexExpr was charged on entry. Its
+								// identifier and string-literal children still need
+								// their normal checkpoints.
+								if err := vm.executionErrors(2); err != nil {
+									return 0, true, err
+								}
+								return n, true, nil
+							}
+						}
+					}
+				}
+			}
+		}
+
 		var sv *SliceVal
 		if id, ok := ex.X.(*ast.Ident); ok {
 			// Establish that this really is an indexable slice before evaluating
@@ -1834,6 +1935,15 @@ func isIntArithmetic(op token.Token) bool {
 	}
 }
 
+func isIntegerStorageType(typ string) bool {
+	switch typ {
+	case "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune":
+		return true
+	default:
+		return false
+	}
+}
+
 func isIntComparison(op token.Token) bool {
 	switch op {
 	case token.EQL, token.NEQ, token.LSS, token.GTR, token.LEQ, token.GEQ:
@@ -1990,11 +2100,19 @@ type gotoTarget struct {
 // goto. Backward goto loops then use O(1) target lookups rather than scanning
 // their whole function body every iteration.
 func buildGotoTargets(stmts []ast.Stmt) map[string]gotoTarget {
-	targets := make(map[string]gotoTarget)
+	// Most statement lists that propagate a goto are small if/case bodies and
+	// have no label of their own. Keep their result nil: execStmtList can then
+	// return the control flow without allocating a throwaway map on every loop
+	// iteration. A list that does define a label still builds its map once and
+	// reuses it for all backward jumps in that invocation.
+	var targets map[string]gotoTarget
 	for i, stmt := range stmts {
 		label, ok := stmt.(*ast.LabeledStmt)
 		if !ok {
 			continue
+		}
+		if targets == nil {
+			targets = make(map[string]gotoTarget)
 		}
 		targets[label.Label.Name] = gotoTarget{index: i, declared: declaredNames(stmts[i:])}
 	}
@@ -2195,6 +2313,32 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 						}
 						return controlFlow{}, nil
 					}
+				}
+			}
+		}
+
+		// Read-modify-write on a string-keyed map entry is common in counters,
+		// histograms and caches. When the key is a literal and the RHS is a pure
+		// integer expression, avoid the temporary RHS []any and generic lvalue
+		// wrapper. The map is only mutated after the RHS completed successfully,
+		// matching ordinary assignment order.
+		if st.Tok == token.ASSIGN && len(st.Lhs) == 1 && len(st.Rhs) == 1 {
+			if m, key, ok := vm.staticStringMapLvalue(st.Lhs[0], env); ok {
+				value, intOK, err := vm.tryEvalIntExpr(st.Rhs[0], env, true)
+				if err != nil {
+					return controlFlow{}, err
+				}
+				if intOK {
+					// resolveLvalue would evaluate the IndexExpr plus its two
+					// children after the RHS. Charge those nodes explicitly.
+					if err := vm.executionErrors(3); err != nil {
+						return controlFlow{}, err
+					}
+					m.setByKey(key, value)
+					if vm.trackingVariables() {
+						vm.recordAssignedExpression(st.Lhs[0], value, env)
+					}
+					return controlFlow{}, nil
 				}
 			}
 		}
@@ -3470,6 +3614,37 @@ func (vm *Interpreter) resolveLvalue(l ast.Expr, env *Env) (lvalueRef, error) {
 	default:
 		return lvalueRef{}, NewRuntimeError("invalid lvalue")
 	}
+}
+
+// staticStringMapLvalue recognizes the side-effect-free lvalue shape used by
+// tight counter loops: m["key"]. It intentionally excludes expressions such
+// as m[key()] so the assignment fast path never changes evaluation order.
+func (vm *Interpreter) staticStringMapLvalue(l ast.Expr, env *Env) (*MapVal, string, bool) {
+	index, ok := l.(*ast.IndexExpr)
+	if !ok {
+		return nil, "", false
+	}
+	id, ok := index.X.(*ast.Ident)
+	if !ok {
+		return nil, "", false
+	}
+	value, found := vm.get(id.Name, env)
+	if !found {
+		return nil, "", false
+	}
+	m, ok := value.(*MapVal)
+	if !ok || m.KeyType != "string" {
+		return nil, "", false
+	}
+	literal, ok := index.Index.(*ast.BasicLit)
+	if !ok || literal.Kind != token.STRING {
+		return nil, "", false
+	}
+	key, err := strconv.Unquote(literal.Value)
+	if err != nil {
+		return nil, "", false
+	}
+	return m, key, true
 }
 
 // resolveRef preserves the generic helper for package users and older

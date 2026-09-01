@@ -593,6 +593,32 @@ func main() {
 	}
 }
 
+// BenchmarkStrconvFacade measures the conversion helpers commonly used in
+// parsing, logging and generated protocol code. Its direct call path should
+// avoid allocating interpreter argument slices beyond the strings that strconv
+// itself must produce.
+func BenchmarkStrconvFacade(b *testing.B) {
+	const src = `
+package main
+import "strconv"
+func main() {
+	for i := 0; i < 2000; i++ {
+		s := strconv.Itoa(i)
+		n, _ := strconv.Atoi(s)
+		_ = strconv.FormatInt(int64(n), 10)
+		_, _ = strconv.ParseFloat("3.14", 64)
+	}
+}`
+	vm, _ := newTestVM()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := vm.Run(src); err != nil {
+			b.Fatalf("Run: %v", err)
+		}
+	}
+}
+
 // BenchmarkUTF8TimeAndRegexpFacades tracks three allocation-sensitive native
 // facades. The regexp is compiled once so its method-state lookup and result
 // conversion are measured rather than compilation itself.
