@@ -547,7 +547,7 @@ func main() {
 	want := []string{
 		"true", "false", "2", "5", "1", // Contains/Contains/Index/Max/Min
 		"1", "1", "3", "4", "5", // sorted ascending
-		"5",              // first element after Reverse
+		"5",             // first element after Reverse
 		"true", "false", // Equal/Equal
 	}
 	for i, w := range want {
@@ -1362,6 +1362,26 @@ func main() {
 `)
 	if strings.TrimSpace(out) != "3.5\n3.5e+00" {
 		t.Errorf("FormatFloat output = %q, want string and byte format forms", out)
+	}
+}
+
+func TestUnknownStrconvFunctionDoesNotEvaluateArguments(t *testing.T) {
+	vm, _ := newTestVM()
+	calls := 0
+	vm.RegisterNative("bump", func([]any) (any, error) {
+		calls++
+		return 1, nil
+	})
+	err := vm.Run(`
+package main
+import "strconv"
+func main() { strconv.NotAFunction(bump()) }
+`)
+	if err == nil || !strings.Contains(err.Error(), "unknown package member") {
+		t.Fatalf("Run error = %v, want unknown package member", err)
+	}
+	if calls != 0 {
+		t.Fatalf("unknown strconv function evaluated %d arguments, want 0", calls)
 	}
 }
 

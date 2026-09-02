@@ -1278,10 +1278,10 @@ Use `make build-wasm` to verify the WASM target instead.
 
 The interpreter keeps common guest-code paths allocation-conscious: tight
 integer and float expressions, static string-keyed map counters, single-value
-`append(s, v)` calls, and supported `strconv` calls use direct execution
-paths. These optimizations preserve source-level semantics while avoiding
-temporary interpreter values; use the benchmarks in `interp/bench_test.go` to
-measure your workload on its target hardware.
+`append(s, v)` calls, and supported `strconv` and `strings` calls use direct
+execution paths. These optimizations preserve source-level semantics while
+avoiding temporary interpreter values; use the benchmarks in
+`interp/bench_test.go` to measure your workload on its target hardware.
 
 The size of `nanogo.wasm` depends on the Go toolchain and build inputs. Use
 `make size-report` after a local build instead of relying on a fixed size. A

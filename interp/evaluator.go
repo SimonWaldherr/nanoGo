@@ -633,6 +633,11 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 							return value, err
 						}
 					}
+					if p.Name == "strings" {
+						if value, handled, err := vm.evalStringsCall(sel.Sel.Name, ex.Args, env); handled {
+							return value, err
+						}
+					}
 					if p.Name == "debug" {
 						switch sel.Sel.Name {
 						case "Q":
@@ -1075,6 +1080,11 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 // values/errors without that interpreter overhead.
 func (vm *Interpreter) evalStrconvCall(name string, args []ast.Expr, env *Env) (any, bool, error) {
 	if len(args) == 1 {
+		switch name {
+		case "Itoa", "Atoi", "FormatBool", "ParseBool":
+		default:
+			return nil, false, nil
+		}
 		value, err := vm.evalExpr(args[0], env)
 		if err != nil {
 			return nil, true, err
@@ -1091,9 +1101,13 @@ func (vm *Interpreter) evalStrconvCall(name string, args []ast.Expr, env *Env) (
 			parsed, err := strconv.ParseBool(ToString(value))
 			return parsed, true, err
 		}
-		return nil, false, nil
 	}
 	if len(args) == 2 {
+		switch name {
+		case "FormatInt", "ParseFloat":
+		default:
+			return nil, false, nil
+		}
 		first, err := vm.evalExpr(args[0], env)
 		if err != nil {
 			return nil, true, err
@@ -1130,6 +1144,78 @@ func (vm *Interpreter) evalStrconvCall(name string, args []ast.Expr, env *Env) (
 		format = byte(ToInt(values[1]) & 0xFF)
 	}
 	return strconv.FormatFloat(ToFloat(values[0]), format, ToInt(values[2]), ToInt(values[3])), true, nil
+}
+
+// evalStringsCall avoids generic package-call argument slices for the pure,
+// fixed-arity string helpers used in search and normalization loops. Functions
+// that can panic (such as Repeat) intentionally retain normal dispatch so a
+// host panic continues through nanoGo's guest panic machinery.
+func (vm *Interpreter) evalStringsCall(name string, args []ast.Expr, env *Env) (any, bool, error) {
+	if len(args) == 1 {
+		switch name {
+		case "ToUpper", "ToLower", "TrimSpace":
+		default:
+			return nil, false, nil
+		}
+		value, err := vm.evalExpr(args[0], env)
+		if err != nil {
+			return nil, true, err
+		}
+		switch name {
+		case "ToUpper":
+			return strings.ToUpper(ToString(value)), true, nil
+		case "ToLower":
+			return strings.ToLower(ToString(value)), true, nil
+		default:
+			return strings.TrimSpace(ToString(value)), true, nil
+		}
+	}
+	if len(args) == 2 {
+		switch name {
+		case "Contains", "Trim", "TrimPrefix", "TrimSuffix", "HasPrefix", "HasSuffix", "Count", "Index":
+		default:
+			return nil, false, nil
+		}
+		first, err := vm.evalExpr(args[0], env)
+		if err != nil {
+			return nil, true, err
+		}
+		second, err := vm.evalExpr(args[1], env)
+		if err != nil {
+			return nil, true, err
+		}
+		left, right := ToString(first), ToString(second)
+		switch name {
+		case "Contains":
+			return strings.Contains(left, right), true, nil
+		case "Trim":
+			return strings.Trim(left, right), true, nil
+		case "TrimPrefix":
+			return strings.TrimPrefix(left, right), true, nil
+		case "TrimSuffix":
+			return strings.TrimSuffix(left, right), true, nil
+		case "HasPrefix":
+			return strings.HasPrefix(left, right), true, nil
+		case "HasSuffix":
+			return strings.HasSuffix(left, right), true, nil
+		case "Count":
+			return strings.Count(left, right), true, nil
+		default:
+			return strings.Index(left, right), true, nil
+		}
+	}
+	if name != "ReplaceAll" || len(args) != 3 {
+		return nil, false, nil
+	}
+	values := [3]any{}
+	for i := range args {
+		value, err := vm.evalExpr(args[i], env)
+		if err != nil {
+			return nil, true, err
+		}
+		values[i] = value
+	}
+	return strings.ReplaceAll(ToString(values[0]), ToString(values[1]), ToString(values[2])), true, nil
 }
 
 // evalMakeCall is the direct-call counterpart of evalBuiltinArgs("make").
