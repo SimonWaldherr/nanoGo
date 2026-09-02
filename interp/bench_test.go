@@ -722,6 +722,23 @@ func BenchmarkVFSReadWrite(b *testing.B) {
 	}
 }
 
+// BenchmarkVFSImportReader measures the bounded host-reader path. ImportReader
+// owns the freshly read buffer, so it can transfer it into the VFS without a
+// second payload-sized copy while public WriteFile calls remain defensive.
+func BenchmarkVFSImportReader(b *testing.B) {
+	fs := NewVFS()
+	payload := strings.Repeat("r", 32<<10)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := fs.ImportReader(ctx, "/input/reader.txt", strings.NewReader(payload), int64(len(payload))); err != nil {
+			b.Fatalf("ImportReader: %v", err)
+		}
+	}
+}
+
 // BenchmarkVFSEnvironment covers the small operations behind os.Getenv,
 // os.Setenv and os.Environ without evaluator dispatch obscuring VFS locking
 // and sorting costs.

@@ -188,6 +188,14 @@ func (fs *VFS) ReadFile(p string) ([]byte, error) {
 // WriteFile creates or overwrites the named file with the given data.
 // The parent directory must already exist.
 func (fs *VFS) WriteFile(p string, data []byte, mode int) error {
+	return fs.writeFile(p, data, mode, false)
+}
+
+// writeFile writes data into the VFS. When takeOwnership is true, data must
+// be a private buffer that has not been exposed to a caller; the VFS adopts it
+// instead of making its usual defensive copy. ImportReader is the sole caller:
+// io.ReadAll created its result exclusively for that import.
+func (fs *VFS) writeFile(p string, data []byte, mode int, takeOwnership bool) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	abs := cleanPath(p, fs.cwd)
@@ -209,14 +217,21 @@ func (fs *VFS) WriteFile(p string, data []byte, mode int) error {
 	// removes the copy allocation for the common same-size log/temp-file
 	// rewrite without altering any observable alias.
 	if node, exists := fs.nodes[abs]; exists && !node.isDir {
-		node.content = append(node.content[:0], data...)
+		if takeOwnership {
+			node.content = data
+		} else {
+			node.content = append(node.content[:0], data...)
+		}
 		node.modTime = time.Now()
 		node.mode = mode
 		fs.revision++
 		return nil
 	}
-	content := make([]byte, len(data))
-	copy(content, data)
+	content := data
+	if !takeOwnership {
+		content = make([]byte, len(data))
+		copy(content, data)
+	}
 	fs.nodes[abs] = &vfsNode{
 		name:    path.Base(abs),
 		content: content,

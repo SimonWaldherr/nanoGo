@@ -104,7 +104,7 @@ func (vfs *VFS) ImportReader(ctx context.Context, filePath string, reader io.Rea
 	if err := vfs.MkdirAll(path.Dir(abs), 0755); err != nil {
 		return err
 	}
-	return vfs.WriteFile(abs, data, 0644)
+	return vfs.writeFile(abs, data, 0644, true)
 }
 
 func importLimits(options VFSImportOptions) (int, int64, error) {
@@ -263,7 +263,24 @@ func (r contextReader) Read(p []byte) (int, error) {
 }
 
 func readWithContext(ctx context.Context, reader io.Reader, maxBytes int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(contextReader{ctx: ctx, r: reader}, maxBytes+1))
+	limited := io.LimitReader(contextReader{ctx: ctx, r: reader}, maxBytes+1)
+	var data []byte
+	var err error
+	// bytes.Reader, strings.Reader and bytes.Buffer expose their unread size.
+	// Starting with that capacity avoids io.ReadAll's geometric growth (and its
+	// discarded intermediate buffers) for the common in-memory request path.
+	// The LimitReader and final size check remain authoritative: a misleading
+	// Len implementation cannot bypass the import bound.
+	if sized, ok := reader.(interface{ Len() int }); ok {
+		hint := int64(sized.Len())
+		if hint > 0 && hint <= maxBytes && hint < int64(^uint(0)>>1) {
+			data, err = readKnownSize(limited, int(hint))
+		} else {
+			data, err = io.ReadAll(limited)
+		}
+	} else {
+		data, err = io.ReadAll(limited)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -274,4 +291,26 @@ func readWithContext(ctx context.Context, reader io.Reader, maxBytes int64) ([]b
 		return nil, err
 	}
 	return data, nil
+}
+
+// readKnownSize consumes a reader with a trustworthy remaining-size hint. The
+// spare byte lets a correctly sized reader report EOF without growing the
+// buffer; if the hint is short, io.ReadAll finishes safely from the same
+// limited reader.
+func readKnownSize(reader io.Reader, size int) ([]byte, error) {
+	data := make([]byte, 0, size+1)
+	for {
+		if len(data) == cap(data) {
+			rest, err := io.ReadAll(reader)
+			return append(data, rest...), err
+		}
+		n, err := reader.Read(data[len(data):cap(data)])
+		data = data[:len(data)+n]
+		if err == io.EOF {
+			return data, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 }

@@ -1730,6 +1730,22 @@ func TestVFSImportDirAndReaderHaveBoundedSnapshots(t *testing.T) {
 	}
 }
 
+type misleadingLenReader struct {
+	r    *strings.Reader
+	hint int
+}
+
+func (r misleadingLenReader) Read(p []byte) (int, error) { return r.r.Read(p) }
+func (r misleadingLenReader) Len() int                   { return r.hint }
+
+func TestReadWithContextHonorsLimitDespiteReaderHint(t *testing.T) {
+	reader := misleadingLenReader{r: strings.NewReader("1234"), hint: 1}
+	_, err := readWithContext(context.Background(), reader, 3)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("readWithContext error = %v, want size-limit error", err)
+	}
+}
+
 func TestVFSImportFSHonorsConfiguredLimits(t *testing.T) {
 	source := fstest.MapFS{
 		"first.txt":  &fstest.MapFile{Data: []byte("one")},

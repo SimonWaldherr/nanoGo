@@ -1282,6 +1282,9 @@ integer and float expressions, static string-keyed map counters, single-value
 execution paths. These optimizations preserve source-level semantics while
 avoiding temporary interpreter values; use the benchmarks in
 `interp/bench_test.go` to measure your workload on its target hardware.
+Bounded `ImportReader` operations also reuse trustworthy in-memory reader
+length hints and transfer their private input buffer directly into the VFS;
+public `WriteFile` and `ReadFile` calls retain defensive copies.
 
 The size of `nanogo.wasm` depends on the Go toolchain and build inputs. Use
 `make size-report` after a local build instead of relying on a fixed size. A
