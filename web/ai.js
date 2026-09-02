@@ -28,14 +28,33 @@
     if (config.key) keyEl.value = config.key;
     if (typeof config.includeGraph === 'boolean') includeGraphEl.checked = config.includeGraph;
   }
+  // Renders reply text as prose with any fenced ```go block broken out into
+  // its own <pre> — .ai-message-body (styles.css) wraps and sizes the prose
+  // while the nested <pre> keeps the code block's monospace, unwrapped
+  // styling (.ai-message pre). Plain text (no fence) is just prose.
+  function renderMessageBody(container, text) {
+    const fence = /```(?:go)?\s*\n([\s\S]*?)```/i.exec(text || '');
+    if (!fence) {
+      container.textContent = text || '';
+      return;
+    }
+    const before = text.slice(0, fence.index).trim();
+    const after = text.slice(fence.index + fence[0].length).trim();
+    if (before) container.appendChild(document.createTextNode(before + '\n'));
+    const pre = document.createElement('pre');
+    pre.textContent = fence[1].trim() + '\n';
+    container.appendChild(pre);
+    if (after) container.appendChild(document.createTextNode('\n' + after));
+  }
   function addMessage(role, text) {
     const message = document.createElement('article');
     message.className = 'ai-message ai-message-' + role;
     const label = document.createElement('div');
     label.className = 'ai-message-label';
     label.textContent = role === 'user' ? 'You' : role === 'error' ? 'Connection' : 'nanoGo AI';
-    const body = document.createElement('pre');
-    body.textContent = text;
+    const body = document.createElement('div');
+    body.className = 'ai-message-body';
+    renderMessageBody(body, text);
     message.append(label, body);
     messagesEl.appendChild(message);
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -48,6 +67,8 @@
   function appendApplyButton(message, text) {
     const code = codeBlock(text);
     if (!code) return;
+    const actions = document.createElement('div');
+    actions.className = 'ai-message-actions';
     const button = document.createElement('button');
     button.className = 'mini-btn ai-apply-btn';
     button.textContent = 'Apply Go block to editor';
@@ -57,7 +78,8 @@
       button.textContent = 'Applied';
       button.disabled = true;
     };
-    message.appendChild(button);
+    actions.appendChild(button);
+    message.appendChild(actions);
   }
   function contextFor(prompt) {
     const source = window.nanoGoPlayground ? window.nanoGoPlayground.getSource() : '';

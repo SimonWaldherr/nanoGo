@@ -41,9 +41,12 @@
        the scripts intentionally load (deferred) before playground.js, near
        the end of <body>, so they execute before it runs. -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css" crossorigin="anonymous">
-  <link rel="stylesheet" href="styles.css?15">
+  <link rel="stylesheet" href="styles.css?16">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js" crossorigin="anonymous" defer></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js" crossorigin="anonymous" defer></script>
+  <!-- Highlights the cursor's current line; styles.css already themes
+       .CodeMirror-activeline-background per theme, this just turns it on. -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/addon/selection/active-line.min.js" crossorigin="anonymous" defer></script>
 </head>
 <body>
   <!-- Header -->

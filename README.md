@@ -42,7 +42,7 @@ playground still creates one interpreter per run and exposes **Stop**.
 ### Core Capabilities
 - ✅ **Supported Go subset**: Variables, functions, structs, slices, maps, interfaces, channels, and selected control-flow constructs
 - ✅ **Concurrency**: Goroutines and channels, including cancellation-aware waits
-- ✅ **Built-in Packages**: Curated subsets of `fmt`, `time`, `sync`, `math`, `math/rand`, `strings`, `regexp`, `sort`, `strconv`, `path`, `unicode/utf8`, `encoding/json`/`json`, `encoding/gob`, `reflect`, `runtime`, `runtime/debug`, `os`, `fs`, and `testing`
+- ✅ **Built-in Packages**: Curated subsets of `fmt`, `time`, `sync`, `math`, `math/rand`, `strings`, `regexp`, `sort`, `slices`, `strconv`, `path`, `unicode/utf8`, `encoding/json`/`json`, `encoding/gob`, `errors`, `bytes`, `reflect`, `runtime`, `runtime/debug`, `os`, `fs`, and `testing`
 - ✅ **Browser Integration**: Special `browser` package for DOM manipulation and canvas drawing
 - ✅ **HTTP facade**: Browser code can use nanoGo's `http.GetText`/`PostText` facade, subject to CORS; embedded hosts must provide and authorize a transport native
 - ✅ **Template helper**: `text/template.RenderString` expands a template; it does not provide `html/template` escaping
@@ -244,9 +244,10 @@ Incoming (your page → the iframe's `contentWindow`):
 
 ### 3. Build your own frontend from scratch
 
-The production playground (`web/index.html`) is a full-featured, ~2000-line
-CodeMirror-based editor — more than most integrations need to read through
-just to learn the WASM worker's message protocol. [web/minimal.html](web/minimal.html)
+The production playground (`web/index.html`, a ~500-line shell, plus its
+~3000-line `web/playground.js` controller) is a full-featured CodeMirror-based
+editor — more than most integrations need to read through just to learn the
+WASM worker's message protocol. [web/minimal.html](web/minimal.html)
 and [web/app.js](web/app.js) are a from-scratch, framework-free reference
 frontend (a plain `<textarea>`, a handful of buttons, no CDN dependency)
 that implements the same protocol in well under 300 lines — a copyable
@@ -922,7 +923,7 @@ nanoGo implements a **tree-walking interpreter** that parses Go source code into
 nanoGo includes a curated set of built-in packages:
 
 - **Core**: `fmt`, `sync`, `time`, `reflect`, `runtime`, `runtime/debug`
-- **Data**: `encoding/json` (also available as `json`), `encoding/gob`, `strings`, `regexp`, `sort`, `strconv`, `path`, `unicode/utf8`
+- **Data**: `encoding/json` (also available as `json`), `encoding/gob`, `errors`, `bytes`, `strings`, `regexp`, `sort`, `slices`, `strconv`, `path`, `unicode/utf8`
 - **Math**: selected `math` and `math/rand` functions
 - **Text & tooling**: `text/template`, `debug`, and a supported subset of `testing`
 - **Host-bound APIs**: `browser`, `storage`, `fs`, `os`, `http`, `protobuf`, and `grpc`; filesystem/network calls require `Capabilities`, while APIs that reach host resources require the corresponding host native
@@ -943,6 +944,19 @@ to stay opaque to guest code. `grpc.Invoke(target, method, request)` delegates
 to a context-aware `GRPCInvoke` host native and applies the normal network
 capability check to `target`; hosts retain ownership of stubs, TLS and pooled
 connections.
+
+`errors.New`/`Is`/`Unwrap`/`Join` delegate straight to Go's own `errors`
+package, so a package-level sentinel (`var ErrNotFound = errors.New(...)`) is
+comparable with `errors.Is` the normal way. nanoGo has no `fmt.Errorf("%w",
+...)` wrapping of its own, so `Is`/`Unwrap` only ever see a wrap chain a host
+native's returned error already carries. `bytes.Buffer` (`Write`,
+`WriteString`, `WriteByte`, `String`, `Bytes`, `Len`, `Reset`, plus
+`bytes.NewBuffer`/`NewBufferString`) is a real `bytes.Buffer` under the hood
+and, like `sync.WaitGroup`, is usable directly from a zero-value `var buf
+bytes.Buffer` declaration. `slices` (`Contains`, `Index`, `Equal`, `Sort`,
+`Reverse`, `Max`, `Min`) operates on nanoGo's dynamic slice values using the
+same equality and ordering rules as `==` and `sort.*`, rather than a separate
+comparison convention.
 
 The `reflect` facade covers type/kind inspection, struct fields, container
 length/index access, `ValueOf`, `Zero`, and `DeepEqual`. Immutable
@@ -1263,10 +1277,11 @@ Use `make build-wasm` to verify the WASM target instead.
 ## ⚡ Performance & Deployment
 
 The interpreter keeps common guest-code paths allocation-conscious: tight
-integer expressions, static string-keyed map counters, and supported `strconv`
-calls use direct execution paths. These optimizations preserve source-level
-semantics while avoiding temporary interpreter values; use the benchmarks in
-`interp/bench_test.go` to measure your workload on its target hardware.
+integer and float expressions, static string-keyed map counters, single-value
+`append(s, v)` calls, and supported `strconv` calls use direct execution
+paths. These optimizations preserve source-level semantics while avoiding
+temporary interpreter values; use the benchmarks in `interp/bench_test.go` to
+measure your workload on its target hardware.
 
 The size of `nanogo.wasm` depends on the Go toolchain and build inputs. Use
 `make size-report` after a local build instead of relying on a fixed size. A

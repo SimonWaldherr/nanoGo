@@ -41,7 +41,6 @@
   --syn-meta: #f5a3d7;
   --shadow: 0 12px 32px rgba(0, 0, 0, .2);
   --shadow-lg: 0 24px 64px rgba(0, 0, 0, .34);
-  --gradient-bg: linear-gradient(112deg, #101a2b, #0b101b 60%, #0a1622);
   --radius: 16px;
   /* Two smaller radii that recur throughout the panel/card and pill/badge
      components (introduced as tokens rather than restating the literal
@@ -828,7 +827,7 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 
 /* Theme variables stay lightweight: the existing picker only needs to switch
    these tokens; the full layout above remains identical and accessible. */
-.theme-light { color-scheme: light; --bg:#f4f7fb; --surface:#fff; --surface-raised:#f5f8fc; --surface-hover:#eaf0f8; --text:#172033; --text-muted:#485565; --text-dim:#626f85; --border:#d9e2ef; --border-light:#bccbe0; --accent:#2463c5; --accent-hover:#174c9d; --accent-strong:#2463c5; --success:#13865b; --warning:#8f5a00; --error:#c23a4a; --code-bg:#f8fbff; --code-gutter:#eef4fa; --gradient-bg:linear-gradient(112deg,#f2f7ff,#fff); }
+.theme-light { color-scheme: light; --bg:#f4f7fb; --surface:#fff; --surface-raised:#f5f8fc; --surface-hover:#eaf0f8; --text:#172033; --text-muted:#485565; --text-dim:#626f85; --border:#d9e2ef; --border-light:#bccbe0; --accent:#2463c5; --accent-hover:#174c9d; --accent-strong:#2463c5; --success:#13865b; --warning:#8f5a00; --error:#c23a4a; --code-bg:#f8fbff; --code-gutter:#eef4fa; }
 .theme-solar, .theme-sepia { color-scheme: light; --bg:#f5efdf; --surface:#fff9ea; --surface-raised:#f3ead6; --surface-hover:#ecdfc4; --text:#4a4031; --text-muted:#5d5342; --text-dim:#71654f; --border:#ded2ba; --border-light:#cdbd9f; --accent:#9a6519; --accent-hover:#74490f; --accent-strong:#9a6519; --success:#31745d; --warning:#9a6519; --error:#b34b48; --code-bg:#fff9eb; --code-gutter:#f3ead7; }
 .theme-dracula { --bg:#282a36; --surface:#343746; --surface-raised:#414557; --surface-hover:#4d5265; --text:#f8f8f2; --text-muted:#d5d5cc; --text-dim:#b0b6cb; --border:#505466; --border-light:#696d81; --accent:#ff79c6; --accent-hover:#ff9bd6; --accent-strong:#c95f9f; --success:#50fa7b; --warning:#f1fa8c; --error:#ff8585; --code-bg:#20212b; --code-gutter:#292b36; }
 .theme-monokai { --bg:#272822; --surface:#30312a; --surface-raised:#3a3b34; --surface-hover:#46473f; --text:#f8f8f2; --text-muted:#cccbbf; --text-dim:#aca997; --border:#515248; --border-light:#6d6e61; --accent:#a6e22e; --accent-hover:#c1f26a; --accent-strong:#76ae1a; --success:#a6e22e; --warning:#e6db74; --error:#ff709f; --code-bg:#1f201c; --code-gutter:#292a25; }
@@ -913,8 +912,12 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
 
   /* Icon-only buttons: the emoji stays, the trailing label collapses. The
      Run button keeps its own label (it's the primary action) but sheds the
-     "(Ctrl/⌘+Enter)" hint, which is meaningless without a hardware keyboard. */
-  .btn-label, .shortcut-hint { display: none; }
+     "(Ctrl/⌘+Enter)" hint, which is meaningless without a hardware keyboard.
+     .btn-label is visually hidden (clip, like .examples-toggle-input) rather
+     than display:none, so its text still contributes to the button's
+     accessible name instead of collapsing it to just the emoji glyph. */
+  .btn-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .shortcut-hint { display: none; }
   .header-actions > button, .header-actions > .menu-trigger > button, .upload-control, .header-link,
   .controls > button:not(.primary), .controls > .menu-trigger > button { min-width: 44px; padding-left: 8px; padding-right: 8px; }
 

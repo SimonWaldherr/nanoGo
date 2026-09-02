@@ -349,6 +349,214 @@ func main() {
 	}
 }
 
+// TestSliceAppendSingleValueEvaluationOrder pins the direct-dispatch fast
+// path for append(s, v) (the single-value shape every guest growth loop
+// uses): its two operands must still evaluate left-to-right and each must
+// still run exactly once, matching the general evalBuiltinArgs/applyBuiltin
+// path it bypasses.
+func TestSliceAppendSingleValueEvaluationOrder(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import "fmt"
+var order []string
+func first() []int {
+	order = append(order, "first")
+	return []int{1, 2}
+}
+func second() int {
+	order = append(order, "second")
+	return 3
+}
+func main() {
+	s := append(first(), second())
+	fmt.Println(len(s))
+	for _, name := range order {
+		fmt.Println(name)
+	}
+}
+`)
+	wantLines := []string{"3", "first", "second"}
+	for _, want := range wantLines {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected output to contain %q, got %q", want, out)
+		}
+	}
+	firstIdx := strings.Index(out, "first")
+	secondIdx := strings.Index(out, "second")
+	if firstIdx == -1 || secondIdx == -1 || firstIdx > secondIdx {
+		t.Errorf("expected \"first\" to be recorded before \"second\", got %q", out)
+	}
+}
+
+// TestSliceAppendSingleValueRespectsContainerLimit proves the append(s, v)
+// fast path still delegates to builtinAppend for enforcement, rather than
+// growing the slice directly and skipping the interpreter's container-size
+// guard.
+func TestSliceAppendSingleValueRespectsContainerLimit(t *testing.T) {
+	vm, _ := newTestVM()
+	vm.MaxContainerSize = 2
+	err := vm.Run(`
+package main
+func main() {
+	s := []int{1, 2}
+	s = append(s, 3)
+	_ = s
+}
+`)
+	if err == nil {
+		t.Fatal("expected append beyond MaxContainerSize to fail")
+	}
+	if !strings.Contains(err.Error(), "size exceeds interpreter limit") {
+		t.Errorf("expected a container-size-limit error, got %v", err)
+	}
+}
+
+// ---------- errors package ----------
+
+func TestErrorsNewIsAndUnwrap(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import (
+	"errors"
+	"fmt"
+)
+var ErrNotFound = errors.New("not found")
+func lookup(ok bool) error {
+	if !ok {
+		return ErrNotFound
+	}
+	return nil
+}
+func main() {
+	err := lookup(false)
+	fmt.Println(err)
+	fmt.Println(errors.Is(err, ErrNotFound))
+	fmt.Println(errors.Is(err, errors.New("not found")))
+	fmt.Println(lookup(true) == nil)
+	fmt.Println(errors.Unwrap(err) == nil)
+}
+`)
+	wantLines := []string{"not found", "true", "false", "true", "true"}
+	for _, want := range wantLines {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected output to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestErrorsJoin(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import (
+	"errors"
+	"fmt"
+)
+func main() {
+	a := errors.New("a failed")
+	b := errors.New("b failed")
+	joined := errors.Join(a, b)
+	fmt.Println(joined)
+	fmt.Println(errors.Is(joined, a))
+	fmt.Println(errors.Is(joined, b))
+	fmt.Println(errors.Join() == nil)
+}
+`)
+	wantLines := []string{"a failed", "b failed", "true", "true", "true"}
+	for _, want := range wantLines {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected output to contain %q, got %q", want, out)
+		}
+	}
+}
+
+// ---------- bytes package ----------
+
+func TestBytesBufferZeroValueAndMethods(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import (
+	"bytes"
+	"fmt"
+)
+func main() {
+	var buf bytes.Buffer
+	buf.WriteString("hello")
+	buf.WriteByte(' ')
+	data := make([]byte, 5)
+	data[0], data[1], data[2], data[3], data[4] = 'w', 'o', 'r', 'l', 'd'
+	buf.Write(data)
+	fmt.Println(buf.String())
+	fmt.Println(buf.Len())
+	buf.Reset()
+	fmt.Println(buf.Len())
+}
+`)
+	wantLines := []string{"hello world", "11", "0"}
+	for _, want := range wantLines {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected output to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestBytesNewBufferString(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import (
+	"bytes"
+	"fmt"
+)
+func main() {
+	buf := bytes.NewBufferString("seed-")
+	buf.WriteString("grown")
+	fmt.Println(buf.String())
+}
+`)
+	if !strings.Contains(out, "seed-grown") {
+		t.Errorf("expected 'seed-grown', got %q", out)
+	}
+}
+
+// ---------- slices package ----------
+
+func TestSlicesPackage(t *testing.T) {
+	out := runAndCapture(t, `
+package main
+import (
+	"fmt"
+	"slices"
+)
+func main() {
+	s := []int{3, 1, 4, 1, 5}
+	fmt.Println(slices.Contains(s, 4))
+	fmt.Println(slices.Contains(s, 9))
+	fmt.Println(slices.Index(s, 4))
+	fmt.Println(slices.Max(s))
+	fmt.Println(slices.Min(s))
+	slices.Sort(s)
+	for _, v := range s {
+		fmt.Println(v)
+	}
+	slices.Reverse(s)
+	fmt.Println(s[0])
+	fmt.Println(slices.Equal([]string{"a", "b"}, []string{"a", "b"}))
+	fmt.Println(slices.Equal([]string{"a", "b"}, []string{"a", "c"}))
+}
+`)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	want := []string{
+		"true", "false", "2", "5", "1", // Contains/Contains/Index/Max/Min
+		"1", "1", "3", "4", "5", // sorted ascending
+		"5",              // first element after Reverse
+		"true", "false", // Equal/Equal
+	}
+	for i, w := range want {
+		if i >= len(lines) || strings.TrimSpace(lines[i]) != w {
+			t.Errorf("line %d: want %q, got %q (full output %q)", i, w, safeIndex(lines, i), out)
+		}
+	}
+}
+
 // TestSliceCopyOverlapping proves builtinCopy is overlap-safe (memmove-based,
 // like real Go's copy()) rather than a naive forward-only element loop,
 // which would corrupt data on the classic "shift right to insert" idiom

@@ -627,6 +627,7 @@
             tabSize: 2,
             lineWrapping: true,
             viewportMargin: 12,
+            styleActiveLine: true,
             readOnly: wantReadonly ? 'nocursor' : false
           });
           editor.setSize('100%', '100%');

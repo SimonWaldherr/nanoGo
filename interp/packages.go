@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/gob"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"math"
 	mrand "math/rand"
@@ -54,8 +55,11 @@ func init() {
 		// json is a convenience alias for encoding/json; the builder registers
 		// the same *Package object under both names.
 		"json":          registerJSONPackage,
+		"errors":        registerErrorsPackage,
+		"bytes":         registerBytesPackage,
 		"strings":       registerStringsPackage,
 		"sort":          registerSortPackage,
+		"slices":        registerSlicesPackage,
 		"strconv":       registerStrconvPackage,
 		"path":          registerPathPackage,
 		"unicode/utf8":  registerUTF8Package,
@@ -240,6 +244,62 @@ func registerDebugPackage(vm *Interpreter) {
 		return nil, NewRuntimeError("debug.Assert: " + msg)
 	}}
 	vm.RegisterPackage("debug", debugPkg)
+}
+
+// registerErrorsPackage exposes a small, pure comparison/construction facade
+// over Go's real error values. nanoGo has no fmt.Errorf(%w) wrapping of its
+// own, so guest code cannot build a wrap chain directly — but Is/Unwrap still
+// walk any wrap chain a host-constructed error already carries, and Is's
+// identity check alone is what makes a package-level sentinel error
+// (`var ErrNotFound = errors.New(...)`) useful for guest comparisons.
+func registerErrorsPackage(vm *Interpreter) {
+	errorsPkg := &Package{Name: "errors", Funcs: map[string]*Function{}}
+	errorsPkg.Funcs["New"] = &Function{Name: "New", Params: []string{"text"}, Native: func(args []any) (any, error) {
+		text := ""
+		if len(args) > 0 {
+			text = ToString(args[0])
+		}
+		return NewRuntimeError(text), nil
+	}}
+	errorsPkg.Funcs["Is"] = &Function{Name: "Is", Params: []string{"err", "target"}, Native: func(args []any) (any, error) {
+		if len(args) < 2 {
+			return false, nil
+		}
+		err, _ := args[0].(error)
+		target, _ := args[1].(error)
+		return stderrors.Is(err, target), nil
+	}}
+	errorsPkg.Funcs["Unwrap"] = &Function{Name: "Unwrap", Params: []string{"err"}, Native: func(args []any) (any, error) {
+		if len(args) == 0 {
+			return nil, nil
+		}
+		err, ok := args[0].(error)
+		if !ok {
+			return nil, nil
+		}
+		unwrapped := stderrors.Unwrap(err)
+		if unwrapped == nil {
+			return nil, nil
+		}
+		return unwrapped, nil
+	}}
+	errorsPkg.Funcs["Join"] = &Function{Name: "Join", IsVariadic: true, Native: func(args []any) (any, error) {
+		errs := make([]error, 0, len(args))
+		for _, a := range args {
+			if a == nil {
+				continue
+			}
+			if e, ok := a.(error); ok {
+				errs = append(errs, e)
+			}
+		}
+		joined := stderrors.Join(errs...)
+		if joined == nil {
+			return nil, nil
+		}
+		return joined, nil
+	}}
+	vm.RegisterPackage("errors", errorsPkg)
 }
 
 func registerTimePackage(vm *Interpreter) {
@@ -538,6 +598,119 @@ func registerSortPackage(vm *Interpreter) {
 	vm.RegisterPackage("sort", sortPkg)
 }
 
+// genericLess orders two dynamically typed scalar values the same way
+// sort.Ints/Strings/Float64s already do per-type, so slices.Sort/Max/Min
+// agree with the rest of the interpreter's ordering rules rather than
+// introducing a second comparison convention. Non-scalar elements (structs,
+// slices, ...) have no natural order and always compare as not-less, the
+// same "give up gracefully instead of panicking" choice equals() makes for
+// uncomparable types.
+func genericLess(a, b any) bool {
+	switch x := a.(type) {
+	case int:
+		return x < ToInt(b)
+	case float64:
+		return x < ToFloat(b)
+	case string:
+		return x < ToString(b)
+	default:
+		return false
+	}
+}
+
+// registerSlicesPackage exposes a small subset of Go's generic "slices"
+// package. It reuses equals() (the same dynamic equality the == operator and
+// reflect.DeepEqual use) so Contains/Index/Equal agree with the rest of the
+// language instead of a separate notion of equality.
+func registerSlicesPackage(vm *Interpreter) {
+	slicesPkg := &Package{Name: "slices", Funcs: map[string]*Function{}}
+	slicesPkg.Funcs["Contains"] = &Function{Name: "Contains", Params: []string{"s", "v"}, Native: func(args []any) (any, error) {
+		s, ok := args[0].(*SliceVal)
+		if !ok || s == nil {
+			return false, nil
+		}
+		for _, e := range s.Data {
+			if equals(e, args[1]) {
+				return true, nil
+			}
+		}
+		return false, nil
+	}}
+	slicesPkg.Funcs["Index"] = &Function{Name: "Index", Params: []string{"s", "v"}, Native: func(args []any) (any, error) {
+		s, ok := args[0].(*SliceVal)
+		if !ok || s == nil {
+			return -1, nil
+		}
+		for i, e := range s.Data {
+			if equals(e, args[1]) {
+				return i, nil
+			}
+		}
+		return -1, nil
+	}}
+	slicesPkg.Funcs["Equal"] = &Function{Name: "Equal", Params: []string{"a", "b"}, Native: func(args []any) (any, error) {
+		a, aok := args[0].(*SliceVal)
+		b, bok := args[1].(*SliceVal)
+		if !aok || !bok {
+			return a == b, nil
+		}
+		if len(a.Data) != len(b.Data) {
+			return false, nil
+		}
+		for i := range a.Data {
+			if !equals(a.Data[i], b.Data[i]) {
+				return false, nil
+			}
+		}
+		return true, nil
+	}}
+	slicesPkg.Funcs["Reverse"] = &Function{Name: "Reverse", Params: []string{"s"}, Native: func(args []any) (any, error) {
+		s, ok := args[0].(*SliceVal)
+		if !ok || s == nil {
+			return nil, nil
+		}
+		for i, j := 0, len(s.Data)-1; i < j; i, j = i+1, j-1 {
+			s.Data[i], s.Data[j] = s.Data[j], s.Data[i]
+		}
+		return nil, nil
+	}}
+	slicesPkg.Funcs["Sort"] = &Function{Name: "Sort", Params: []string{"s"}, Native: func(args []any) (any, error) {
+		s, ok := args[0].(*SliceVal)
+		if !ok || s == nil {
+			return nil, nil
+		}
+		sort.Slice(s.Data, func(i, j int) bool { return genericLess(s.Data[i], s.Data[j]) })
+		return nil, nil
+	}}
+	slicesPkg.Funcs["Max"] = &Function{Name: "Max", Params: []string{"s"}, Native: func(args []any) (any, error) {
+		s, ok := args[0].(*SliceVal)
+		if !ok || s == nil || len(s.Data) == 0 {
+			return nil, NewRuntimeError("slices.Max: empty slice")
+		}
+		best := s.Data[0]
+		for _, e := range s.Data[1:] {
+			if genericLess(best, e) {
+				best = e
+			}
+		}
+		return best, nil
+	}}
+	slicesPkg.Funcs["Min"] = &Function{Name: "Min", Params: []string{"s"}, Native: func(args []any) (any, error) {
+		s, ok := args[0].(*SliceVal)
+		if !ok || s == nil || len(s.Data) == 0 {
+			return nil, NewRuntimeError("slices.Min: empty slice")
+		}
+		best := s.Data[0]
+		for _, e := range s.Data[1:] {
+			if genericLess(e, best) {
+				best = e
+			}
+		}
+		return best, nil
+	}}
+	vm.RegisterPackage("slices", slicesPkg)
+}
+
 func registerStrconvPackage(vm *Interpreter) {
 	// --- strconv ---
 	strconvPkg := &Package{Name: "strconv", Funcs: map[string]*Function{}}
@@ -676,6 +849,85 @@ func registerSyncPackage(vm *Interpreter) {
 	}}
 	syncPkg := &Package{Name: "sync", Types: map[string]*TypeDef{"WaitGroup": wgType}}
 	vm.RegisterPackage("sync", syncPkg)
+}
+
+// registerBytesPackage exposes bytes.Buffer, the one bytes type worth a
+// guest-visible facade: it's already an internal dependency of gob and
+// text/template (see registerGobPackage/registerTemplatePackage), and its
+// zero value is immediately usable, matching sync.WaitGroup's lazy-native
+// pattern (a guest `var b bytes.Buffer` needs no explicit construction).
+func registerBytesPackage(vm *Interpreter) {
+	bufType := &TypeDef{Name: "Buffer", Kind: "struct", Fields: []FieldDef{}, Methods: map[string]*Function{}}
+	vm.types[bufType.Name] = bufType
+	bufType.Methods["Write"] = &Function{Name: "Write", RecvType: "Buffer", Params: []string{"data"}, Native: func(args []any) (any, error) {
+		n, _ := ensureNativeBuffer(args[0]).Write(binaryArg(args[1]))
+		return n, nil
+	}}
+	bufType.Methods["WriteString"] = &Function{Name: "WriteString", RecvType: "Buffer", Params: []string{"s"}, Native: func(args []any) (any, error) {
+		n, _ := ensureNativeBuffer(args[0]).WriteString(ToString(args[1]))
+		return n, nil
+	}}
+	bufType.Methods["WriteByte"] = &Function{Name: "WriteByte", RecvType: "Buffer", Params: []string{"b"}, Native: func(args []any) (any, error) {
+		return nil, ensureNativeBuffer(args[0]).WriteByte(byte(ToInt(args[1])))
+	}}
+	bufType.Methods["String"] = &Function{Name: "String", RecvType: "Buffer", Native: func(args []any) (any, error) {
+		return ensureNativeBuffer(args[0]).String(), nil
+	}}
+	bufType.Methods["Bytes"] = &Function{Name: "Bytes", RecvType: "Buffer", Native: func(args []any) (any, error) {
+		return byteSliceValue(ensureNativeBuffer(args[0]).Bytes()), nil
+	}}
+	bufType.Methods["Len"] = &Function{Name: "Len", RecvType: "Buffer", Native: func(args []any) (any, error) {
+		return ensureNativeBuffer(args[0]).Len(), nil
+	}}
+	bufType.Methods["Reset"] = &Function{Name: "Reset", RecvType: "Buffer", Native: func(args []any) (any, error) {
+		ensureNativeBuffer(args[0]).Reset()
+		return nil, nil
+	}}
+	bytesPkg := &Package{Name: "bytes", Funcs: map[string]*Function{}, Types: map[string]*TypeDef{"Buffer": bufType}}
+	bytesPkg.Funcs["NewBuffer"] = &Function{Name: "NewBuffer", Params: []string{"buf"}, Native: func(args []any) (any, error) {
+		var data []byte
+		if len(args) > 0 {
+			data = binaryArg(args[0])
+		}
+		value := &StructVal{TypeName: "Buffer", Fields: map[string]any{}}
+		value.nativeState.Store(&structNativeState{value: bytes.NewBuffer(data)})
+		return value, nil
+	}}
+	bytesPkg.Funcs["NewBufferString"] = &Function{Name: "NewBufferString", Params: []string{"s"}, Native: func(args []any) (any, error) {
+		text := ""
+		if len(args) > 0 {
+			text = ToString(args[0])
+		}
+		value := &StructVal{TypeName: "Buffer", Fields: map[string]any{}}
+		value.nativeState.Store(&structNativeState{value: bytes.NewBufferString(text)})
+		return value, nil
+	}}
+	vm.RegisterPackage("bytes", bytesPkg)
+}
+
+// ensureNativeBuffer returns the *bytes.Buffer associated with a guest Buffer
+// StructVal, lazily creating one for a zero-value receiver — mirrors
+// ensureNativeWG's one-time, lock-guarded native-state transition.
+func ensureNativeBuffer(v any) *bytes.Buffer {
+	sv, ok := v.(*StructVal)
+	if !ok {
+		return &bytes.Buffer{}
+	}
+	if state := sv.nativeState.Load(); state != nil {
+		if buf, ok := state.value.(*bytes.Buffer); ok {
+			return buf
+		}
+	}
+	sv.nativeMu.Lock()
+	defer sv.nativeMu.Unlock()
+	if state := sv.nativeState.Load(); state != nil {
+		if buf, ok := state.value.(*bytes.Buffer); ok {
+			return buf
+		}
+	}
+	buf := &bytes.Buffer{}
+	sv.nativeState.Store(&structNativeState{value: buf})
+	return buf
 }
 
 func registerRegexpPackage(vm *Interpreter) {

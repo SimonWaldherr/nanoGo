@@ -533,6 +533,25 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			// general evaluate-then-apply path for append and unusual arities so
 			// deferred calls and argument-side-effect behavior stay unchanged.
 			switch id.Name {
+			case "append":
+				// append(s, v) is by far the most common call shape (every
+				// guest loop that grows a slice one element at a time hits
+				// it). Evaluate the two operands directly and skip both the
+				// []any argument slice evalBuiltinArgs would build and the
+				// args[0]/args[1:] unwrap applyBuiltin would need to undo.
+				// Multi-value and append(dst, src...) calls still fall
+				// through to the general path below unchanged.
+				if len(ex.Args) == 2 && ex.Ellipsis == token.NoPos {
+					s, err := vm.evalExpr(ex.Args[0], env)
+					if err != nil {
+						return nil, err
+					}
+					v, err := vm.evalExpr(ex.Args[1], env)
+					if err != nil {
+						return nil, err
+					}
+					return vm.builtinAppend(s, v)
+				}
 			case "len":
 				if len(ex.Args) == 1 {
 					v, err := vm.evalExpr(ex.Args[0], env)
