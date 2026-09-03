@@ -46,30 +46,54 @@ func NewHostChannel(buffer int) *HostChannel {
 // functions, structs, and other host capabilities are rejected rather than
 // leaked to guest code.
 func (c *HostChannel) Send(ctx context.Context, value any) error {
-	if c == nil {
-		return ErrHostChannelClosed
-	}
-	if channelDone(c.inputDone) {
+	if c == nil || channelDone(c.inputDone) {
 		return ErrHostChannelClosed
 	}
 	v, err := bridgeToGuest(value)
 	if err != nil {
 		return err
 	}
-	if ctx == nil {
-		ctx = context.Background()
+	return c.sendGuest(ctx, v)
+}
+
+// bridgeBatchToGuest converts non-scalar values before sending while allowing
+// the common scalar event stream to reuse the caller's slice directly. The
+// scalar set is immutable by value, so it is already safe to hand to the
+// guest; slices and maps still go through bridgeToGuest and therefore retain
+// the normal deep-copy boundary.
+func bridgeBatchToGuest(values []any) ([]any, error) {
+	var converted []any
+	for i, value := range values {
+		switch value.(type) {
+		case nil, bool, string, int, int64, float64:
+			continue
+		}
+		guestValue, err := bridgeToGuest(value)
+		if err != nil {
+			return nil, err
+		}
+		if converted == nil {
+			converted = append([]any(nil), values...)
+		}
+		converted[i] = guestValue
 	}
-	ctxDone := ctx.Done()
+	if converted == nil {
+		return values, nil
+	}
+	return converted, nil
+}
+
+func (c *HostChannel) sendGuestWithDone(ctx context.Context, ctxDone <-chan struct{}, value any) error {
 	if ctxDone == nil {
 		select {
-		case c.inbound <- v:
+		case c.inbound <- value:
 			return nil
 		case <-c.inputDone:
 			return ErrHostChannelClosed
 		}
 	}
 	select {
-	case c.inbound <- v:
+	case c.inbound <- value:
 		return nil
 	case <-c.inputDone:
 		return ErrHostChannelClosed
@@ -91,16 +115,16 @@ func (c *HostChannel) SendBatch(ctx context.Context, values []any) (int, error) 
 	if c == nil || channelDone(c.inputDone) {
 		return 0, ErrHostChannelClosed
 	}
-	converted := make([]any, len(values))
-	for i, value := range values {
-		guestValue, err := bridgeToGuest(value)
-		if err != nil {
-			return 0, err
-		}
-		converted[i] = guestValue
+	converted, err := bridgeBatchToGuest(values)
+	if err != nil {
+		return 0, err
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctxDone := ctx.Done()
 	for i, value := range converted {
-		if err := c.sendGuest(ctx, value); err != nil {
+		if err := c.sendGuestWithDone(ctx, ctxDone, value); err != nil {
 			return i, err
 		}
 	}
@@ -115,23 +139,7 @@ func (c *HostChannel) sendGuest(ctx context.Context, value any) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctxDone := ctx.Done()
-	if ctxDone == nil {
-		select {
-		case c.inbound <- value:
-			return nil
-		case <-c.inputDone:
-			return ErrHostChannelClosed
-		}
-	}
-	select {
-	case c.inbound <- value:
-		return nil
-	case <-c.inputDone:
-		return ErrHostChannelClosed
-	case <-ctxDone:
-		return ctx.Err()
-	}
+	return c.sendGuestWithDone(ctx, ctx.Done(), value)
 }
 
 // Receive transfers the next guest value to the Go host as ordinary Go data.

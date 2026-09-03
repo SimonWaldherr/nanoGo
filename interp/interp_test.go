@@ -2415,6 +2415,25 @@ func TestHostChannelBatchRejectsWholeInvalidInput(t *testing.T) {
 	}
 }
 
+func TestHostChannelBatchCopiesComplexValues(t *testing.T) {
+	bridge := NewHostChannel(1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	payload := map[string]any{"state": "before"}
+	if sent, err := bridge.SendBatch(ctx, []any{payload}); err != nil || sent != 1 {
+		t.Fatalf("SendBatch = (%d, %v), want (1, nil)", sent, err)
+	}
+	payload["state"] = "after"
+	guestValue := <-bridge.inbound
+	hostValue, err := bridgeToHost(guestValue)
+	if err != nil {
+		t.Fatalf("bridgeToHost: %v", err)
+	}
+	if got := hostValue.(map[string]any)["state"]; got != "before" {
+		t.Fatalf("guest batch retained host map mutation: got %#v", got)
+	}
+}
+
 func TestHostChannelIsDirectionallyProtected(t *testing.T) {
 	vm, _ := newTestVM()
 	bridge := NewHostChannel(1)

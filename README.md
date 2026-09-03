@@ -649,7 +649,9 @@ for one response and then drains at most `max-1` already queued responses in
 order. For a hot, long-lived event loop, `ReceiveBatchInto(ctx, buffer)`
 reuses the host-owned buffer and uses its capacity as the bound. Both retain
 the same cancellation, ownership, and backpressure rules as `Send` and
-`Receive`.
+`Receive`. Scalar batch events (`string`, `int`, `int64`, `float64`, `bool`)
+reuse the caller's values without a temporary conversion slice; maps and
+slices are still deep-copied before the first send.
 
 ```go
 sent, err := bridge.SendBatch(ctx, []any{"one", "two", "three"})

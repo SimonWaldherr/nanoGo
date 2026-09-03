@@ -520,6 +520,48 @@ func BenchmarkHostChannelReceiveBurst(b *testing.B) {
 	})
 }
 
+// BenchmarkHostChannelSendBurst keeps the common host -> guest stream of
+// small scalar events measurable. SendBatch validates the complete burst but
+// avoids allocating a conversion slice when every item is already scalar.
+func BenchmarkHostChannelSendBurst(b *testing.B) {
+	const burst = 32
+	ctx := context.Background()
+	values := make([]any, burst)
+	for i := range values {
+		values[i] = "event"
+	}
+
+	b.Run("SendOneByOne", func(b *testing.B) {
+		bridge := NewHostChannel(burst)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			for _, value := range values {
+				if err := bridge.Send(ctx, value); err != nil {
+					b.Fatal(err)
+				}
+			}
+			for range values {
+				<-bridge.inbound
+			}
+		}
+	})
+
+	b.Run("SendBatch", func(b *testing.B) {
+		bridge := NewHostChannel(burst)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if sent, err := bridge.SendBatch(ctx, values); err != nil || sent != burst {
+				b.Fatalf("SendBatch = (%d, %v)", sent, err)
+			}
+			for range values {
+				<-bridge.inbound
+			}
+		}
+	})
+}
+
 // BenchmarkConcurrentEnvAccess isolates the lock path used after a guest
 // program starts a goroutine. It intentionally bypasses parsing and AST
 // dispatch so regressions in Env's synchronization are visible directly.
