@@ -2362,6 +2362,59 @@ func main() {
 	}
 }
 
+func TestHostChannelBatchTransferPreservesOrder(t *testing.T) {
+	vm, _ := newTestVM()
+	bridge := NewHostChannel(4)
+	if err := vm.BindHostChannel("hostIn", "hostOut", bridge); err != nil {
+		t.Fatalf("BindHostChannel: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if sent, err := bridge.SendBatch(ctx, []any{"one", "two"}); err != nil || sent != 2 {
+		t.Fatalf("SendBatch = (%d, %v), want (2, nil)", sent, err)
+	}
+	if err := vm.RunContext(ctx, `package main
+func main() {
+    hostOut <- <-hostIn
+    hostOut <- <-hostIn
+}`); err != nil {
+		t.Fatalf("RunContext: %v", err)
+	}
+	values, err := bridge.ReceiveBatch(ctx, 4)
+	if err != nil {
+		t.Fatalf("ReceiveBatch: %v", err)
+	}
+	if !reflect.DeepEqual(values, []any{"one", "two"}) {
+		t.Fatalf("ReceiveBatch = %#v, want ordered values", values)
+	}
+	if err := vm.RunContext(ctx, `package main
+func main() { hostOut <- "three" }`); err != nil {
+		t.Fatalf("RunContext second batch: %v", err)
+	}
+	values, err = bridge.ReceiveBatchInto(ctx, values[:0])
+	if err != nil || !reflect.DeepEqual(values, []any{"three"}) {
+		t.Fatalf("ReceiveBatchInto = (%#v, %v), want one ordered value", values, err)
+	}
+}
+
+func TestHostChannelBatchRejectsWholeInvalidInput(t *testing.T) {
+	bridge := NewHostChannel(2)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if sent, err := bridge.SendBatch(ctx, []any{"safe", func() {}}); err == nil || sent != 0 {
+		t.Fatalf("SendBatch invalid value = (%d, %v), want (0, error)", sent, err)
+	}
+	if got := len(bridge.inbound); got != 0 {
+		t.Fatalf("SendBatch accepted %d values before validation failed", got)
+	}
+	if _, err := bridge.ReceiveBatch(ctx, 0); err == nil {
+		t.Fatal("ReceiveBatch with zero max succeeded")
+	}
+	if _, err := bridge.ReceiveBatchInto(ctx, nil); err == nil {
+		t.Fatal("ReceiveBatchInto with zero-capacity buffer succeeded")
+	}
+}
+
 func TestHostChannelIsDirectionallyProtected(t *testing.T) {
 	vm, _ := newTestVM()
 	bridge := NewHostChannel(1)

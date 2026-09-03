@@ -78,6 +78,62 @@ func (c *HostChannel) Send(ctx context.Context, value any) error {
 	}
 }
 
+// SendBatch converts and sends values in order. It validates and copies the
+// complete batch before its first channel operation, so an unsupported value
+// never leaves a partly accepted prefix behind. Sending itself remains
+// sequential: a closed endpoint or cancelled context can therefore stop a
+// batch after sent values, and the returned count reports that prefix.
+//
+// Batch transfer is useful for hosts that exchange bursts of small events. It
+// preserves HostChannel's copying, backpressure, cancellation, and ownership
+// rules while avoiding one public boundary call per event.
+func (c *HostChannel) SendBatch(ctx context.Context, values []any) (int, error) {
+	if c == nil || channelDone(c.inputDone) {
+		return 0, ErrHostChannelClosed
+	}
+	converted := make([]any, len(values))
+	for i, value := range values {
+		guestValue, err := bridgeToGuest(value)
+		if err != nil {
+			return 0, err
+		}
+		converted[i] = guestValue
+	}
+	for i, value := range converted {
+		if err := c.sendGuest(ctx, value); err != nil {
+			return i, err
+		}
+	}
+	return len(converted), nil
+}
+
+// sendGuest is Send after the caller has already made a safe guest copy.
+func (c *HostChannel) sendGuest(ctx context.Context, value any) error {
+	if c == nil || channelDone(c.inputDone) {
+		return ErrHostChannelClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctxDone := ctx.Done()
+	if ctxDone == nil {
+		select {
+		case c.inbound <- value:
+			return nil
+		case <-c.inputDone:
+			return ErrHostChannelClosed
+		}
+	}
+	select {
+	case c.inbound <- value:
+		return nil
+	case <-c.inputDone:
+		return ErrHostChannelClosed
+	case <-ctxDone:
+		return ctx.Err()
+	}
+}
+
 // Receive transfers the next guest value to the Go host as ordinary Go data.
 func (c *HostChannel) Receive(ctx context.Context) (any, error) {
 	if c == nil {
@@ -128,6 +184,49 @@ func (c *HostChannel) Receive(ctx context.Context) (any, error) {
 	case <-ctxDone:
 		return nil, ctx.Err()
 	}
+}
+
+// ReceiveBatch waits for one guest value, then drains up to max-1 further
+// values that are already queued. It never waits for a later item, so a host
+// event loop gets a bounded burst without turning its backpressure policy into
+// an unbounded drain. max must be positive.
+func (c *HostChannel) ReceiveBatch(ctx context.Context, max int) ([]any, error) {
+	if max <= 0 {
+		return nil, errors.New("nanogo: host channel batch size must be positive")
+	}
+	return c.receiveBatch(ctx, make([]any, 0, max), max)
+}
+
+// ReceiveBatchInto is ReceiveBatch for a host-owned reusable buffer. dst's
+// capacity is the maximum burst size and its previous contents are discarded.
+// Reusing the slice removes the allocation ReceiveBatch needs for its result,
+// which is useful in long-lived event loops.
+func (c *HostChannel) ReceiveBatchInto(ctx context.Context, dst []any) ([]any, error) {
+	if cap(dst) == 0 {
+		return nil, errors.New("nanogo: host channel batch buffer must have positive capacity")
+	}
+	return c.receiveBatch(ctx, dst[:0], cap(dst))
+}
+
+func (c *HostChannel) receiveBatch(ctx context.Context, values []any, max int) ([]any, error) {
+	first, err := c.Receive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	values = append(values, first)
+	for len(values) < max {
+		select {
+		case value := <-c.outbound:
+			converted, err := bridgeToHost(value)
+			if err != nil {
+				return values, err
+			}
+			values = append(values, converted)
+		default:
+			return values, nil
+		}
+	}
+	return values, nil
 }
 
 // CloseInput stops host -> guest traffic. A guest receive observes a closed

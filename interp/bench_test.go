@@ -463,6 +463,63 @@ func BenchmarkChannelBufferedRoundTrip(b *testing.B) {
 	}
 }
 
+// BenchmarkHostChannelReceiveBurst measures the public host boundary when a
+// guest has already produced a small burst. ReceiveBatch deliberately blocks
+// only for its first item and drains the rest without repeating Receive's
+// context/closure arbitration for every event.
+func BenchmarkHostChannelReceiveBurst(b *testing.B) {
+	const burst = 32
+	ctx := context.Background()
+
+	b.Run("ReceiveOneByOne", func(b *testing.B) {
+		bridge := NewHostChannel(burst)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			for n := 0; n < burst; n++ {
+				bridge.outbound <- n
+			}
+			for n := 0; n < burst; n++ {
+				if _, err := bridge.Receive(ctx); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+
+	b.Run("ReceiveBatch", func(b *testing.B) {
+		bridge := NewHostChannel(burst)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			for n := 0; n < burst; n++ {
+				bridge.outbound <- n
+			}
+			values, err := bridge.ReceiveBatch(ctx, burst)
+			if err != nil || len(values) != burst {
+				b.Fatalf("ReceiveBatch = (%d values, %v)", len(values), err)
+			}
+		}
+	})
+
+	b.Run("ReceiveBatchReuse", func(b *testing.B) {
+		bridge := NewHostChannel(burst)
+		values := make([]any, 0, burst)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			for n := 0; n < burst; n++ {
+				bridge.outbound <- n
+			}
+			var err error
+			values, err = bridge.ReceiveBatchInto(ctx, values)
+			if err != nil || len(values) != burst {
+				b.Fatalf("ReceiveBatchInto = (%d values, %v)", len(values), err)
+			}
+		}
+	})
+}
+
 // BenchmarkConcurrentEnvAccess isolates the lock path used after a guest
 // program starts a goroutine. It intentionally bypasses parsing and AST
 // dispatch so regressions in Env's synchronization are visible directly.

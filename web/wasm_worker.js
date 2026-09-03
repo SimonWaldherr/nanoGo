@@ -23,6 +23,44 @@ const BATCHABLE = { 'log': 1, 'warn': 1, 'canvas-size': 1, 'canvas-frame': 1 };
 const BATCH_LIMIT = 2048;
 let _batch = [];
 let _batchScheduled = false;
+// The full workspace source snapshot is expensive to structured-clone for
+// every Check/Test/Run. Keep the latest immutable message copy in the worker;
+// each Go call below still builds a fresh private VFS from it, so this cache
+// saves wire traffic without sharing guest state between executions.
+let _workspaceSnapshot = null;
+
+// canvas-frame owns a freshly allocated Uint8Array (see CanvasBinding.Flush
+// in runtime/native_std.go), so its backing buffer can move to the window
+// without invalidating WASM memory. Structured cloning a large grid used to
+// make an extra full-size copy for every animation frame. Keep this narrowly
+// scoped to whole, transferable ArrayBuffers: a view into a larger buffer
+// must remain cloneable because transferring it would detach unrelated data.
+function guestTransferables(payload) {
+  const items = payload && payload.type === 'batch' ? payload.items : [payload];
+  const transfers = [];
+  for (const item of items) {
+    if (!item || item.type !== 'canvas-frame') continue;
+    const cells = item.cells;
+    if (cells && cells.buffer instanceof ArrayBuffer &&
+        cells.byteOffset === 0 && cells.byteLength === cells.buffer.byteLength) {
+      transfers.push(cells.buffer);
+    }
+  }
+  return transfers;
+}
+
+// `post` is usually self.postMessage, but deferred runs temporarily replace
+// it with an in-memory collector. Passing a transfer list to that collector
+// is harmless (it ignores the second argument); the buffer is transferred
+// only when the collector is replayed through the real postMessage below.
+function postGuestPayload(post, payload) {
+  const transfers = guestTransferables(payload);
+  if (transfers.length > 0) {
+    post.call(self, payload, transfers);
+  } else {
+    post.call(self, payload);
+  }
+}
 
 function flushBatch() {
   _batchScheduled = false;
@@ -30,9 +68,9 @@ function flushBatch() {
   const items = _batch;
   _batch = [];
   if (items.length === 1) {
-    self.postMessage(items[0]);
+    postGuestPayload(self.postMessage, items[0]);
   } else {
-    self.postMessage({ type: 'batch', items: items });
+    postGuestPayload(self.postMessage, { type: 'batch', items: items });
   }
 }
 
@@ -57,7 +95,7 @@ function postFromGuest(msg) {
   // Low-frequency / ordering-sensitive messages (dom-*, error, alert…):
   // flush pending batched output first to preserve global ordering.
   flushBatch();
-  self.postMessage(msg);
+  postGuestPayload(self.postMessage, msg);
 }
 
 // parseStats parses the JSON string a stats-aware WASM build returns from
@@ -65,6 +103,28 @@ function postFromGuest(msg) {
 function parseStats(raw) {
   if (typeof raw !== 'string' || raw.length === 0) return null;
   try { return JSON.parse(raw); } catch (e) { return null; }
+}
+
+function cacheWorkspaceSnapshot(msg) {
+  if (!msg || !Array.isArray(msg.files)) return false;
+  _workspaceSnapshot = {
+    revision: Number(msg.workspaceRevision),
+    files: msg.files,
+    modulePath: String(msg.modulePath || '')
+  };
+  return true;
+}
+
+// Legacy/custom worker clients may still send files on every operation. The
+// playground sends a prior workspace-sync and only a revision here.
+function workspaceSnapshotFor(msg) {
+  if (msg && Array.isArray(msg.files)) {
+    return { files: msg.files, modulePath: String(msg.modulePath || '') };
+  }
+  if (_workspaceSnapshot && msg && _workspaceSnapshot.revision === Number(msg.workspaceRevision)) {
+    return _workspaceSnapshot;
+  }
+  return null;
 }
 
 self.onmessage = async function (ev) {
@@ -99,7 +159,7 @@ self.onmessage = async function (ev) {
         } finally {
           flushBatch();
           self.postMessage = origPost;
-          for (const m of buffer) { origPost.call(self, m); }
+          for (const m of buffer) { postGuestPayload(origPost, m); }
           origPost.call(self, { type: 'done', elapsed: Date.now() - t0, stats: stats });
         }
       } else {
@@ -110,6 +170,12 @@ self.onmessage = async function (ev) {
     } catch (err) {
       flushBatch();
       self.postMessage({ type: 'error', text: String(err) });
+    }
+    return;
+  }
+  if (msg && msg.type === 'workspace-sync') {
+    if (!cacheWorkspaceSnapshot(msg)) {
+      self.postMessage({ type: 'workspace-sync-result', error: 'workspace sync requires a files array' });
     }
     return;
   }
@@ -172,7 +238,12 @@ self.onmessage = async function (ev) {
     }
     const t0 = Date.now();
     try {
-      const stats = parseStats(self.nanoGoRunWorkspace(msg.files || [], String(msg.modulePath || ''), !!msg.trace, !!msg.profile));
+      const snapshot = workspaceSnapshotFor(msg);
+      if (!snapshot) {
+        self.postMessage({ type: 'workspace-done', error: 'workspace snapshot is unavailable; sync it before running' });
+        return;
+      }
+      const stats = parseStats(self.nanoGoRunWorkspace(snapshot.files, snapshot.modulePath, !!msg.trace, !!msg.profile));
       flushBatch();
       if (!stats) {
         self.postMessage({ type: 'workspace-done', error: 'workspace run returned no data' });
@@ -191,7 +262,12 @@ self.onmessage = async function (ev) {
       return;
     }
     try {
-      const result = parseStats(self.nanoGoWorkspaceCheck(msg.files || [], String(msg.modulePath || '')));
+      const snapshot = workspaceSnapshotFor(msg);
+      if (!snapshot) {
+        self.postMessage({ type: 'workspace-check-result', error: 'workspace snapshot is unavailable; sync it before checking' });
+        return;
+      }
+      const result = parseStats(self.nanoGoWorkspaceCheck(snapshot.files, snapshot.modulePath));
       if (!result) {
         self.postMessage({ type: 'workspace-check-result', error: 'workspace check returned no data' });
       } else if (result.error) {
@@ -210,7 +286,12 @@ self.onmessage = async function (ev) {
       return;
     }
     try {
-      const result = parseStats(self.nanoGoTestWorkspace(msg.files || [], String(msg.modulePath || ''), String(msg.filter || '')));
+      const snapshot = workspaceSnapshotFor(msg);
+      if (!snapshot) {
+        self.postMessage({ type: 'workspace-test-result', error: 'workspace snapshot is unavailable; sync it before testing' });
+        return;
+      }
+      const result = parseStats(self.nanoGoTestWorkspace(snapshot.files, snapshot.modulePath, String(msg.filter || '')));
       if (!result) {
         self.postMessage({ type: 'workspace-test-result', error: 'workspace tests returned no data' });
       } else if (result.error) {

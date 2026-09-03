@@ -254,6 +254,16 @@
       let workspaceModulePath = 'nanogo.local/workspace';
       let workspaceSaveTimer = null;
       let workspaceDirty = false;
+      // A monotonic content revision lets the worker retain one private copy
+      // of an unchanged workspace. Check/Test/Run then cross the window ↔
+      // worker boundary with only a small command, while Go still receives a
+      // fresh VFS on every operation.
+      let workspaceRevision = 0;
+      let workerWorkspaceRevision = -1;
+
+      function markWorkspaceChanged() {
+        workspaceRevision++;
+      }
 
       // Inspector elements
       const astBtn = document.getElementById("astBtn");
@@ -334,7 +344,11 @@
         if (!activeFilePath) return;
         const source = editor && typeof editor.getValue === 'function'
           ? editor.getValue() : (srcEl ? srcEl.value : '');
-        workspaceFiles.set(activeFilePath, String(source || ''));
+        const next = String(source || '');
+        if (workspaceFiles.get(activeFilePath) !== next) {
+          workspaceFiles.set(activeFilePath, next);
+          markWorkspaceChanged();
+        }
       }
 
       function persistWorkspace() {
@@ -409,6 +423,7 @@
         });
         if (!next.size) next.set('main.go', '');
         workspaceFiles = next;
+        markWorkspaceChanged();
         activeFilePath = workspaceFiles.has(active) ? active : workspaceFiles.keys().next().value;
         workspaceDirty = false;
         setEditorModeForFile(activeFilePath);
@@ -445,6 +460,7 @@
         saveActiveWorkspaceSource();
         const defaultSource = clean === 'go.mod' ? 'module ' + workspaceModulePath + '\n' : 'package main\n';
         workspaceFiles.set(clean, String(source || defaultSource));
+        markWorkspaceChanged();
         workspaceDirty = true;
         openWorkspaceFile(clean);
         renderWorkspaceTabs();
@@ -463,6 +479,7 @@
         const replacement = new Map();
         workspaceFiles.forEach((source, path) => replacement.set(path === oldPath ? next : path, source));
         workspaceFiles = replacement;
+        markWorkspaceChanged();
         if (activeFilePath === oldPath) activeFilePath = next;
         workspaceDirty = true;
         renderWorkspaceTabs();
@@ -475,6 +492,7 @@
           return;
         }
         workspaceFiles.delete(filePath);
+        markWorkspaceChanged();
         if (activeFilePath === filePath) {
           activeFilePath = workspaceFiles.keys().next().value;
           setEditorModeForFile(activeFilePath);
@@ -493,6 +511,18 @@
         return { files: workspaceFileEntries(), modulePath: workspaceModulePath };
       }
 
+      function postWorkspaceRequest(type, fields) {
+        const payload = workspacePayload();
+        if (workerWorkspaceRevision !== workspaceRevision) {
+          worker.postMessage({
+            type: 'workspace-sync', files: payload.files, modulePath: payload.modulePath,
+            workspaceRevision
+          });
+          workerWorkspaceRevision = workspaceRevision;
+        }
+        worker.postMessage(Object.assign({ type, workspaceRevision }, fields || {}));
+      }
+
       function showWorkspaceResult(result, error) {
         if (workspaceMetaEl) workspaceMetaEl.textContent = error ? 'error' : (result && result.workspace
           ? result.workspace.packages.length + ' package(s)' : '');
@@ -508,6 +538,7 @@
         }
         if (info.module && info.module !== workspaceModulePath) {
           workspaceModulePath = info.module;
+          markWorkspaceChanged();
           renderWorkspaceTabs();
           persistWorkspace();
         }
@@ -522,25 +553,22 @@
 
       function requestWorkspaceCheck() {
         if (!worker) { logMessage('Worker not ready', 'warn'); return; }
-        const payload = workspacePayload();
         if (workspaceCheckBtn) { workspaceCheckBtn.disabled = true; workspaceCheckBtn.textContent = 'Checking…'; }
         if (workspaceInspectBtn) { workspaceInspectBtn.disabled = true; workspaceInspectBtn.textContent = 'Checking…'; }
         showOutputPanel('inspector');
-        worker.postMessage({ type: 'workspace-check', files: payload.files, modulePath: payload.modulePath });
+        postWorkspaceRequest('workspace-check');
       }
 
       function requestWorkspaceTests() {
         if (!worker) { logMessage('Worker not ready', 'warn'); return; }
-        const payload = workspacePayload();
         showOutputPanel('inspector');
         if (testBtn) { testBtn.disabled = true; testBtn.textContent = '🧪 Testing…'; }
-        worker.postMessage({ type: 'workspace-test', files: payload.files, modulePath: payload.modulePath, filter: testFilterEl ? testFilterEl.value.trim() : '' });
+        postWorkspaceRequest('workspace-test', { filter: testFilterEl ? testFilterEl.value.trim() : '' });
       }
 
       function runWorkspace() {
         if (!worker) { logMessage('Worker not ready', 'warn'); return; }
         autoSwitchedOutputThisRun = false;
-        const payload = workspacePayload();
         activeRunSource = getSource();
         const c = document.getElementById('life');
         if (c) c.getContext('2d').clearRect(0, 0, c.width, c.height);
@@ -555,7 +583,7 @@
         const wantTrace = !!(traceToggle && traceToggle.checked);
         const wantProfile = !!(heatmapToggle && heatmapToggle.checked);
         const t0 = performance.now();
-        worker.postMessage({ type: 'workspace-run', files: payload.files, modulePath: payload.modulePath, trace: wantTrace, profile: wantProfile, t0 });
+        postWorkspaceRequest('workspace-run', { trace: wantTrace, profile: wantProfile, t0 });
       }
 
       // A small command palette gives the playground IDE muscle memory: one
@@ -692,7 +720,11 @@
         const source = String(v == null ? '' : v);
         if (editor && typeof editor.setValue === 'function') editor.setValue(source);
         if (srcEl) srcEl.value = source;
-        workspaceFiles.set(activeFilePath || 'main.go', source);
+        const filePath = activeFilePath || 'main.go';
+        if (workspaceFiles.get(filePath) !== source) {
+          workspaceFiles.set(filePath, source);
+          markWorkspaceChanged();
+        }
         workspaceDirty = true;
         renderWorkspaceTabs();
         persistWorkspace();
@@ -1057,7 +1089,7 @@
         pendingLogLines.push({ message: String(message), type: type || 'output', loc: loc || null });
         scheduleLogFlush();
         if (loc) highlightErrorLine(loc.line);
-        postToHost({ type: 'nanogo:output', text: String(message), kind: type || 'output' });
+        postOutputToHost(String(message), type || 'output');
       }
 
       // requestAnimationFrame is throttled or fully paused while the document
@@ -1334,6 +1366,9 @@
 
       function startWasmWorker() {
         if (worker) return;
+        // The worker cache is process-local, so a restarted worker must see
+        // the current snapshot again even if the editor has not changed.
+        workerWorkspaceRevision = -1;
         
         if (location.protocol === 'file:') {
           setStatus("Error: Must run on HTTP server, not file://", "error");
@@ -2606,6 +2641,7 @@
               if (entry.name === 'go.mod') {
                 saveActiveWorkspaceSource();
                 workspaceFiles.set('go.mod', String(entry.source || ''));
+                markWorkspaceChanged();
                 loaded++;
               } else if (addWorkspaceFile(entry.name, entry.source)) {
                 loaded++;
@@ -2980,6 +3016,7 @@
       // Outgoing (this window -> window.parent):
       //   {type:'nanogo:ready'}                          — WASM loaded, ready to run
       //   {type:'nanogo:output', text, kind}             — one per console line (kind: output|warn|error|system)
+      //   {type:'nanogo:output-batch', items}            — coalesced console lines
       //   {type:'nanogo:done', elapsed, stats}            — a run finished
       //
       // Incoming (window.parent -> this window, via iframe.contentWindow.postMessage):
@@ -3000,6 +3037,35 @@
       function postToHost(msg) {
         if (window.parent && window.parent !== window) {
           try { window.parent.postMessage(msg, '*'); } catch (e) { /* ignore */ }
+        }
+      }
+
+      // Worker output already arrives in batches, but forwarding every line
+      // separately to an embedding parent recreated the exact postMessage
+      // pressure the worker transport removed. Keep a solitary line fully
+      // backward compatible and send bursts as one ordered envelope.
+      const HOST_OUTPUT_BATCH_LIMIT = 256;
+      let pendingHostOutput = [];
+      let hostOutputScheduled = false;
+      function flushHostOutput() {
+        hostOutputScheduled = false;
+        if (pendingHostOutput.length === 0) return;
+        const items = pendingHostOutput;
+        pendingHostOutput = [];
+        if (items.length === 1) {
+          postToHost({ type: 'nanogo:output', text: items[0].text, kind: items[0].kind });
+        } else {
+          postToHost({ type: 'nanogo:output-batch', items });
+        }
+      }
+      function postOutputToHost(text, kind) {
+        if (!window.parent || window.parent === window) return;
+        pendingHostOutput.push({ text, kind });
+        if (pendingHostOutput.length >= HOST_OUTPUT_BATCH_LIMIT) {
+          flushHostOutput();
+        } else if (!hostOutputScheduled) {
+          hostOutputScheduled = true;
+          Promise.resolve().then(flushHostOutput);
         }
       }
       window.addEventListener('message', (ev) => {

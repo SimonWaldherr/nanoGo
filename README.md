@@ -213,7 +213,8 @@ Outgoing (playground → `window.parent`):
 | Message | When |
 |---|---|
 | `{type:'nanogo:ready'}` | WebAssembly finished loading; safe to send commands. |
-| `{type:'nanogo:output', text, kind}` | One per console line. `kind` is `output`, `warn`, `error`, or `system`. |
+| `{type:'nanogo:output', text, kind}` | A single console line. `kind` is `output`, `warn`, `error`, or `system`. |
+| `{type:'nanogo:output-batch', items}` | Ordered burst of console lines; each item is `{text, kind}`. Handle this alongside `nanogo:output` when embedding. |
 | `{type:'nanogo:done', elapsed, stats}` | A run finished. `stats` mirrors the Inspector's `{elapsedMs, steps, ...}`. |
 
 Incoming (your page → the iframe's `contentWindow`):
@@ -257,9 +258,12 @@ build-wasm`), then serve `web/` and open `minimal.html`.
 The one non-obvious detail either reference implementation needs to get
 right: `wasm_worker.js` coalesces high-frequency messages (console lines,
 canvas updates) into `{type:'batch', items:[...]}` so a tight guest loop
-costs one `postMessage` instead of thousands. A frontend that only handles
-individual message types — without unwrapping `batch` first — will see
-almost no output from anything that logs or draws in a loop.
+costs one `postMessage` instead of thousands. Canvas frames transfer their
+fresh byte grid to the window rather than structured-cloning it, avoiding a
+full additional frame copy. A frontend that only handles individual message
+types — without unwrapping `batch` first — will see almost no output from
+anything that logs or draws in a loop. The full playground also coalesces
+bursts again when it forwards console output to an embedding parent.
 
 #### Module-aware browser SDK
 
@@ -302,6 +306,14 @@ plus `stats.workspace`; `workspace-test-result` aggregates the supported
 and are rejected if they escape the virtual workspace. Dependencies are
 deliberately host-provided snapshots: the browser SDK never downloads or
 executes an unreviewed remote module.
+
+For repeated operations on an unchanged project, a frontend can first send a
+`workspace-sync` snapshot with a monotonically increasing `workspaceRevision`,
+then send `workspace-check`, `workspace-run`, or `workspace-test` containing
+only that revision and their operation-specific options. The worker retains
+the copied snapshot, while each operation still constructs a fresh VFS before
+calling Go. Sending `files` directly on an operation remains supported for
+small/custom clients.
 
 The full playground uses this protocol behind its compact **IDE workspace**
 bar. `Ctrl/⌘+K` opens the command palette; `Check` performs the module-aware
@@ -628,6 +640,22 @@ if err != nil {
 	log.Fatal(err)
 }
 reply, err := bridge.Receive(ctx) // "echo: ping"
+```
+
+For bursts of independent events, use `SendBatch` and `ReceiveBatch` instead
+of crossing the embedding boundary once per item. `SendBatch` copies and
+validates every value before it begins sending; `ReceiveBatch(ctx, max)` waits
+for one response and then drains at most `max-1` already queued responses in
+order. For a hot, long-lived event loop, `ReceiveBatchInto(ctx, buffer)`
+reuses the host-owned buffer and uses its capacity as the bound. Both retain
+the same cancellation, ownership, and backpressure rules as `Send` and
+`Receive`.
+
+```go
+sent, err := bridge.SendBatch(ctx, []any{"one", "two", "three"})
+events, err := bridge.ReceiveBatch(ctx, 64) // one wait, bounded drain
+_ = sent
+_ = events
 ```
 
 `Run` remains available for compatibility and uses a background context. An
