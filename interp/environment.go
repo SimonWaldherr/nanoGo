@@ -338,6 +338,9 @@ type Interpreter struct {
 	funcs    map[string]*Function
 	natives  map[string]func(args []any) (any, error)
 	packages map[string]*Package
+	// templateCache is allocated only if text/template is imported, then shared
+	// by the normal package native and evaluator fast path for RenderString.
+	templateCache *templateCache
 
 	// builtinsEnabled records that a host called RegisterBuiltinPackages.
 	// The curated packages are constructed on first use rather than there

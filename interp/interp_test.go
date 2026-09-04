@@ -2725,6 +2725,25 @@ func main() { http.GetText("http://127.0.0.1:8080/") }`)
 	}
 }
 
+func TestHTTPFastPathEvaluatesPostArgumentsBeforeURLRejection(t *testing.T) {
+	vm, _ := newTestVM()
+	vm.Capabilities.Network.HTTP = true
+	called := 0
+	vm.RegisterNative("mark", func([]any) (any, error) {
+		called++
+		return "body", nil
+	})
+	err := vm.Run(`package main
+import "http"
+func main() { http.PostText("://invalid", mark(), mark()) }`)
+	if err == nil || !strings.Contains(err.Error(), "invalid HTTP(S) URL") {
+		t.Fatalf("Run error = %v, want invalid URL", err)
+	}
+	if called != 2 {
+		t.Fatalf("PostText evaluated %d side-effect arguments, want 2", called)
+	}
+}
+
 func TestCapabilitiesRestrictFilesystemPaths(t *testing.T) {
 	vm := NewInterpreter()
 	vm.Capabilities = Capabilities{FileSystem: FileSystemCapabilities{

@@ -7,6 +7,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path"
 	"reflect"
 	"strconv"
 	"strings"
@@ -638,6 +639,26 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 							return value, err
 						}
 					}
+					if p.Name == "path" {
+						if value, handled, err := vm.evalPathCall(sel.Sel.Name, ex.Args, env); handled {
+							return value, err
+						}
+					}
+					if p.Name == "text/template" {
+						if value, handled, err := vm.evalTemplateCall(sel.Sel.Name, ex.Args, env); handled {
+							return value, err
+						}
+					}
+					if p.Name == "http" {
+						if value, handled, err := vm.evalHTTPCall(sel.Sel.Name, ex.Args, env); handled {
+							return value, err
+						}
+					}
+					if p.Name == "browser" {
+						if value, handled, err := vm.evalBrowserCall(sel.Sel.Name, ex.Args, env); handled {
+							return value, err
+						}
+					}
 					if p.Name == "debug" {
 						switch sel.Sel.Name {
 						case "Q":
@@ -1216,6 +1237,162 @@ func (vm *Interpreter) evalStringsCall(name string, args []ast.Expr, env *Env) (
 		values[i] = value
 	}
 	return strings.ReplaceAll(ToString(values[0]), ToString(values[1]), ToString(values[2])), true, nil
+}
+
+// evalPathCall keeps lexical URL/path helpers on the direct package-call
+// path. These functions are pure and fixed-arity, so generic dispatch only
+// adds an argument slice and Function wrapper around the standard library.
+func (vm *Interpreter) evalPathCall(name string, args []ast.Expr, env *Env) (any, bool, error) {
+	if len(args) != 1 {
+		return nil, false, nil
+	}
+	switch name {
+	case "Base", "Clean", "Dir", "Ext", "IsAbs":
+	default:
+		return nil, false, nil
+	}
+	value, err := vm.evalExpr(args[0], env)
+	if err != nil {
+		return nil, true, err
+	}
+	text := ToString(value)
+	switch name {
+	case "Base":
+		return path.Base(text), true, nil
+	case "Clean":
+		return path.Clean(text), true, nil
+	case "Dir":
+		return path.Dir(text), true, nil
+	case "Ext":
+		return path.Ext(text), true, nil
+	default:
+		return path.IsAbs(text), true, nil
+	}
+}
+
+// evalTemplateCall shares the per-interpreter parse cache with
+// registerTemplatePackage but avoids generic package-function dispatch in a
+// row-by-row HTML/text render loop.
+func (vm *Interpreter) evalTemplateCall(name string, args []ast.Expr, env *Env) (any, bool, error) {
+	if name != "RenderString" || (len(args) != 1 && len(args) != 2) {
+		return nil, false, nil
+	}
+	text, err := vm.evalExpr(args[0], env)
+	if err != nil {
+		return nil, true, err
+	}
+	var data any
+	if len(args) == 2 {
+		data, err = vm.evalExpr(args[1], env)
+		if err != nil {
+			return nil, true, err
+		}
+	}
+	tpl, err := vm.templateCache.parse(ToString(text))
+	if err != nil {
+		return "", true, err
+	}
+	var out strings.Builder
+	if err := tpl.Execute(&out, ToNativeValue(data)); err != nil {
+		return "", true, err
+	}
+	return out.String(), true, nil
+}
+
+// evalHTTPCall performs the same capability check and internal-native handoff
+// as registerHTTPPackage without the generic package-call argument slice.
+func (vm *Interpreter) evalHTTPCall(name string, args []ast.Expr, env *Env) (any, bool, error) {
+	if name == "GetText" && len(args) == 1 {
+		raw, err := vm.evalExpr(args[0], env)
+		if err != nil {
+			return nil, true, err
+		}
+		rawURL := ToString(raw)
+		if err := vm.requireHTTP(rawURL); err != nil {
+			return "", true, err
+		}
+		if native, ok := vm.hostNative("HTTPGetText"); ok {
+			value, err := native([]any{rawURL})
+			return value, true, err
+		}
+		return "", true, NewRuntimeError("HTTP host native not available")
+	}
+	if name != "PostText" || (len(args) != 2 && len(args) != 3) {
+		return nil, false, nil
+	}
+	raw, err := vm.evalExpr(args[0], env)
+	if err != nil {
+		return nil, true, err
+	}
+	body, err := vm.evalExpr(args[1], env)
+	if err != nil {
+		return nil, true, err
+	}
+	contentType := "application/json"
+	if len(args) == 3 {
+		value, err := vm.evalExpr(args[2], env)
+		if err != nil {
+			return nil, true, err
+		}
+		contentType = ToString(value)
+	}
+	// Generic package dispatch evaluates every argument before entering the
+	// native wrapper. Keep that observable order even when URL validation will
+	// reject the request (an argument can itself call a guest function).
+	rawURL := ToString(raw)
+	if err := vm.requireHTTP(rawURL); err != nil {
+		return "", true, err
+	}
+	if native, ok := vm.hostNative("HTTPPostText"); ok {
+		value, err := native([]any{rawURL, ToString(body), contentType})
+		return value, true, err
+	}
+	return "", true, NewRuntimeError("HTTP host native not available")
+}
+
+// evalBrowserCall removes generic package dispatch from the browser's small,
+// effect-only DOM facade. Host-native errors are intentionally ignored here,
+// matching registerBrowserPackage's existing behavior.
+func (vm *Interpreter) evalBrowserCall(name string, args []ast.Expr, env *Env) (any, bool, error) {
+	var nativeName string
+	want := 0
+	switch name {
+	case "SetHTML":
+		nativeName, want = "SetInnerHTML", 2
+	case "SetValue":
+		nativeName, want = "SetValue", 2
+	case "AddClass":
+		nativeName, want = "AddClass", 2
+	case "RemoveClass":
+		nativeName, want = "RemoveClass", 2
+	case "Open":
+		nativeName, want = "OpenWindow", 1
+	case "Alert":
+		nativeName, want = "Alert", 1
+	default:
+		return nil, false, nil
+	}
+	if len(args) != want {
+		return nil, false, nil
+	}
+	first, err := vm.evalExpr(args[0], env)
+	if err != nil {
+		return nil, true, err
+	}
+	if want == 1 {
+		if native, ok := vm.natives[nativeName]; ok {
+			_, _ = native([]any{ToString(first)})
+		}
+		return nil, true, nil
+	}
+	second, err := vm.evalExpr(args[1], env)
+	if err != nil {
+		return nil, true, err
+	}
+	if native, ok := vm.natives[nativeName]; ok {
+		_, _ = native([]any{ToString(first), ToString(second)})
+	}
+	return nil, true, nil
 }
 
 // evalMakeCall is the direct-call counterpart of evalBuiltinArgs("make").

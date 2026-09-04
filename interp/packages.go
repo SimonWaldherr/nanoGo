@@ -1273,7 +1273,11 @@ func registerTemplatePackage(vm *Interpreter) {
 	// builds one interpreter per request (cmd/mcp does) gets no cross-request
 	// sharing, which is the conservative choice, while a single program's own
 	// render loop — the case that actually matters — hits it every time.
-	cache := &templateCache{}
+	cache := vm.templateCache
+	if cache == nil {
+		cache = &templateCache{}
+		vm.templateCache = cache
+	}
 	tplPkg := &Package{Name: "text/template", Funcs: map[string]*Function{}}
 	tplPkg.Funcs["RenderString"] = &Function{Name: "RenderString", Native: func(args []any) (any, error) {
 		if len(args) == 0 {
@@ -1287,7 +1291,7 @@ func registerTemplatePackage(vm *Interpreter) {
 		if err != nil {
 			return "", err
 		}
-		var buf bytes.Buffer
+		var buf strlib.Builder
 		nativeData := ToNativeValue(data)
 		if err := t.Execute(&buf, nativeData); err != nil {
 			return "", err
