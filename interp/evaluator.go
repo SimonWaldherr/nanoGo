@@ -54,7 +54,7 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 	if err != nil {
 		return err
 	}
-	exec.litCache, exec.floatLitCache = buildLitCaches(file)
+	exec.litCache, exec.floatLitCache, exec.valueLitCache, exec.typeStrCache = buildLitCaches(file)
 	exec.hasFloatLiterals = len(exec.floatLitCache) != 0
 	exec.reusableBlocks, exec.reusableFors = buildReusableScopeSets(file)
 	exec.interfaceMethods = buildInterfaceMethodCache(file)
@@ -135,6 +135,14 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 					for i, name := range vs.Names {
 						if name.Name == "_" {
 							continue
+						}
+						if i < len(vs.Values) {
+							if handled, err := vm.declareNumericLiteral(name, vs.Values[i], vs.Type, global); handled || err != nil {
+								if err != nil {
+									return err
+								}
+								continue
+							}
 						}
 						var val any
 						if i < len(vs.Values) {
@@ -271,6 +279,11 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			}
 			return f, nil
 		case token.STRING:
+			if exec := vm.activeExecution; exec != nil {
+				if value, ok := exec.valueLitCache[ex]; ok {
+					return value, nil
+				}
+			}
 			// Use strconv.Unquote to handle escape sequences (\n, \t, \", \\, \uXXXX, ...)
 			// and both interpreted ("...") and raw (`...`) string literals.
 			if s, err := strconv.Unquote(ex.Value); err == nil {
@@ -283,6 +296,11 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			}
 			return s, nil
 		case token.CHAR:
+			if exec := vm.activeExecution; exec != nil {
+				if value, ok := exec.valueLitCache[ex]; ok {
+					return value, nil
+				}
+			}
 			// strconv.UnquoteChar requires the leading quote stripped.
 			v := ex.Value
 			if len(v) < 3 || v[0] != '\'' || v[len(v)-1] != '\'' {
@@ -379,6 +397,10 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if ex.Op != token.AND && isNumericValue(v) {
+			return nil, numericError("use explicit numeric methods such as Neg or Scale")
+		}
+
 		switch ex.Op {
 		case token.NOT:
 			return !ToBool(v), nil
@@ -690,9 +712,17 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 					if !ok3 {
 						return nil, NewRuntimeError("package member is not function")
 					}
+					// Keep small guest argument lists on the stack. Resolve the
+					// exported function on every call so Replace remains visible;
+					// natives retain the general path because they may keep args.
+					if ex.Ellipsis == token.NoPos && len(ex.Args) <= 3 &&
+						len(fn.Params) == len(ex.Args) && fn.RecvName == "" && vm.canFastCall(fn) {
+						return vm.evalSmallPackageCall(fn, ex.Args, env)
+					}
 					// Evaluate args (including ... expansion)
-					args := make([]any, 0, len(ex.Args))
+					var args []any
 					if ex.Ellipsis != token.NoPos && len(ex.Args) > 0 {
+						args = make([]any, 0, len(ex.Args))
 						for i, a := range ex.Args {
 							if i == len(ex.Args)-1 {
 								v, err := vm.evalExpr(a, env)
@@ -786,9 +816,34 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		}
 		switch fn := callee.(type) {
 		case *Function:
-			args := make([]any, 0, len(ex.Args))
-			// Handle foo(slice...) expansion
+			// Small calls to ordinary frame-free guest functions are especially
+			// common in recursive code (fib(n-1), walk(node), quick(a, lo, hi)).
+			// The general path below deliberately heap-allocates its []any: a
+			// native function is allowed to retain that slice.  A frame-free
+			// guest function cannot observe or retain the call's argument list,
+			// though, so keep up to three arguments in a stack array instead.
+			// This removes one allocation from every recursive invocation while
+			// retaining the general path for natives, variadics and debuggable
+			// calls.
+			if ex.Ellipsis == token.NoPos && len(ex.Args) > 0 && len(ex.Args) <= 3 &&
+				len(fn.Params) == len(ex.Args) && fn.RecvName == "" && vm.canFastCall(fn) {
+				var args [3]any
+				for i, expr := range ex.Args {
+					arg, err := vm.evalExpr(expr, env)
+					if err != nil {
+						return nil, err
+					}
+					args[i] = arg
+				}
+				if err := vm.executionError(); err != nil {
+					return nil, err
+				}
+				return vm.callFrameFreeFunction(fn, nil, args[:len(ex.Args)])
+			}
+			var args []any
+			// Allocate once for either the fixed argument list or ... expansion.
 			if ex.Ellipsis != token.NoPos && len(ex.Args) > 0 {
+				args = make([]any, 0, len(ex.Args))
 				for i, a := range ex.Args {
 					if i == len(ex.Args)-1 {
 						v, err := vm.evalExpr(a, env)
@@ -926,7 +981,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 
 	case *ast.CompositeLit:
 		// Struct, slice, map literals.
-		typ := typeString(ex.Type)
+		typ := vm.typeStringCached(ex.Type)
 		if strings.HasPrefix(typ, "[]") || strings.HasPrefix(typ, "[") {
 			elem := ""
 			length := 0
@@ -1078,17 +1133,10 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		return v, nil
 
 	case *ast.FuncLit:
-		frameFree, _, envReusable := analyzeFunctionMetadata(ex.Body)
-		fn := &Function{Name: "<anon>", Body: ex.Body, Env: env, frameFree: frameFree, envReusable: envReusable}
-		if ex.Type.Params != nil {
-			for _, f := range ex.Type.Params.List {
-				for _, n := range f.Names {
-					fn.Params = append(fn.Params, n.Name)
-				}
-			}
-		}
-		fn.Results = namedResults(ex.Type.Results)
-		return fn, nil
+		template := vm.anonymousTemplate(ex)
+		fn := *template
+		fn.Env = env
+		return &fn, nil
 
 	default:
 		return nil, NewRuntimeError(fmt.Sprintf("unsupported expr: %T", e))
@@ -1403,7 +1451,7 @@ func (vm *Interpreter) evalMakeCall(call *ast.CallExpr, env *Env) (any, error) {
 	if len(call.Args) == 0 {
 		return nil, NewRuntimeError("make: missing type")
 	}
-	typ := typeString(call.Args[0])
+	typ := vm.typeStringCached(call.Args[0])
 	length, capacity := 0, 0
 	for i, arg := range call.Args[1:] {
 		value, err := vm.evalExpr(arg, env)
@@ -1527,16 +1575,16 @@ func cacheIntBinding(exec *execution, id *ast.Ident, binding lexicalBinding) {
 	exec.intBindings[uint(id.Pos())&(uint(len(exec.intBindings))-1)] = intBindingCacheEntry{ident: id, binding: binding}
 }
 
-func intFromBinding(target *Env, binding lexicalBinding) (int, bool) {
+func intFromBinding(target *Env, binding lexicalBinding, name string) (int, bool) {
 	if binding.slot == 0 {
-		if target.inlineIntVar.name == "" {
+		if target.inlineIntVar.name != name {
 			return 0, false
 		}
 		return target.inlineIntVar.val, true
 	}
 	ints := target.inlineInts
 	slot := int(binding.slot) - 1
-	if ints == nil || slot >= int(ints.len) {
+	if ints == nil || slot >= int(ints.len) || ints.vars[slot].name != name {
 		return 0, false
 	}
 	return ints.vars[slot].val, true
@@ -1553,12 +1601,12 @@ func (vm *Interpreter) getIntIdent(id *ast.Ident, env *Env) (int, bool) {
 		if target != nil {
 			if target.shared || concurrent {
 				target.mu.RLock()
-				value, ok := intFromBinding(target, binding)
+				value, ok := intFromBinding(target, binding, id.Name)
 				target.mu.RUnlock()
 				if ok {
 					return value, true
 				}
-			} else if value, ok := intFromBinding(target, binding); ok {
+			} else if value, ok := intFromBinding(target, binding, id.Name); ok {
 				return value, true
 			}
 		}
@@ -1589,7 +1637,11 @@ func (vm *Interpreter) getIntIdent(id *ast.Ident, env *Env) (int, bool) {
 					}
 				}
 			}
+			bound := hasBinding(current, id.Name)
 			current.mu.RUnlock()
+			if bound {
+				return 0, false
+			}
 		} else {
 			if current.inlineIntVar.name == id.Name && id.Name != "" {
 				if current.inlineInts != nil && exec != nil && depth <= int(^uint16(0)) {
@@ -1606,6 +1658,11 @@ func (vm *Interpreter) getIntIdent(id *ast.Ident, env *Env) (int, bool) {
 						return ints.vars[slot].val, true
 					}
 				}
+			}
+		}
+		if !current.shared && !concurrent {
+			if hasBinding(current, id.Name) {
+				return 0, false
 			}
 		}
 		depth++
@@ -1647,13 +1704,13 @@ func (vm *Interpreter) getFloatIdent(id *ast.Ident, env *Env) (float64, bool) {
 			if target.shared || concurrent {
 				target.mu.RLock()
 				floats := target.inlineFloats
-				if floats != nil && int(binding.slot) < int(floats.len) {
+				if floats != nil && int(binding.slot) < int(floats.len) && floats.vars[binding.slot].name == id.Name {
 					value := floats.vars[binding.slot].val
 					target.mu.RUnlock()
 					return value, true
 				}
 				target.mu.RUnlock()
-			} else if floats := target.inlineFloats; floats != nil && int(binding.slot) < int(floats.len) {
+			} else if floats := target.inlineFloats; floats != nil && int(binding.slot) < int(floats.len) && floats.vars[binding.slot].name == id.Name {
 				return floats.vars[binding.slot].val, true
 			}
 		}
@@ -1677,7 +1734,11 @@ func (vm *Interpreter) getFloatIdent(id *ast.Ident, env *Env) (float64, bool) {
 					}
 				}
 			}
+			bound := hasBinding(current, id.Name)
 			current.mu.RUnlock()
+			if bound {
+				return 0, false
+			}
 		} else if floats = current.inlineFloats; floats != nil {
 			for slot := 0; slot < int(floats.len); slot++ {
 				if floats.vars[slot].name == id.Name {
@@ -1686,6 +1747,11 @@ func (vm *Interpreter) getFloatIdent(id *ast.Ident, env *Env) (float64, bool) {
 					}
 					return floats.vars[slot].val, true
 				}
+			}
+		}
+		if !current.shared && !concurrent {
+			if hasBinding(current, id.Name) {
+				return 0, false
 			}
 		}
 		depth++
@@ -1705,13 +1771,13 @@ func (vm *Interpreter) setFloatIdent(id *ast.Ident, value float64, env *Env) boo
 			if target.shared || concurrent {
 				target.mu.Lock()
 				floats := target.inlineFloats
-				if floats != nil && int(binding.slot) < int(floats.len) {
+				if floats != nil && int(binding.slot) < int(floats.len) && floats.vars[binding.slot].name == id.Name {
 					floats.vars[binding.slot].val = value
 					target.mu.Unlock()
 					return true
 				}
 				target.mu.Unlock()
-			} else if floats := target.inlineFloats; floats != nil && int(binding.slot) < int(floats.len) {
+			} else if floats := target.inlineFloats; floats != nil && int(binding.slot) < int(floats.len) && floats.vars[binding.slot].name == id.Name {
 				floats.vars[binding.slot].val = value
 				return true
 			}
@@ -1735,7 +1801,11 @@ func (vm *Interpreter) setFloatIdent(id *ast.Ident, value float64, env *Env) boo
 					}
 				}
 			}
+			bound := hasBinding(current, id.Name)
 			current.mu.Unlock()
+			if bound {
+				return false
+			}
 		} else if floats := current.inlineFloats; floats != nil {
 			for slot := 0; slot < int(floats.len); slot++ {
 				if floats.vars[slot].name == id.Name {
@@ -1745,6 +1815,11 @@ func (vm *Interpreter) setFloatIdent(id *ast.Ident, value float64, env *Env) boo
 					}
 					return true
 				}
+			}
+		}
+		if !current.shared && !concurrent {
+			if hasBinding(current, id.Name) {
+				return false
 			}
 		}
 		depth++
@@ -1991,7 +2066,7 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 			if container, found := vm.get(id.Name, env); found {
 				if m, isMap := container.(*MapVal); isMap && m.KeyType == "string" {
 					if lit, isString := ex.Index.(*ast.BasicLit); isString && lit.Kind == token.STRING {
-						key, unquoteErr := strconv.Unquote(lit.Value)
+						key, unquoteErr := vm.stringLiteral(lit)
 						if unquoteErr == nil {
 							stored, exists := m.Data[key]
 							n, isInt := stored.(int)
@@ -2125,6 +2200,13 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 		}
 
 	case *ast.BinaryExpr:
+		// A literal float divisor cannot produce an integer result. Reject
+		// this common normalization shape before looking up its numerator.
+		if ex.Op == token.QUO {
+			if lit, ok := ex.Y.(*ast.BasicLit); ok && lit.Kind == token.FLOAT {
+				return 0, false, nil
+			}
+		}
 		if !isIntArithmetic(ex.Op) {
 			return 0, false, nil
 		}
@@ -2143,6 +2225,11 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 			return left - right, true, nil
 		case token.MUL:
 			return left * right, true, nil
+		case token.QUO:
+			if right == 0 {
+				return 0, true, &panicError{value: "runtime error: integer divide by zero"}
+			}
+			return left / right, true, nil
 		case token.REM:
 			if right == 0 {
 				return 0, true, &panicError{value: "runtime error: integer divide by zero"}
@@ -2209,7 +2296,7 @@ func parseFastDecimalInt(s string) (int, bool) {
 
 func isIntArithmetic(op token.Token) bool {
 	switch op {
-	case token.ADD, token.SUB, token.MUL, token.REM, token.SHL, token.SHR,
+	case token.ADD, token.SUB, token.MUL, token.QUO, token.REM, token.SHL, token.SHR,
 		token.AND, token.OR, token.XOR, token.AND_NOT:
 		return true
 	default:
@@ -2625,8 +2712,13 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			}
 		}
 
-		// Evaluate RHS first
-		rightVals := make([]any, len(st.Rhs))
+		// Single-value assignments (including every compound arithmetic
+		// assignment) need only one stack slot, not a heap-allocated slice.
+		var singleRHS [1]any
+		rightVals := singleRHS[:]
+		if len(st.Rhs) != 1 {
+			rightVals = make([]any, len(st.Rhs))
+		}
 
 		// Special case: v, ok := m[k]
 		if len(st.Lhs) == 2 && len(st.Rhs) == 1 {
@@ -2835,6 +2927,9 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				return controlFlow{}, nil
 			}
 			v, _ := vm.get(id.Name, env)
+			if isNumericValue(v) {
+				return controlFlow{}, numericError("use Add or Sub for numeric values")
+			}
 			cur := ToInt(v)
 			if st.Tok == token.INC {
 				vm.set(id.Name, cur+1, env)
@@ -2853,7 +2948,11 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		if err != nil {
 			return controlFlow{}, err
 		}
-		cur := ToInt(ref.get())
+		value := ref.get()
+		if isNumericValue(value) {
+			return controlFlow{}, numericError("use Add or Sub for numeric values")
+		}
+		cur := ToInt(value)
 		if st.Tok == token.INC {
 			if err := ref.set(cur + 1); err != nil {
 				return controlFlow{}, err
@@ -2880,6 +2979,14 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				for i, n := range vs.Names {
 					if n.Name == "_" {
 						continue
+					}
+					if i < len(vs.Values) {
+						if handled, err := vm.declareNumericLiteral(n, vs.Values[i], vs.Type, env); handled || err != nil {
+							if err != nil {
+								return controlFlow{}, err
+							}
+							continue
+						}
 					}
 					var val any
 					if i < len(vs.Values) {
@@ -3898,6 +4005,20 @@ func (vm *Interpreter) resolveLvalue(l ast.Expr, env *Env) (lvalueRef, error) {
 	}
 }
 
+// stringLiteral also serves speculative map paths, which must not charge
+// execution steps or mutate a cache shared with guest goroutines. Loaded or
+// hot-swapped ASTs absent from the run cache retain the normal decoder path.
+func (vm *Interpreter) stringLiteral(lit *ast.BasicLit) (string, error) {
+	if exec := vm.activeExecution; exec != nil {
+		if value, ok := exec.valueLitCache[lit]; ok {
+			if text, ok := value.(string); ok {
+				return text, nil
+			}
+		}
+	}
+	return strconv.Unquote(lit.Value)
+}
+
 // staticStringMapLvalue recognizes the side-effect-free lvalue shape used by
 // tight counter loops: m["key"]. It intentionally excludes expressions such
 // as m[key()] so the assignment fast path never changes evaluation order.
@@ -3922,7 +4043,7 @@ func (vm *Interpreter) staticStringMapLvalue(l ast.Expr, env *Env) (*MapVal, str
 	if !ok || literal.Kind != token.STRING {
 		return nil, "", false
 	}
-	key, err := strconv.Unquote(literal.Value)
+	key, err := vm.stringLiteral(literal)
 	if err != nil {
 		return nil, "", false
 	}
@@ -3939,6 +4060,61 @@ func (vm *Interpreter) resolveRef(l ast.Expr, env *Env) (Ref, error) {
 	return ref, nil
 }
 
+// evalSmallPackageCall is separate from general/native dispatch so its
+// argument array does not escape through a native callback. Argument values
+// themselves may still escape, for example when the guest returns a closure.
+func (vm *Interpreter) evalSmallPackageCall(fn *Function, exprs []ast.Expr, env *Env) (any, error) {
+	var args [3]any
+	for i, expr := range exprs {
+		arg, err := vm.evalExpr(expr, env)
+		if err != nil {
+			return nil, err
+		}
+		args[i] = arg
+	}
+	// Preserve callFunction's checkpoint after all arguments were evaluated.
+	if err := vm.executionError(); err != nil {
+		return nil, err
+	}
+	return vm.callFrameFreeFunction(fn, nil, args[:len(exprs)])
+}
+
+func (vm *Interpreter) anonymousTemplate(ex *ast.FuncLit) *Function {
+	exec := vm.activeExecution
+	if exec != nil {
+		if cached, ok := exec.anonTemplates.Load(ex); ok {
+			return cached.(*Function)
+		}
+	}
+	frameFree, _, reusable := analyzeFunctionMetadata(ex.Body)
+	fn := &Function{Name: "<anon>", Body: ex.Body, frameFree: frameFree, envReusable: reusable, Results: namedResults(ex.Type.Results)}
+	if ex.Type.Params != nil {
+		for i, f := range ex.Type.Params.List {
+			for _, n := range f.Names {
+				fn.Params = append(fn.Params, n.Name)
+			}
+			if i == len(ex.Type.Params.List)-1 {
+				_, fn.IsVariadic = f.Type.(*ast.Ellipsis)
+			}
+		}
+	}
+	if exec != nil {
+		cached, _ := exec.anonTemplates.LoadOrStore(ex, fn)
+		return cached.(*Function)
+	}
+	return fn
+}
+
+// Copy exactly once: a variadic result/closure may retain this backing store.
+func variadicValue(args []any, start int) *SliceVal {
+	var rest []any
+	if start < len(args) {
+		rest = make([]any, len(args)-start)
+		copy(rest, args[start:])
+	}
+	return &SliceVal{ElementType: "any", Data: rest}
+}
+
 func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []any) (ret any, err error) {
 	if err := vm.executionError(); err != nil {
 		return nil, err
@@ -3947,6 +4123,10 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 		return vm.callFrameFreeFunction(fn, recv, args)
 	}
 	vm.emitTrace("call_start", fn.Name, "", nil)
+	if fn.Native != nil || fn.NativeContext != nil {
+		return vm.callNativeFunction(fn, recv, args)
+	}
+
 	// Run defers in LIFO order on exit; also handle panic unwinding.
 	// caller: env.frame is the call site's own active frame (nil at the
 	// outermost call), letting debug.Stack() walk this chain later. It also
@@ -4021,25 +4201,6 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 		vm.emitTrace("call_end", fn.Name, message, nil)
 	}()
 
-	// Native function?
-	if fn.Native != nil || fn.NativeContext != nil {
-		// Package functions already receive their arguments in exactly the
-		// representation a native needs. Rebuilding that slice used to add one
-		// allocation to every fmt/os/math/etc. call. Methods are the sole case
-		// that need a receiver prepended, so keep the common package-function
-		// path allocation-free.
-		a := args
-		if recv != nil {
-			a = make([]any, len(args)+1)
-			a[0] = *recv
-			copy(a[1:], args)
-		}
-		if fn.NativeContext != nil {
-			return fn.NativeContext(vm.Context(), a)
-		}
-		return fn.Native(a)
-	}
-
 	// User-defined function
 	local = NewEnv(fn.Env)
 	local.frame = frame
@@ -4066,12 +4227,7 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 			}
 			argIndex++
 		}
-		var rest []any
-		for argIndex < len(args) {
-			rest = append(rest, args[argIndex])
-			argIndex++
-		}
-		restValue := &SliceVal{ElementType: "any", Data: rest}
+		restValue := variadicValue(args, argIndex)
 		vm.declare(fn.Params[len(fn.Params)-1], restValue, local)
 		if vm.trackingVariables() {
 			vm.recordVariable(fn.Params[len(fn.Params)-1], restValue, nil, local)
@@ -4126,7 +4282,7 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 }
 
 // canFastCall identifies the normal production case: a parsed,
-// non-variadic guest function with no defers, recovery, stack inspection,
+// guest function with no defers, recovery, stack inspection,
 // tracing, debugger, or variable tracker attached. Such a call cannot
 // observe a callFrame, so allocating one (and its defer/recover closure)
 // merely adds GC work to recursive and call-heavy programs.
@@ -4147,10 +4303,38 @@ func (vm *Interpreter) canFastCall(fn *Function) bool {
 		}
 	}
 	return fn.frameFree &&
-		!fn.IsVariadic &&
 		len(fn.Results) == 0 &&
 		fn.Native == nil &&
 		fn.NativeContext == nil
+}
+
+// callNativeFunction retains native panic conversion and tracing without
+// allocating a guest call frame: native functions cannot own guest defers.
+func (vm *Interpreter) callNativeFunction(fn *Function, recv *any, args []any) (ret any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if pe, ok := r.(*panicError); ok {
+				err = pe
+			} else {
+				err = &panicError{value: fmt.Sprintf("%v", r)}
+			}
+		}
+		message := "ok"
+		if err != nil {
+			message = err.Error()
+		}
+		vm.emitTrace("call_end", fn.Name, message, nil)
+	}()
+	a := args
+	if recv != nil {
+		a = make([]any, len(args)+1)
+		a[0] = *recv
+		copy(a[1:], args)
+	}
+	if fn.NativeContext != nil {
+		return fn.NativeContext(vm.Context(), a)
+	}
+	return fn.Native(a)
 }
 
 // callFrameFreeFunction is callFunction's lean user-function path. Its
@@ -4169,13 +4353,20 @@ func (vm *Interpreter) callFrameFreeFunction(fn *Function, recv *any, args []any
 	if fn.RecvName != "" && recv != nil {
 		vm.declare(fn.RecvName, *recv, local)
 	}
-	for _, p := range fn.Params {
+	params := fn.Params
+	if fn.IsVariadic && len(params) > 0 {
+		params = params[:len(params)-1]
+	}
+	for _, p := range params {
 		if argIndex >= len(args) {
 			vm.declare(p, nil, local)
 		} else {
 			vm.declare(p, args[argIndex], local)
 		}
 		argIndex++
+	}
+	if fn.IsVariadic && len(fn.Params) > 0 {
+		vm.declare(fn.Params[len(fn.Params)-1], variadicValue(args, argIndex), local)
 	}
 
 	c, err := vm.execStmtList(fn.Body.(*ast.BlockStmt).List, local)
@@ -4524,6 +4715,82 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 // ---------------- Helpers ----------------------------------------
 
 func (vm *Interpreter) applyBinaryOp(op token.Token, left, right any) (any, error) {
+	if l, ok := left.(int); ok {
+		if r, ok := right.(int); ok {
+			switch op {
+			case token.ADD:
+				return l + r, nil
+			case token.SUB:
+				return l - r, nil
+			case token.MUL:
+				return l * r, nil
+			case token.AND:
+				return l & r, nil
+			case token.OR:
+				return l | r, nil
+			case token.XOR:
+				return l ^ r, nil
+			case token.AND_NOT:
+				return l &^ r, nil
+			case token.SHL:
+				return l << uint(r), nil
+			case token.SHR:
+				return l >> uint(r), nil
+			case token.EQL:
+				return l == r, nil
+			case token.NEQ:
+				return l != r, nil
+			case token.LSS:
+				return l < r, nil
+			case token.GTR:
+				return l > r, nil
+			case token.LEQ:
+				return l <= r, nil
+			case token.GEQ:
+				return l >= r, nil
+			case token.QUO:
+				if r == 0 {
+					return nil, &panicError{value: "runtime error: integer divide by zero"}
+				}
+				return l / r, nil
+			case token.REM:
+				if r == 0 {
+					return nil, &panicError{value: "runtime error: integer divide by zero"}
+				}
+				return l % r, nil
+			}
+		}
+	} else if l, ok := left.(float64); ok {
+		if r, ok := right.(float64); ok {
+			switch op {
+			case token.ADD:
+				return l + r, nil
+			case token.SUB:
+				return l - r, nil
+			case token.MUL:
+				return l * r, nil
+			case token.QUO:
+				return l / r, nil
+			case token.EQL:
+				return l == r, nil
+			case token.NEQ:
+				return l != r, nil
+			case token.LSS:
+				return l < r, nil
+			case token.GTR:
+				return l > r, nil
+			case token.LEQ:
+				return l <= r, nil
+			case token.GEQ:
+				return l >= r, nil
+			}
+		}
+	}
+
+	if op != token.EQL && op != token.NEQ && (isNumericValue(left) || isNumericValue(right)) {
+		return nil, numericError("use explicit numeric methods such as Add, Sub, Mul, Div or Cmp")
+	}
+
 	switch op {
 	case token.ADD:
 		if _, ok := left.(string); ok {
@@ -4697,7 +4964,7 @@ func (vm *Interpreter) evalTypeAssert(ex *ast.TypeAssertExpr, env *Env) (asserte
 	// Concrete type: compare dynamic type against the asserted type name,
 	// ignoring a leading "*" since nanoGo represents a struct the same way
 	// whether it was declared by value or by pointer (see StructVal).
-	want := strings.TrimPrefix(typeString(ex.Type), "*")
+	want := strings.TrimPrefix(vm.typeStringCached(ex.Type), "*")
 	if want != "" && typeOfValue(vm, dyn) == want {
 		return dyn, dyn, true, nil
 	}

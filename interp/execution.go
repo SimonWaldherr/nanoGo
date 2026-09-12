@@ -11,31 +11,77 @@ import (
 	"sync/atomic"
 )
 
-// buildLitCaches parses numeric literals in file once up front. Called
+// buildLitCaches parses immutable literals in file once up front. Called
 // single-threaded, before any guest goroutine can run, so the resulting map
 // is safe to read from multiple goroutines without synchronization for the
 // rest of the execution.
-func buildLitCaches(file *ast.File) (map[*ast.BasicLit]int, map[*ast.BasicLit]float64) {
-	intCache := make(map[*ast.BasicLit]int)
-	floatCache := make(map[*ast.BasicLit]float64)
-	ast.Inspect(file, func(n ast.Node) bool {
-		lit, ok := n.(*ast.BasicLit)
-		if !ok {
-			return true
+func buildLitCaches(file *ast.File) (map[*ast.BasicLit]int, map[*ast.BasicLit]float64, map[*ast.BasicLit]any, map[ast.Expr]string) {
+	var intCache map[*ast.BasicLit]int
+	var floatCache map[*ast.BasicLit]float64
+	var valueCache map[*ast.BasicLit]any
+	var typeStrCache map[ast.Expr]string
+	cacheTypeString := func(e ast.Expr) {
+		if e == nil {
+			return
 		}
-		switch lit.Kind {
-		case token.INT:
-			if v, err := strconv.ParseInt(lit.Value, 0, strconv.IntSize); err == nil {
-				intCache[lit] = int(v)
+		if typeStrCache == nil {
+			typeStrCache = make(map[ast.Expr]string)
+		}
+		typeStrCache[e] = typeString(e)
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.BasicLit:
+			switch node.Kind {
+			case token.INT:
+				if v, err := strconv.ParseInt(node.Value, 0, strconv.IntSize); err == nil {
+					if intCache == nil {
+						intCache = make(map[*ast.BasicLit]int)
+					}
+					intCache[node] = int(v)
+				}
+			case token.STRING, token.CHAR:
+				var value any
+				if node.Kind == token.STRING {
+					decoded, err := strconv.Unquote(node.Value)
+					if err != nil {
+						return true
+					}
+					value = decoded
+				} else {
+					if len(node.Value) < 3 {
+						return true
+					}
+					r, _, tail, err := strconv.UnquoteChar(node.Value[1:len(node.Value)-1], '\'')
+					if err != nil || tail != "" {
+						return true
+					}
+					value = int(r)
+				}
+				if valueCache == nil {
+					valueCache = make(map[*ast.BasicLit]any)
+				}
+				valueCache[node] = value
+			case token.FLOAT:
+				if v, err := strconv.ParseFloat(strings.ReplaceAll(node.Value, "_", ""), 64); err == nil {
+					if floatCache == nil {
+						floatCache = make(map[*ast.BasicLit]float64)
+					}
+					floatCache[node] = v
+				}
 			}
-		case token.FLOAT:
-			if v, err := strconv.ParseFloat(strings.ReplaceAll(lit.Value, "_", ""), 64); err == nil {
-				floatCache[lit] = v
+		case *ast.CompositeLit:
+			cacheTypeString(node.Type)
+		case *ast.TypeAssertExpr:
+			cacheTypeString(node.Type)
+		case *ast.CallExpr:
+			if fn, ok := node.Fun.(*ast.Ident); ok && fn.Name == "make" && len(node.Args) > 0 {
+				cacheTypeString(node.Args[0])
 			}
 		}
 		return true
 	})
-	return intCache, floatCache
+	return intCache, floatCache, valueCache, typeStrCache
 }
 
 // buildReusableBlockSet marks lexical blocks that cannot escape through a
@@ -156,10 +202,14 @@ func (v reusableBlockVisitor) Visit(node ast.Node) ast.Visitor {
 // execution contains state that belongs to exactly one RunContext call.
 // It is shared by guest goroutines, but never by two host executions.
 type execution struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	limits ExecutionLimits
-	fset   *token.FileSet
+	// Templates hold immutable syntax metadata only; each evaluation still
+	// creates a fresh closure bound to its own environment. The cache dies
+	// with the run and is safe for simultaneous guest goroutines.
+	anonTemplates sync.Map // *ast.FuncLit -> *Function (Env == nil)
+	ctx           context.Context
+	cancel        context.CancelFunc
+	limits        ExecutionLimits
+	fset          *token.FileSet
 
 	// litCache holds pre-parsed values for every *ast.BasicLit in the run's
 	// source, built once (single-threaded, before main() runs) so tryEvalIntExpr
@@ -171,9 +221,22 @@ type execution struct {
 	// floatLitCache is the float counterpart of litCache. Dense numeric guest
 	// workloads such as Mandelbrot revisit constants on every pixel iteration.
 	floatLitCache map[*ast.BasicLit]float64
+	// valueLitCache stores decoded, boxed strings and runes. Immutable values
+	// can be returned directly without decoding or boxing on every evaluation.
+	// Built before guest goroutines start; absent for numeric-only programs.
+	valueLitCache map[*ast.BasicLit]any
 	// hasFloatLiterals lets integer-only programs skip all float fast-path
 	// probing in their binary expressions.
 	hasFloatLiterals bool
+	// typeStrCache memoizes typeString per type-expression AST node (make's
+	// type argument, a composite literal's type, a type assertion's type).
+	// typeString recurses through string concatenation for every compound
+	// type (slice/map/chan/pointer), which otherwise reallocates the same
+	// string on every visit to a make(...) or x.(T) inside a loop. Built
+	// before guest goroutines start and never mutated afterward, so — like
+	// litCache — it needs no lock; a miss (e.g. a shadowed "make") just
+	// falls back to computing typeString directly.
+	typeStrCache map[ast.Expr]string
 	// reusableBlocks contains source blocks with no escaping function literal.
 	// Their scopes can share fastEnvPool with frame-free calls.
 	reusableBlocks map[*ast.BlockStmt]struct{}

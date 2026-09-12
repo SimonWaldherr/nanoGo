@@ -37,6 +37,22 @@ func typeString(e ast.Expr) string {
 	return ""
 }
 
+// typeStringCached is typeString's memoized counterpart for the hot call
+// sites (make's type argument, a composite literal's type, a type
+// assertion's type): the same AST node is revisited on every loop
+// iteration, and typeString's recursive concatenation would otherwise
+// reallocate the same string each time. A miss falls back to computing it
+// directly, so this is always safe even for a node buildLitCaches didn't
+// pre-populate (e.g. "make" shadowed by a user declaration).
+func (vm *Interpreter) typeStringCached(e ast.Expr) string {
+	if exec := vm.activeExecution; exec != nil {
+		if s, ok := exec.typeStrCache[e]; ok {
+			return s
+		}
+	}
+	return typeString(e)
+}
+
 // parseMapType splits "map[Key]Val" into key and value type strings.
 func parseMapType(s string) (key, val string) {
 	s = strings.TrimSpace(s)
@@ -350,6 +366,15 @@ func (c *ChannelVal) Send(ctx context.Context, value any) (err error) {
 		return nil
 	}
 	if done == nil {
+		// Most buffered operations are already ready. Avoid the multi-channel
+		// select machinery while retaining cancellation on every operation.
+		if !channelDone(ctxDone) {
+			select {
+			case c.C <- value:
+				return nil
+			default:
+			}
+		}
 		select {
 		case c.C <- value:
 			return nil
@@ -407,6 +432,13 @@ func (c *ChannelVal) Receive(ctx context.Context) (value any, open bool, err err
 		return value, open, nil
 	}
 	if done == nil {
+		if !channelDone(ctxDone) {
+			select {
+			case value, open = <-c.C:
+				return value, open, nil
+			default:
+			}
+		}
 		select {
 		case value, open = <-c.C:
 			return value, open, nil

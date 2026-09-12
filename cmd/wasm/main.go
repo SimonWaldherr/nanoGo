@@ -156,6 +156,28 @@ func normalizeWorkspacePath(raw string) (string, bool) {
 }
 
 func workspaceFilesFromJS(value js.Value) ([]workspaceFile, error) {
+	if value.Type() == js.TypeString {
+		var files []workspaceFile
+		if err := json.Unmarshal([]byte(value.String()), &files); err != nil {
+			return nil, fmt.Errorf("invalid workspace JSON: %w", err)
+		}
+		seen := make(map[string]struct{}, len(files))
+		for i := range files {
+			name, ok := normalizeWorkspacePath(files[i].Path)
+			if !ok {
+				return nil, fmt.Errorf("invalid workspace path at index %d", i)
+			}
+			if _, duplicate := seen[name]; duplicate {
+				return nil, fmt.Errorf("duplicate workspace path %q", name)
+			}
+			seen[name] = struct{}{}
+			files[i].Path = name
+		}
+		if len(files) == 0 {
+			return nil, fmt.Errorf("workspace has no Go source files")
+		}
+		return files, nil
+	}
 	if value.Type() != js.TypeObject || value.IsNull() {
 		return nil, nil
 	}
@@ -938,6 +960,7 @@ func jsNanoGoDebugSetVariable(this js.Value, args []js.Value) any {
 }
 
 func main() {
+	js.Global().Set("nanoGoWorkspaceJSON", true)
 	js.Global().Set("nanoGoRun", js.FuncOf(jsNanoGoRun))
 	js.Global().Set("nanoGoRunWorkspace", js.FuncOf(jsNanoGoRunWorkspace))
 	js.Global().Set("nanoGoWorkspaceCheck", js.FuncOf(jsNanoGoWorkspaceCheck))

@@ -591,6 +591,26 @@ func lookupValueInEnv(env *Env, name string) (any, bool) {
 	return v, ok
 }
 
+// hasBinding is lookupValueInEnv's boolean-only sibling: it reports whether
+// name is bound in env without boxing an int/float match into an any. Every
+// caller here already has its own typed fast-path result and only needs this
+// to tell a true miss (name unbound, keep walking outer scopes) apart from a
+// same-scope binding the fast path can't service (name bound to a different
+// type, stop and report false) — the boxed value itself is never used.
+func hasBinding(env *Env, name string) bool {
+	if _, ok := lookupIntVar(env, name); ok {
+		return true
+	}
+	if _, ok := lookupFloatVar(env, name); ok {
+		return true
+	}
+	if _, ok := lookupInlineVar(env, name); ok {
+		return true
+	}
+	_, ok := env.Vars[name]
+	return ok
+}
+
 // get, set, and declare all check vm.activeExecution's concurrent flag
 // before deciding whether to lock. execution.reserveGoroutine publishes true
 // before it launches a child, and releaseGoroutine clears it only after the
@@ -634,14 +654,24 @@ func (vm *Interpreter) getInt(name string, env *Env) (int, bool) {
 		if e.shared || concurrent {
 			e.mu.RLock()
 			n, ok := lookupIntVar(e, name)
+			bound := ok
+			if !ok {
+				bound = hasBinding(e, name)
+			}
 			e.mu.RUnlock()
 			if ok {
 				return n, true
+			}
+			if bound {
+				return 0, false
 			}
 			continue
 		}
 		if n, ok := lookupIntVar(e, name); ok {
 			return n, true
+		}
+		if hasBinding(e, name) {
+			return 0, false
 		}
 	}
 	return 0, false
@@ -656,14 +686,24 @@ func (vm *Interpreter) getFloat(name string, env *Env) (float64, bool) {
 		if e.shared || concurrent {
 			e.mu.RLock()
 			f, ok := lookupFloatVar(e, name)
+			bound := ok
+			if !ok {
+				bound = hasBinding(e, name)
+			}
 			e.mu.RUnlock()
 			if ok {
 				return f, true
+			}
+			if bound {
+				return 0, false
 			}
 			continue
 		}
 		if f, ok := lookupFloatVar(e, name); ok {
 			return f, true
+		}
+		if hasBinding(e, name) {
+			return 0, false
 		}
 	}
 	return 0, false
@@ -917,7 +957,11 @@ func (vm *Interpreter) setInt(name string, value int, env *Env) bool {
 			e.mu.Lock()
 			_, ok := lookupIntVar(e, name)
 			if !ok {
+				bound := hasBinding(e, name)
 				e.mu.Unlock()
+				if bound {
+					return false
+				}
 				continue
 			}
 			setOrAppendIntVar(e, name, value)
@@ -927,6 +971,9 @@ func (vm *Interpreter) setInt(name string, value int, env *Env) bool {
 		if _, ok := lookupIntVar(e, name); ok {
 			setOrAppendIntVar(e, name, value)
 			return true
+		}
+		if hasBinding(e, name) {
+			return false
 		}
 	}
 	return false
@@ -946,12 +993,19 @@ func (vm *Interpreter) setFloat(name string, value float64, env *Env) bool {
 				e.mu.Unlock()
 				return true
 			}
+			bound := hasBinding(e, name)
 			e.mu.Unlock()
+			if bound {
+				return false
+			}
 			continue
 		}
 		if _, ok := lookupFloatVar(e, name); ok {
 			setOrAppendFloatVar(e, name, value)
 			return true
+		}
+		if hasBinding(e, name) {
+			return false
 		}
 	}
 	return false
@@ -966,23 +1020,44 @@ func (vm *Interpreter) addInt(name string, delta int, env *Env) (int, bool) {
 	for e := env; e != nil; e = e.Parent {
 		if e.shared || concurrent {
 			e.mu.Lock()
-			cur, ok := lookupIntVar(e, name)
+			next, ok := addInlineInt(e, name, delta)
+			bound := ok
 			if !ok {
-				e.mu.Unlock()
-				continue
+				bound = hasBinding(e, name)
 			}
-			next := cur + delta
-			setOrAppendIntVar(e, name, next)
 			e.mu.Unlock()
+			if ok {
+				return next, true
+			}
+			if bound {
+				return 0, false
+			}
+			continue
+		} else if next, ok := addInlineInt(e, name, delta); ok {
 			return next, true
 		}
-		cur, ok := lookupIntVar(e, name)
-		if !ok {
-			continue
+		if hasBinding(e, name) {
+			return 0, false
 		}
-		next := cur + delta
-		setOrAppendIntVar(e, name, next)
-		return next, true
+	}
+	return 0, false
+}
+
+// addInlineInt locates and updates the slot in one pass. Unlike a lookup
+// followed by setOrAppendIntVar, it never searches the same bindings twice.
+// The caller holds the scope lock whenever this environment is shared.
+func addInlineInt(env *Env, name string, delta int) (int, bool) {
+	if env.inlineIntVar.name == name && name != "" {
+		env.inlineIntVar.val += delta
+		return env.inlineIntVar.val, true
+	}
+	if ints := env.inlineInts; ints != nil {
+		for i := 0; i < int(ints.len); i++ {
+			if ints.vars[i].name == name {
+				ints.vars[i].val += delta
+				return ints.vars[i].val, true
+			}
+		}
 	}
 	return 0, false
 }

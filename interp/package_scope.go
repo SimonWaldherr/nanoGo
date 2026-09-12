@@ -228,6 +228,15 @@ func (ps *PackageScope) EvalDecls(ctx context.Context, file *ast.File) error {
 				if name.Name == "_" {
 					continue
 				}
+				if i < len(vs.Values) {
+					if handled, err := vm.declareNumericLiteral(name, vs.Values[i], vs.Type, ps.env); handled || err != nil {
+						if err != nil {
+							return err
+						}
+						ps.declared[name.Name] = true
+						continue
+					}
+				}
 				var val any
 				if i < len(vs.Values) {
 					v, err := vm.evalExpr(vs.Values[i], ps.env)

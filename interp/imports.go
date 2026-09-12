@@ -15,6 +15,7 @@ var BuiltinImportPaths = map[string]bool{
 	"debug":         true,
 	"time":          true,
 	"math":          true,
+	"numeric":       true,
 	"math/rand":     true,
 	"encoding/json": true,
 	"encoding/gob":  true,

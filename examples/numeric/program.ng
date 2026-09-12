@@ -1,0 +1,22 @@
+package main
+
+import (
+ "fmt"
+ "numeric"
+)
+
+func main() {
+ price := numeric.Money("19.99", "EUR")
+ total := price.Mul(numeric.Decimal("1.19"))
+ fmt.Println("Exact total:", total.String())
+ fmt.Println("Rounded display:", total.Fixed(2))
+ fmt.Println("Exact decimal sum:", numeric.Decimal("0.1").Add(numeric.Decimal("0.2")).String())
+ fmt.Println("Large integer:", numeric.BigInt("999999999999999999999999").Add(numeric.BigInt("1")).String())
+ third := numeric.Rational("1", "3")
+ fmt.Println("Fraction:", third.String(), "display:", third.Fixed(6))
+ vector := numeric.Vec2(3, 4)
+ point := numeric.Coordinate(10, 20).Translate(vector)
+ fmt.Println("Vector length:", vector.Norm(), "point:", point.X, point.Y)
+ cross := numeric.Vec3(1, 0, 0).Cross(numeric.Vec3(0, 1, 0))
+ fmt.Println("Cross product:", cross.X, cross.Y, cross.Z)
+}

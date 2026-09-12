@@ -55,9 +55,19 @@ func sendMessage(msg map[string]any) {
 	}
 }
 
-func ConsoleLog(s string)   { sendMessage(map[string]any{"type": "log", "text": s}) }
-func ConsoleWarn(s string)  { sendMessage(map[string]any{"type": "warn", "text": s}) }
-func ConsoleError(s string) { sendMessage(map[string]any{"type": "error", "text": s}) }
+// A scalar hook builds the message in JS, avoiding a Go map and several
+// object/property crossings for each console line. Older hosts keep working.
+func sendConsole(kind, text string) {
+	if hook := js.Global().Get("nanoGoPostConsole"); hook.Type() == js.TypeFunction {
+		hook.Invoke(kind, text)
+		return
+	}
+	sendMessage(map[string]any{"type": kind, "text": text})
+}
+
+func ConsoleLog(s string)   { sendConsole("log", s) }
+func ConsoleWarn(s string)  { sendConsole("warn", s) }
+func ConsoleError(s string) { sendConsole("error", s) }
 
 // ---------------- DOM helpers --------------------
 

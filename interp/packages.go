@@ -47,6 +47,7 @@ func init() {
 		"debug":         registerDebugPackage,
 		"time":          registerTimePackage,
 		"math":          registerMathPackage,
+		"numeric":       registerNumericPackage,
 		"math/rand":     registerRandPackage,
 		"encoding/json": registerJSONPackage,
 		"encoding/gob":  registerGobPackage,
@@ -326,6 +327,13 @@ func registerTimePackage(vm *Interpreter) {
 		duration, err := millisecondsDuration(ToInt(args[0]), "time.Sleep")
 		if err != nil {
 			return nil, err
+		}
+		if duration == 0 {
+			return nil, ctx.Err()
+		}
+		if ctx.Done() == nil {
+			time.Sleep(duration)
+			return nil, nil
 		}
 		timer := time.NewTimer(duration)
 		defer timer.Stop()
@@ -831,7 +839,7 @@ func nativeStringArg(value any) string {
 
 func registerSyncPackage(vm *Interpreter) {
 	// --- sync.WaitGroup ---
-	// We expose a struct type WaitGroup with methods Add/Done/Wait, backed by Go's sync.WaitGroup.
+	// Expose Add/Done/Wait with a cancellation-aware completion signal.
 	wgType := &TypeDef{Name: "WaitGroup", Kind: "struct", Fields: []FieldDef{}, Methods: map[string]*Function{}}
 	vm.types[wgType.Name] = wgType
 	wgType.Methods["Add"] = &Function{Name: "Add", RecvType: "WaitGroup", Params: []string{"delta"}, Native: func(args []any) (any, error) {
@@ -1385,38 +1393,29 @@ func registerStoragePackage(vm *Interpreter) {
 // timed-out execution wait forever.
 type nativeWaitGroup struct {
 	mu sync.Mutex
-	n  int
-	// doneState is published atomically whenever Add transitions from zero
-	// to positive. Wait only needs the current generation's channel, so the
-	// uncontended read path no longer takes the mutex on every Wait call.
-	doneState atomic.Pointer[waitGroupDone]
+	n  atomic.Int64
+	// Allocate a completion channel only when someone actually waits for
+	// unfinished work. Short worker batches commonly finish before Wait.
+	done chan struct{} // guarded by mu; belongs to one generation
 }
 
-type waitGroupDone struct{ ch chan struct{} }
-
 func newNativeWaitGroup() *nativeWaitGroup {
-	done := make(chan struct{})
-	close(done)
-	w := &nativeWaitGroup{}
-	w.doneState.Store(&waitGroupDone{ch: done})
-	return w
+	return &nativeWaitGroup{}
 }
 
 func (w *nativeWaitGroup) Add(delta int) error {
 	w.mu.Lock()
-	previous := w.n
-	next := previous + delta
+	previous := w.n.Load()
+	next := previous + int64(delta)
 	if next < 0 {
 		w.mu.Unlock()
 		return NewRuntimeError("sync: negative WaitGroup counter")
 	}
-	if previous == 0 && next > 0 {
-		w.doneState.Store(&waitGroupDone{ch: make(chan struct{})})
+	if previous > 0 && next == 0 && w.done != nil {
+		close(w.done)
+		w.done = nil
 	}
-	w.n = next
-	if previous > 0 && next == 0 {
-		close(w.doneState.Load().ch)
-	}
+	w.n.Store(next)
 	w.mu.Unlock()
 	return nil
 }
@@ -1425,7 +1424,19 @@ func (w *nativeWaitGroup) Wait(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	done := w.doneState.Load().ch
+	if w.n.Load() == 0 {
+		return ctx.Err()
+	}
+	w.mu.Lock()
+	if w.n.Load() == 0 {
+		w.mu.Unlock()
+		return ctx.Err()
+	}
+	if w.done == nil {
+		w.done = make(chan struct{})
+	}
+	done := w.done
+	w.mu.Unlock()
 	ctxDone := ctx.Done()
 	if ctxDone == nil {
 		<-done
@@ -1475,8 +1486,12 @@ func ensureNativeWG(v any) *nativeWaitGroup {
 }
 
 type nativeTimer struct {
-	stop chan struct{}
-	once sync.Once
+	ticker     *time.Ticker
+	stop       chan struct{}
+	once       sync.Once
+	mu         sync.Mutex
+	deadline   *time.Timer
+	stopParent func() bool
 }
 
 const maxDurationMilliseconds = int64(1<<63-1) / int64(time.Millisecond)
@@ -1494,7 +1509,20 @@ func millisecondsDuration(milliseconds int, operation string) (time.Duration, er
 func (timer *nativeTimer) Stop() bool {
 	stopped := false
 	timer.once.Do(func() {
-		close(timer.stop)
+		if timer.stop != nil {
+			close(timer.stop)
+		}
+		timer.mu.Lock()
+		if timer.ticker != nil {
+			timer.ticker.Stop()
+		}
+		if timer.deadline != nil {
+			timer.deadline.Stop()
+		}
+		if timer.stopParent != nil {
+			timer.stopParent()
+		}
+		timer.mu.Unlock()
 		stopped = true
 	})
 	return stopped
@@ -1513,41 +1541,66 @@ func newNativeTimer(ctx context.Context, milliseconds int, repeating bool) (*Str
 		return nil, err
 	}
 	channel := &ChannelVal{ElementType: "int", C: make(chan any, 1)}
-	timer := &nativeTimer{stop: make(chan struct{})}
+	timer := &nativeTimer{}
 	typeName := "Timer"
 	if repeating {
 		typeName = "Ticker"
 	}
 	value := &StructVal{TypeName: typeName, Fields: map[string]any{"C": channel, "__nativeTimer": timer}}
 	value.nativeState.Store(&structNativeState{value: timer})
+	if !repeating {
+		// A pending one-shot needs no parked forwarding goroutine or second
+		// channel. Stop/cancellation remove the runtime timer synchronously.
+		timer.mu.Lock()
+		firesAt := time.Now().Add(duration)
+		timer.deadline = time.AfterFunc(duration, func() {
+			timer.mu.Lock()
+			if timer.stopParent != nil {
+				timer.stopParent()
+			}
+			timer.mu.Unlock()
+			if ctx.Err() == nil {
+				_, _ = channel.TrySend(int(firesAt.UnixMilli()))
+			}
+		})
+		if ctx.Done() != nil {
+			timer.stopParent = context.AfterFunc(ctx, func() {
+				timer.mu.Lock()
+				timer.deadline.Stop()
+				timer.mu.Unlock()
+			})
+		}
+		timer.mu.Unlock()
+		return value, nil
+	}
+	timer.stop = make(chan struct{})
+	timer.ticker = time.NewTicker(duration)
+	ctxDone := ctx.Done()
 
 	go func() {
-		if !repeating {
-			deadline := time.NewTimer(duration)
-			defer deadline.Stop()
-			select {
-			case now := <-deadline.C:
-				_, _ = channel.TrySend(int(now.UnixMilli()))
-			case <-timer.stop:
-			case <-ctx.Done():
-			}
-			return
-		}
-
-		ticker := time.NewTicker(duration)
+		ticker := timer.ticker
 		defer ticker.Stop()
 		for {
 			select {
 			case now := <-ticker.C:
-				_, _ = channel.TrySend(int(now.UnixMilli()))
+				publishTimerTick(channel, now)
 			case <-timer.stop:
 				return
-			case <-ctx.Done():
+			case <-ctxDone:
 				return
 			}
 		}
 	}()
 	return value, nil
+}
+
+func publishTimerTick(ch *ChannelVal, now time.Time) {
+	// Tickers drop ticks under backpressure. Check before boxing UnixMilli
+	// into any; slow consumers otherwise allocate once per discarded tick.
+	if cap(ch.C) > 0 && len(ch.C) == cap(ch.C) {
+		return
+	}
+	_, _ = ch.TrySend(int(now.UnixMilli()))
 }
 
 func stopNativeTimer(v any) bool {

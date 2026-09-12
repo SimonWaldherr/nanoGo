@@ -98,6 +98,10 @@ function postFromGuest(msg) {
   postGuestPayload(self.postMessage, msg);
 }
 
+function postConsoleFromGuest(type, text) {
+  postFromGuest({ type, text });
+}
+
 // parseStats parses the JSON string a stats-aware WASM build returns from
 // nanoGoRun/nanoGoAst/nanoGoBench. Older builds return undefined -> null.
 function parseStats(raw) {
@@ -125,6 +129,13 @@ function workspaceSnapshotFor(msg) {
     return _workspaceSnapshot;
   }
   return null;
+}
+
+function workspaceInput(snapshot) {
+  // Negotiate with the loaded binary: older WASM builds expect an array.
+  if (self.nanoGoWorkspaceJSON !== true) return snapshot.files;
+  if (snapshot.json === undefined) snapshot.json = JSON.stringify(snapshot.files);
+  return snapshot.json;
 }
 
 self.onmessage = async function (ev) {
@@ -243,7 +254,7 @@ self.onmessage = async function (ev) {
         self.postMessage({ type: 'workspace-done', error: 'workspace snapshot is unavailable; sync it before running' });
         return;
       }
-      const stats = parseStats(self.nanoGoRunWorkspace(snapshot.files, snapshot.modulePath, !!msg.trace, !!msg.profile));
+      const stats = parseStats(self.nanoGoRunWorkspace(workspaceInput(snapshot), snapshot.modulePath, !!msg.trace, !!msg.profile));
       flushBatch();
       if (!stats) {
         self.postMessage({ type: 'workspace-done', error: 'workspace run returned no data' });
@@ -267,7 +278,7 @@ self.onmessage = async function (ev) {
         self.postMessage({ type: 'workspace-check-result', error: 'workspace snapshot is unavailable; sync it before checking' });
         return;
       }
-      const result = parseStats(self.nanoGoWorkspaceCheck(snapshot.files, snapshot.modulePath));
+      const result = parseStats(self.nanoGoWorkspaceCheck(workspaceInput(snapshot), snapshot.modulePath));
       if (!result) {
         self.postMessage({ type: 'workspace-check-result', error: 'workspace check returned no data' });
       } else if (result.error) {
@@ -291,7 +302,7 @@ self.onmessage = async function (ev) {
         self.postMessage({ type: 'workspace-test-result', error: 'workspace snapshot is unavailable; sync it before testing' });
         return;
       }
-      const result = parseStats(self.nanoGoTestWorkspace(snapshot.files, snapshot.modulePath, String(msg.filter || '')));
+      const result = parseStats(self.nanoGoTestWorkspace(workspaceInput(snapshot), snapshot.modulePath, String(msg.filter || '')));
       if (!result) {
         self.postMessage({ type: 'workspace-test-result', error: 'workspace tests returned no data' });
       } else if (result.error) {
@@ -460,6 +471,20 @@ function getCapabilities() {
   };
 }
 
+async function instantiateWasm(url, imports) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error('WASM fetch failed: HTTP ' + response.status);
+  const mime = (response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+  if (mime === 'application/wasm' && typeof WebAssembly.instantiateStreaming === 'function') {
+    // Compile while downloading. Compile/link failures are real failures;
+    // retrying the same module would only repeat the download and work.
+    return (await WebAssembly.instantiateStreaming(response, imports)).instance;
+  }
+  // Reuse the fetched response for hosts with a missing/wrong MIME type.
+  // No second request or cloned response retaining the whole download.
+  return (await WebAssembly.instantiate(await response.arrayBuffer(), imports)).instance;
+}
+
 async function initWasmWorker() {
   if (goReady) return;
   importScripts('wasm_exec.js');
@@ -473,6 +498,7 @@ async function initWasmWorker() {
   // Hook for runtime to call to send structured messages to host.
   // Routed through the batching layer above.
   self.nanoGoPostMessage = postFromGuest;
+  self.nanoGoPostConsole = postConsoleFromGuest;
 
   // Bump this whenever nanogo.wasm is rebuilt. Unlike the other assets here,
   // the .wasm binary was fetched by plain URL with no cache-busting query at
@@ -483,22 +509,7 @@ async function initWasmWorker() {
 
   // Prefer streaming instantiation: starts compilation while bytes are
   // still arriving and avoids buffering the full module in memory.
-  let instance;
-  try {
-    if (typeof WebAssembly.instantiateStreaming === 'function') {
-      const result = await WebAssembly.instantiateStreaming(fetch(WASM_URL), go.importObject);
-      instance = result.instance;
-    } else {
-      throw new Error('instantiateStreaming unavailable');
-    }
-  } catch (e) {
-    // Fallback path for servers that don't serve application/wasm with
-    // the correct MIME type, or for older runtimes.
-    const resp = await fetch(WASM_URL);
-    const buf = await resp.arrayBuffer();
-    const result = await WebAssembly.instantiate(buf, go.importObject);
-    instance = result.instance;
-  }
+  const instance = await instantiateWasm(WASM_URL, go.importObject);
 
   // Run the Go program (this registers nanoGo* globals via syscall/js).
   go.run(instance);

@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -54,7 +53,7 @@ type Tracer struct {
 	capacity int
 	next     int
 	wrapped  bool
-	sequence atomic.Uint64
+	sequence uint64
 }
 
 // breakpointSet is immutable after publication, so evaluator goroutines can
@@ -114,14 +113,39 @@ func (t *Tracer) Events() []TraceEvent {
 	if t == nil {
 		return nil
 	}
+	return t.EventsSince(0)
+}
+
+// EventsSince returns retained events newer than sequence in chronological
+// order. Pollers can keep the last returned Sequence to avoid repeatedly
+// copying the whole ring. A gap before the first returned sequence means
+// events were overwritten or discarded by Reset. Sequence numbers remain
+// monotonic across Reset. An up-to-date cursor returns nil without allocating.
+func (t *Tracer) EventsSince(sequence uint64) []TraceEvent {
+	if t == nil {
+		return nil
+	}
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	if !t.wrapped {
-		return append([]TraceEvent(nil), t.events...)
+	n := len(t.events)
+	if n == 0 {
+		return nil
 	}
-	out := make([]TraceEvent, 0, len(t.events))
-	out = append(out, t.events[t.next:]...)
-	out = append(out, t.events[:t.next]...)
+	start := 0
+	if t.wrapped {
+		start = t.next
+	}
+	// Binary search logical ring indices without materializing a full copy.
+	first := sort.Search(n, func(i int) bool {
+		return t.events[(start+i)%n].Sequence > sequence
+	})
+	if first == n {
+		return nil
+	}
+	out := make([]TraceEvent, n-first)
+	offset := (start + first) % n
+	copied := copy(out, t.events[offset:])
+	copy(out[copied:], t.events[:start])
 	return out
 }
 
@@ -131,6 +155,7 @@ func (t *Tracer) Reset() {
 		return
 	}
 	t.mu.Lock()
+	clear(t.events) // Release messages and assertion arguments held by the ring.
 	t.events = t.events[:0]
 	t.next = 0
 	t.wrapped = false
@@ -141,10 +166,11 @@ func (t *Tracer) record(event TraceEvent) {
 	if t == nil {
 		return
 	}
-	event.Sequence = t.sequence.Add(1)
-	event.At = time.Now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.sequence++
+	event.Sequence = t.sequence
+	event.At = time.Now()
 	if len(t.events) < t.capacity {
 		t.events = append(t.events, event)
 		return

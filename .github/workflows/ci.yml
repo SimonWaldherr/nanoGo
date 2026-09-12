@@ -41,6 +41,9 @@ jobs:
       - name: Unit tests
         run: make test
 
+      - name: Browser regression tests
+        run: make test-web
+
       - name: CLI tests
         run: go test ./cmd/cli
 

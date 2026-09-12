@@ -76,7 +76,7 @@ func BenchmarkASTPreparationDeepBlocks(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = buildLitCaches(file)
+		_, _, _, _ = buildLitCaches(file)
 		_ = buildReusableBlockSet(file)
 	}
 }

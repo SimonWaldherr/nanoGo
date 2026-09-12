@@ -1,5 +1,28 @@
 /* global window */
 window.EXAMPLES = {
+  "Numbers & Geometry": `package main
+
+import (
+ "fmt"
+ "numeric"
+)
+
+func main() {
+ price := numeric.Money("19.99", "EUR")
+ total := price.Mul(numeric.Decimal("1.19"))
+ fmt.Println("Exact total:", total.String())
+ fmt.Println("Rounded display:", total.Fixed(2))
+ fmt.Println("Exact decimal sum:", numeric.Decimal("0.1").Add(numeric.Decimal("0.2")).String())
+ fmt.Println("Large integer:", numeric.BigInt("999999999999999999999999").Add(numeric.BigInt("1")).String())
+ third := numeric.Rational("1", "3")
+ fmt.Println("Fraction:", third.String(), "display:", third.Fixed(6))
+ vector := numeric.Vec2(3, 4)
+ point := numeric.Coordinate(10, 20).Translate(vector)
+ fmt.Println("Vector length:", vector.Norm(), "point:", point.X, point.Y)
+ cross := numeric.Vec3(1, 0, 0).Cross(numeric.Vec3(0, 1, 0))
+ fmt.Println("Cross product:", cross.X, cross.Y, cross.Z)
+}
+`,
   "Basics": `package main
 
 import "fmt"
@@ -244,64 +267,113 @@ import (
   "time"
 )
 
-func lifeStep(g [][]int) [][]int {
-  h := len(g)
-  w := len(g[0])
-  nxt := make([][]int, h)
-  for y := 0; y < h; y++ {
-    row := make([]int, w)
-    for x := 0; x < w; x++ {
-      n := 0
-      for dy := -1; dy <= 1; dy++ {
-        for dx := -1; dx <= 1; dx++ {
-          if dx == 0 && dy == 0 { continue }
-          yy := (y+dy+h)%h; xx := (x+dx+w)%w
-          if g[yy][xx] == 1 { n++ }
-        }
-      }
-      if g[y][x] == 1 { if n < 2 || n > 3 { row[x] = 0 } else { row[x] = 1 } } else { if n == 3 { row[x] = 1 } }
-    }
-    nxt[y] = row
-  }
-  return nxt
+// 32 cells per word, two reusable buffers, toroidal boundaries.
+func lifeStep(src []int, dst []int, words int, height int, bits int) {
+	shift := bits - 1
+	high := 1 << shift
+	half := high - 1
+	mask := half | high
+	for y := 0; y < height; y++ {
+		row := y * words
+		above := row - words
+		below := row + words
+		if y == 0 {
+			above = (height - 1) * words
+		}
+		if y == height-1 {
+			below = 0
+		}
+		for x := 0; x < words; x++ {
+			left := x - 1
+			right := x + 1
+			if x == 0 {
+				left = words - 1
+			}
+			if x == words-1 {
+				right = 0
+			}
+			{
+				// Four values per scope fit nanoGo's unboxed integer locals.
+				loA, hiA, loB, hiB := 0, 0, 0, 0
+				{
+					mid := src[above+x]
+					a := (mid << 1) | ((src[above+left] >> shift) & 1)
+					b := ((mid >> 1) & half) | ((src[above+right] & 1) << shift)
+					low := a ^ b
+					loA = low ^ mid
+					hiA = (a & b) | (low & mid)
+				}
+				{
+					mid := src[below+x]
+					a := (mid << 1) | ((src[below+left] >> shift) & 1)
+					b := ((mid >> 1) & half) | ((src[below+right] & 1) << shift)
+					low := a ^ b
+					loB = low ^ mid
+					hiB = (a & b) | (low & mid)
+				}
+				{
+					mid := src[row+x]
+					a := (mid << 1) | ((src[row+left] >> shift) & 1)
+					b := ((mid >> 1) & half) | ((src[row+right] & 1) << shift)
+					low := loA ^ loB
+					loB = (loA & loB) | (low & (a ^ b)) // carry from ones
+					loA = low ^ a ^ b                   // ones
+					low = hiA ^ hiB
+					a = a & b
+					b = a ^ loB
+					hiA = (hiA & hiB) | (a & loB) | (low & b) // fours
+					hiB = low ^ b                             // twos
+					dst[row+x] = hiB &^ hiA & (loA | mid) & mask
+				}
+			}
+		}
+	}
 }
 
-func newLifeGrid(w int, h int) [][]int {
-  grid := make([][]int, h)
-  for y := 0; y < h; y++ {
-    row := make([]int, w)
-    for x := 0; x < w; x++ {
-      // A moderate density makes the first generations interesting without
-      // immediately filling the whole board.
-      if rand.Intn(100) < 29 { row[x] = 1 }
+
+// Update only cells that changed since the last displayed generation.
+func drawLife(grid []int, drawn []int, words int) {
+  for y := 0; y*words < len(grid); y++ {
+    for column := 0; column < words; column++ {
+      i := y*words+column
+      word := grid[i]
+      changed := word ^ drawn[i]
+      if changed != 0 {
+        x := column*32
+        for bit := 0; changed != 0; bit++ {
+          if changed&1 != 0 { browser.CanvasSet(x+bit, y, (word>>bit)&1 != 0) }
+          changed = (changed>>1)&2147483647
+        }
+        drawn[i] = word
+      }
     }
-    grid[y] = row
   }
-  return grid
+  browser.CanvasFlush()
 }
 
 func main() {
-  fmt.Println("Game of Life — 100 generations per random seed")
-  // This compact field keeps two 100-generation rounds inside the
-  // playground's deterministic evaluator step limit while still animating.
-  w, h := 12, 8
-  browser.CanvasSize(w, h)
+  words, height := 3, 48
+  fmt.Println("Bit-parallel Life: 96x48, two 100-generation rounds")
   for round := 1; round <= 2; round++ {
-    // The millisecond clock ensures that the second 100-generation round
-    // starts from a genuinely new random seed.
-    seed := time.Now() + round
-    rand.Seed(seed)
-    fmt.Println("round", round, "seed", seed)
-    grid := newLifeGrid(w, h)
-    for generation := 0; generation < 100; generation++ {
-      for y := 0; y < h; y++ {
-        for x := 0; x < w; x++ {
-          browser.CanvasSet(x, y, grid[y][x] == 1)
-        }
+    browser.CanvasSize(words*32, height)
+    rand.Seed(time.Now()+round)
+    grid := make([]int, words*height)
+    next := make([]int, words*height)
+    drawn := make([]int, words*height)
+    for i := 0; i < len(grid); i++ {
+      for bit := 0; bit < 32; bit++ {
+        if rand.Intn(100) < 29 { grid[i] |= 1 << bit }
       }
-      browser.CanvasFlush()
-      grid = lifeStep(grid)
-      time.Sleep(30)
+    }
+    drawLife(grid, drawn, words)
+    for generation := 1; generation <= 100; generation++ {
+      lifeStep(grid, next, words, height, 32)
+      grid, next = next, grid
+      // Simulation and rendering are separate: four generations per frame.
+      if generation%4 == 0 {
+        drawLife(grid, drawn, words)
+        time.Sleep(40)
+      }
     }
     fmt.Println("round", round, "complete")
   }

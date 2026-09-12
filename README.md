@@ -822,6 +822,13 @@ for _, event := range tracer.Events() {
 }
 ```
 
+For a live host UI, poll `tracer.EventsSince(cursor)` and advance `cursor` to
+its last returned `Sequence`. This copies only new retained events; an idle
+poll allocates nothing. Sequence numbers stay monotonic across `Reset()`.
+A gap between your cursor and the first returned sequence means events were
+overwritten by the bounded ring or cleared by a reset. Concurrent producers
+are recorded in sequence and timestamp order.
+
 The tracer is in-memory and bounded; it does not grant the guest filesystem or
 network access. See [examples/capabilities](examples/capabilities) and
 [examples/debug_trace](examples/debug_trace) for runnable host programs.
@@ -1304,7 +1311,33 @@ and `runtime` import `syscall/js` and must be built for `GOOS=js GOARCH=wasm`,
 while `samples/` intentionally contains multiple independent `main` programs.
 Use `make build-wasm` to verify the WASM target instead.
 
+## Exact numbers and geometry
+
+The built-in `numeric` package works in native and WebAssembly interpreters.
+[Runnable example and API details](examples/numeric/README.md):
+
+```go
+import "numeric"
+
+price := numeric.Money("19.99", "EUR")
+total := price.Mul(numeric.Decimal("1.19"))
+fmt.Println(total.Fixed(2)) // 23.79; total retains the exact amount 23.7881
+v := numeric.Vec2(3, 4)
+p := numeric.Coordinate(10, 20).Translate(v) // (13, 24)
+```
+
+`Decimal`, `BigInt`, `Rational` and `Money` accept strings to preserve exact
+values. Use explicit methods (`Add`, `Sub`, `Mul`, `Div`, `Cmp`) for arithmetic;
+scalar operators and `++`/`--` reject these values. `Vec2`, `Vec3` and Cartesian
+`Coordinate` use finite float64 components. Exact numeric fields remain strings
+in JSON and host exports, including amounts above JavaScript's safe integer range.
+
 ## ⚡ Performance & Deployment
+
+The [bit-parallel Game of Life sample](samples/game_of_life) processes 32 cells
+per word and reuses two buffers. It also powers the playground’s Life demo.
+See its README for correctness tests, constraints and comparisons against
+the alternative kernels.
 
 The interpreter keeps common guest-code paths allocation-conscious: tight
 integer and float expressions, static string-keyed map counters, single-value
@@ -1312,6 +1345,27 @@ integer and float expressions, static string-keyed map counters, single-value
 execution paths. These optimizations preserve source-level semantics while
 avoiding temporary interpreter values; use the benchmarks in
 `interp/bench_test.go` to measure your workload on its target hardware.
+Numeric operator dispatch has direct int/int and float64/float64 paths for
+arithmetic and comparisons, plus integer bit operations. Integer division also
+stays in the unboxed expression evaluator: a declaration such as `q := 7/2`
+now yields integer `3` instead of accidentally entering the float path.
+Single-value assignments reuse a stack slot for the RHS, including compound
+arithmetic assignments. Native calls (including all supported `math` functions)
+skip guest-frame allocation while retaining tracing and panic conversion.
+Run `BenchmarkNumericOperators` and `BenchmarkMathWorkloads` for focused checks.
+
+Normal and package-qualified function calls allocate their argument buffer only
+once, preserving left-to-right evaluation, slice expansion and host ownership
+of argument slices. `BenchmarkFibRecursive` measures the benefit for recursive
+guest calls; `BenchmarkMathAndHTTPFacade` covers package dispatch.
+
+`Run`/`RunContext` also decode string and rune literals once per execution,
+including escaped string keys in map-counter loops. The read-only cache reuses
+boxed immutable values across guest goroutines without adding locks to literal
+reads. ASTs introduced by the package loader or hot swapping fall back to normal
+decoding. Checkpoints, step limits and source locations are unchanged. Measure
+these paths with `go test ./interp -run '^$' -bench BenchmarkVMLiterals -benchmem`.
+
 Bounded `ImportReader` operations also reuse trustworthy in-memory reader
 length hints and transfer their private input buffer directly into the VFS;
 public `WriteFile` and `ReadFile` calls retain defensive copies.
@@ -1518,3 +1572,11 @@ Under the condition that:
 **⭐ Star this project if you find it useful!**
 
 *Bringing the elegance of Go to the browser, one goroutine at a time.*
+
+### Browser regression checks
+
+Run `make test-web` with Node.js installed. These tests exercise console burst
+buffering, scroll preservation, and Unicode share links without loading WASM.
+The console retains the latest 100 lines even while painting is paused; all
+output still passes through the existing embedding message API. Scroll to the
+bottom to resume following output automatically.

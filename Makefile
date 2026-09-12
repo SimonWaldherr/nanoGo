@@ -1,4 +1,4 @@
-.PHONY: all build-wasm build-wasm-compressed build-cli build-mcp build-repl run-demo clean test test-race vet vet-wasm fmt-check fuzz benchmark benchmark-go profile-cpu profile-mem trace tidy size-report
+.PHONY: all build-wasm build-wasm-compressed build-cli build-mcp build-repl run-demo clean test test-web test-race vet vet-wasm fmt-check fuzz benchmark benchmark-go profile-cpu profile-mem trace tidy size-report
 
 MODULE := simonwaldherr.de/go/nanogo
 
@@ -59,6 +59,9 @@ run-demo: build-cli
 # ---------- Tests ----------
 test:
 	go test ./interp ./interp/loader ./interp/index ./cmd/mcp ./cmd/repl
+
+test-web:
+	node --test web/tests/*.test.cjs
 
 # Race detection only finds concurrent paths that execute. Keep it as a
 # first-class target for the interpreter, loader and public hosts.

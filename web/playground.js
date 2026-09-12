@@ -83,7 +83,7 @@
         },
         'Life': {
           output: 'canvas',
-          description: 'Two 100-generation Conway Life rounds with fresh random seeds',
+          description: '96×48 bit-parallel Life, 32 cells per word and two 100-generation rounds',
           badge: 'Simulation',
           tags: ['Simulation', 'Animation', 'Graphics']
         },
@@ -1072,6 +1072,7 @@
       // of one per line. Fading is handled by the periodic interval below.
       // type: 'output' | 'error' | 'warn' | 'system' (default: 'output')
       let pendingLogLines = [];
+      let pendingLogStart = 0;
       let logFlushScheduled = false;
 
       // Matches the "line:col: " prefix RuntimeError.Error() and go/parser
@@ -1086,7 +1087,13 @@
           const m = ERROR_LOCATION_RE.exec(String(message));
           if (m) loc = { line: parseInt(m[1], 10), col: parseInt(m[2], 10) };
         }
-        pendingLogLines.push({ message: String(message), type: type || 'output', loc: loc || null });
+        const entry = { message: String(message), type: type || 'output', loc: loc || null };
+        // Keep only the visible tail even when animation frames are suspended.
+        if (pendingLogLines.length < maxLogLines) pendingLogLines.push(entry);
+        else {
+          pendingLogLines[pendingLogStart] = entry;
+          pendingLogStart = (pendingLogStart + 1) % maxLogLines;
+        }
         scheduleLogFlush();
         if (loc) highlightErrorLine(loc.line);
         postOutputToHost(String(message), type || 'output');
@@ -1114,7 +1121,10 @@
         logFlushScheduled = false;
         if (pendingLogLines.length === 0) return;
         const batch = pendingLogLines;
+        const batchStart = pendingLogStart;
         pendingLogLines = [];
+        pendingLogStart = 0;
+        const followOutput = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight <= 24;
 
         // Only the tail can stay visible anyway — skip DOM work for the rest.
         const start = Math.max(0, batch.length - maxLogLines);
@@ -1122,7 +1132,7 @@
         const fragment = document.createDocumentFragment();
         const now = Date.now();
         for (let i = start; i < batch.length; i++) {
-          const { message, type, loc } = batch[i];
+          const { message, type, loc } = batch[(batchStart + i) % batch.length];
           const lineElement = document.createElement('div');
           lineElement.className = 'log-line log-' + type;
           lineElement.textContent = `[${timestamp}] ${message}`;
@@ -1150,7 +1160,7 @@
           }
         }
 
-        logEl.scrollTop = logEl.scrollHeight;
+        if (followOutput) logEl.scrollTop = logEl.scrollHeight;
       }
 
       function updateLogLinesFading() {
@@ -1173,6 +1183,8 @@
       }
 
       function clearLog() {
+        pendingLogLines = [];
+        pendingLogStart = 0;
         logEl.innerHTML = "";
         logLines = [];
         if (execTimeEl) execTimeEl.textContent = '';
@@ -2546,7 +2558,7 @@
         const total = events.length;
         if (traceMetaEl) {
           traceMetaEl.textContent = total + ' event(s)' +
-            (traceCap && total >= traceCap ? ' (ring buffer full — oldest dropped)' : '');
+            (total && events[0].seq > 1 ? ' (' + (events[0].seq - 1) + ' older event(s) dropped)' : '');
         }
         if (total === 0) {
           traceTableEl.innerHTML = '<p class="inspector-note">No events recorded.</p>';
@@ -2880,7 +2892,10 @@
       // for the `#code=` hash — shared by the Share button, the Embed
       // popup, and the outgoing postMessage API below.
       function encodeCodeForURL(code) { return btoa(unescape(encodeURIComponent(code))); }
-      function decodeCodeFromURL(b64) { return decodeURIComponent(atob(b64)); }
+      function decodeCodeFromURL(b64) {
+        const bytes = Uint8Array.from(atob(b64), char => char.charCodeAt(0));
+        return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      }
       function buildShareURL() { return location.origin + location.pathname + "#code=" + encodeCodeForURL(getSource()); }
 
       // Share functionality
