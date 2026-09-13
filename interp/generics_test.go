@@ -1,9 +1,42 @@
 package interp
 
 import (
+	"go/parser"
+	"go/types"
 	"strings"
 	"testing"
 )
+
+func TestGenericTypeExprFastPath(t *testing.T) {
+	for _, name := range []string{"int", "int64", "float64", "string", "bool", "byte", "rune", "any", "error", "Missing", "true", "nil", "[]int", "map[string]int", "*int", "func(int) string"} {
+		t.Run(name, func(t *testing.T) {
+			expr, err := parser.ParseExpr(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, gotErr := genericTypeExpr(expr)
+			// Parenthesized expressions use the original formatting path.
+			wrapped, err := parser.ParseExpr("(" + name + ")")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, wantErr := genericTypeExpr(wrapped)
+			if (gotErr == nil) != (wantErr == nil) || (gotErr == nil && !types.Identical(got, want)) {
+				t.Fatalf("direct: %v, %v; formatted: %v, %v", got, gotErr, want, wantErr)
+			}
+		})
+	}
+}
+
+func TestGenericManyTypeArguments(t *testing.T) {
+	out := runAndCapture(t, `package main
+import "fmt"
+func Pick[A,B,C,D,E any](a A,b B,c C,d D,e E)E{return e}
+func main(){fmt.Println(Pick[int,string,bool,float64,int](1,"x",true,2.0,3),Pick[int,string,bool,float64,string](1,"x",true,2.0,"last"))}`)
+	if out != "3 last\n" {
+		t.Fatalf("got %q", out)
+	}
+}
 
 func TestGenericFunctions(t *testing.T) {
 	out := runAndCapture(t, `package main
@@ -109,6 +142,19 @@ func BenchmarkGenericCachedCall(b *testing.B) {
 	const src = `package main
 func Add[T ~int](a,b T)T{return a+b}
 func main(){f:=Add[int];for i:=0;i<1000;i++{_=f(i,1)}}`
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := vm.Run(src); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkGenericExplicitCall(b *testing.B) {
+	vm, _ := newTestVM()
+	const src = `package main
+func Add[T ~int](a,b T)T{return a+b}
+func main(){for i:=0;i<1000;i++{_=Add[int](i,1)}}`
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		if err := vm.Run(src); err != nil {

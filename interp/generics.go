@@ -71,6 +71,10 @@ func (g *genericFunction) prepare() error {
 }
 
 func genericTypeExpr(expr ast.Expr) (types.Type, error) {
+	// Builtin type arguments need no AST formatting or parser round trip.
+	if identifier, ok := expr.(*ast.Ident); ok {
+		return genericTypeName(identifier.Name)
+	}
 	var text bytes.Buffer
 	if err := format.Node(&text, token.NewFileSet(), expr); err != nil {
 		return nil, err
@@ -270,9 +274,19 @@ func (g *genericFunction) instantiate(fn *Function, arguments []types.Type) (*Fu
 	if len(arguments) != g.signature.TypeParams().Len() {
 		return nil, fmt.Errorf("generic %s: expected %d type arguments, got %d", fn.Name, g.signature.TypeParams().Len(), len(arguments))
 	}
-	names := make([]string, len(arguments))
+	var nameBuffer [4]string
+	names := nameBuffer[:0]
+	if len(arguments) > len(nameBuffer) {
+		names = make([]string, len(arguments))
+	} else {
+		names = nameBuffer[:len(arguments)]
+	}
 	for i, typ := range arguments {
-		names[i] = types.TypeString(typ, nil)
+		if basic, ok := typ.(*types.Basic); ok {
+			names[i] = basic.Name()
+		} else {
+			names[i] = types.TypeString(typ, nil)
+		}
 	}
 	key := strings.Join(names, "\x00")
 	g.mu.Lock()
