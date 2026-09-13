@@ -44,11 +44,14 @@ var builtinPackageBuilders map[string]func(*Interpreter)
 func init() {
 	builtinPackageBuilders = map[string]func(*Interpreter){
 		"fmt":           registerFmtPackage,
+		"flag":          registerFlagPackage,
 		"debug":         registerDebugPackage,
 		"time":          registerTimePackage,
 		"math":          registerMathPackage,
 		"numeric":       registerNumericPackage,
 		"math/rand":     registerRandPackage,
+		"crypto/rand":   registerCryptoRandPackage,
+		"crypto/sha256": registerSHA256Package,
 		"encoding/json": registerJSONPackage,
 		"encoding/gob":  registerGobPackage,
 		"protobuf":      registerProtobufPackage,
@@ -120,6 +123,12 @@ func (vm *Interpreter) ensureBuiltinPackage(path string) (*Package, bool) {
 func registerFmtPackage(vm *Interpreter) {
 	// --- fmt ---
 	fmtPkg := &Package{Name: "fmt", Funcs: map[string]*Function{}}
+	fmtPkg.Funcs["Errorf"] = &Function{Name: "Errorf", IsVariadic: true, Native: func(args []any) (any, error) {
+		if len(args) == 0 {
+			return nil, NewRuntimeError("fmt.Errorf: missing format")
+		}
+		return fmt.Errorf(ToString(args[0]), args[1:]...), nil
+	}}
 	fmtPkg.Funcs["Println"] = &Function{Name: "Println", IsVariadic: true, Native: func(args []any) (any, error) {
 		if len(args) == 1 {
 			message := ToString(args[0])
@@ -152,7 +161,7 @@ func registerFmtPackage(vm *Interpreter) {
 		// Use host-provided sprintf wrapper to avoid re-implementing format parsing
 		sp, ok := vm.natives["__hostSprintf"]
 		if !ok {
-			return 0, NewRuntimeError("host sprintf not available")
+			sp = nativeSprintf
 		}
 		res, err := callHostSprintf(sp, args, format)
 		if err != nil {
@@ -171,7 +180,7 @@ func registerFmtPackage(vm *Interpreter) {
 		format := ToString(args[0])
 		sp, ok := vm.natives["__hostSprintf"]
 		if !ok {
-			return "", NewRuntimeError("host sprintf not available")
+			sp = nativeSprintf
 		}
 		res, err := callHostSprintf(sp, args, format)
 		if err != nil {
@@ -391,20 +400,38 @@ func registerMathPackage(vm *Interpreter) {
 
 func registerRandPackage(vm *Interpreter) {
 	// --- math/rand --- (small facade)
+	// Own the generator instead of seeding the host-global generator. Explicit
+	// Seed remains reproducible even on Go versions where rand.Seed is a no-op.
+	rng := mrand.New(mrand.NewSource(mrand.Int63()))
+	var mu sync.Mutex
 	randPkg := &Package{Name: "math/rand", Funcs: map[string]*Function{}}
 	randPkg.Funcs["Intn"] = &Function{Name: "Intn", Params: []string{"n"}, Native: func(args []any) (any, error) {
 		n := ToInt(args[0])
 		if n <= 0 {
-			return 0, nil
+			return nil, &panicError{value: "invalid argument to Intn"}
 		}
-		return mrand.Intn(n), nil
+		mu.Lock()
+		value := rng.Intn(n)
+		mu.Unlock()
+		return value, nil
 	}}
 	randPkg.Funcs["Seed"] = &Function{Name: "Seed", Params: []string{"seed"}, Native: func(args []any) (any, error) {
-		mrand.Seed(int64(ToInt(args[0])))
+		mu.Lock()
+		rng.Seed(int64(ToInt(args[0])))
+		mu.Unlock()
 		return nil, nil
 	}}
 	randPkg.Funcs["Float64"] = &Function{Name: "Float64", Native: func(args []any) (any, error) {
-		return mrand.Float64(), nil
+		mu.Lock()
+		value := rng.Float64()
+		mu.Unlock()
+		return value, nil
+	}}
+	randPkg.Funcs["Int"] = &Function{Name: "Int", Native: func([]any) (any, error) {
+		mu.Lock()
+		value := rng.Int()
+		mu.Unlock()
+		return value, nil
 	}}
 	vm.RegisterPackage("math/rand", randPkg)
 }
@@ -1892,8 +1919,40 @@ func registerOsPackage(vm *Interpreter) {
 		if len(args) < 2 {
 			return nil, NewRuntimeError("Setenv: need key and value")
 		}
-		vfs.Setenv(ToString(args[0]), ToString(args[1]))
+		key, value := ToString(args[0]), ToString(args[1])
+		if !validEnvironmentKey(key) || strlib.ContainsRune(value, 0) {
+			return stderrors.New("setenv: invalid argument"), nil
+		}
+		vfs.Setenv(key, value)
 		return nil, nil
+	}}
+	osPkg.Funcs["LookupEnv"] = &Function{Name: "LookupEnv", Params: []string{"key"}, Native: func(args []any) (any, error) {
+		if _, err := requireRead("os.LookupEnv", ""); err != nil {
+			return nil, err
+		}
+		value, found := vfs.LookupEnv(ToString(args[0]))
+		return ReturnValues{value, found}, nil
+	}}
+	osPkg.Funcs["Unsetenv"] = &Function{Name: "Unsetenv", Params: []string{"key"}, Native: func(args []any) (any, error) {
+		if _, err := requireWrite("os.Unsetenv", ""); err != nil {
+			return nil, err
+		}
+		key := ToString(args[0])
+		vfs.Unsetenv(key)
+		return nil, nil
+	}}
+	osPkg.Funcs["Clearenv"] = &Function{Name: "Clearenv", Native: func([]any) (any, error) {
+		if _, err := requireWrite("os.Clearenv", ""); err != nil {
+			return nil, err
+		}
+		vfs.Clearenv()
+		return nil, nil
+	}}
+	osPkg.Funcs["ExpandEnv"] = &Function{Name: "ExpandEnv", Params: []string{"text"}, Native: func(args []any) (any, error) {
+		if _, err := requireRead("os.ExpandEnv", ""); err != nil {
+			return nil, err
+		}
+		return expandEnvironment(ToString(args[0]), vfs.Getenv), nil
 	}}
 
 	// os.Environ() []string

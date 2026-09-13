@@ -959,9 +959,10 @@ nanoGo implements a **tree-walking interpreter** that parses Go source code into
 
 nanoGo includes a curated set of built-in packages:
 
-- **Core**: `fmt`, `sync`, `time`, `reflect`, `runtime`, `runtime/debug`
+- **Core**: `fmt`, `flag`, `sync`, `time`, `reflect`, `runtime`, `runtime/debug`
 - **Data**: `encoding/json` (also available as `json`), `encoding/gob`, `errors`, `bytes`, `strings`, `regexp`, `sort`, `slices`, `strconv`, `path`, `unicode/utf8`
 - **Math**: selected `math` and `math/rand` functions
+- **Cryptography**: `crypto/rand.Read`, `crypto/sha256.Sum256`, `Size`, `BlockSize`
 - **Text & tooling**: `text/template`, `debug`, and a supported subset of `testing`
 - **Host-bound APIs**: `browser`, `storage`, `fs`, `os`, `http`, `protobuf`, and `grpc`; filesystem/network calls require `Capabilities`, while APIs that reach host resources require the corresponding host native
 
@@ -984,9 +985,9 @@ connections.
 
 `errors.New`/`Is`/`Unwrap`/`Join` delegate straight to Go's own `errors`
 package, so a package-level sentinel (`var ErrNotFound = errors.New(...)`) is
-comparable with `errors.Is` the normal way. nanoGo has no `fmt.Errorf("%w",
-...)` wrapping of its own, so `Is`/`Unwrap` only ever see a wrap chain a host
-native's returned error already carries. `bytes.Buffer` (`Write`,
+comparable with `errors.Is` the normal way. `fmt.Errorf("context: %w", err)`
+preserves Go error wrapping. `fmt.Sprintf`/`Printf` use the host formatter when
+registered and otherwise fall back to Go's formatter. `bytes.Buffer` (`Write`,
 `WriteString`, `WriteByte`, `String`, `Bytes`, `Len`, `Reset`, plus
 `bytes.NewBuffer`/`NewBufferString`) is a real `bytes.Buffer` under the hood
 and, like `sync.WaitGroup`, is usable directly from a zero-value `var buf
@@ -1003,11 +1004,81 @@ process; GC tuning through `runtime/debug` is interpreter-local. These are
 intentional, sandbox-safe subsets rather than drop-in replacements for every
 standard-library API.
 
+`os.LookupEnv`, `Unsetenv`, `Clearenv`, and `ExpandEnv` operate exclusively on
+the VFS environment and retain the filesystem capability checks. `Setenv`
+rejects empty/invalid keys and NUL-containing values. No host environment is
+read or changed. `math/rand` owns a synchronized generator per interpreter;
+`Seed` is reproducible without changing host-global random state, and invalid
+`Intn` bounds panic. Use `crypto/rand.Read` for cryptographic randomness, not
+`math/rand`; the crypto facades delegate to Go's standard implementations.
+
+### Function results and control flow
+
+Guest functions support multiple return values, forwarding, multi-variable
+declarations, and typed named results updated by `defer`. Hosts can exchange
+tuples using `interp.ReturnValues`; plain `[]any` remains one container value.
+Panics (including `panic(nil)`) unwind through `defer`/`recover`, not into an
+ordinary `value, err := call()` assignment. Native APIs retain their existing
+`(value, error)` convention.
+
+Guest `f(slice...)` calls share the slice backing array, including deferred
+calls, avoiding element copies. Escaping `range` declaration variables get
+distinct per-iteration bindings, including when ranging over a channel.
+Const groups support `iota` and omitted initializers. Interface assertions
+include embedded named interfaces; complete signature/type-set checking is
+still outside the supported subset.
+
+### Pointers and command-line flags
+
+Addressable variables, struct fields and slice elements support `&`, `*`,
+pointer assignment and identity comparisons. `new(T)` creates a zero-valued
+location; `*chan T` can replace a caller's channel. Escaped addresses keep
+their scope alive instead of allowing it to be recycled. Nil pointers panic
+on dereference; uninitialized channels are nil and remain disabled in select.
+Reflection supports pointer kinds, `Elem`, `IsNil`, and `DeepEqual`.
+
+`flag` provides `String`, `Int`, `Bool`, `Float64`, their `…Var` variants,
+`Set`, `Parse`, `Parsed`, `Args`, `Arg`, `NArg`, `NFlag`, and `NewFlagSet`.
+Global flags use the interpreter's `Args` and reset between runs. Explicit
+FlagSets (including zero-value declarations) own independent state.
+`ContinueOnError` returns parse errors; `PanicOnError` raises a guest panic.
+For host safety, `ExitOnError` and global parse failures return an execution
+error instead of terminating the host, and automatic usage output is suppressed.
+Explicit FlagSet parsing never reads host arguments or environment variables.
+
+This remains a Go subset: complete struct/array value-copy semantics,
+pointer-versus-value method-set checking and fully qualified type resolution
+still require further type-model work.
+
+### Generic functions
+
+Self-contained generic functions support explicit type arguments (`F[int]`),
+inference from scalar/container arguments and typed callbacks, variadics,
+multiple results, and pointer results. Their declarations are checked by
+Go's `go/types` on first use; specialization validates inline constraints,
+including `any`, `comparable`, unions and underlying-type terms (`~int`).
+Specialized ASTs are cached per function and argument-type combination, with
+concurrency-safe first use and no interpreter-global type substitutions.
+
+This is not full Go generics: generic named types, partial explicit argument
+lists, user-defined type arguments, external named constraints, and generic
+bodies depending on other package declarations/imports are not supported yet.
+Such dependencies produce explicit errors when the function is used. Untyped
+constant conversion/inference is limited by nanoGo's existing dynamic value
+model; for example, use `F[float64](1.0)` instead of relying on conversion of
+an evaluated integer. Generic bodies may use builtins, callbacks and recursion.
+
 ### Struct tags
 
 Struct tags are retained as metadata. `encoding/json.Marshal` recognizes the
 common `json:"name"`, `json:",omitempty"`, and `json:"-"` forms; custom tags
-remain available through `reflect.StructField.Tag.Get`.
+remain available through `reflect.StructField.Tag.Get` and
+`value, found := field.Tag.Lookup("key")`. `Lookup` distinguishes an explicitly
+empty value from a missing key, using Go's escaping and tag syntax rules.
+`json:"-,"` names a JSON field `-`, whereas `json:"-"` excludes the field.
+JSON name/omission options are prepared once per field without allocating an
+option list. Custom tags (such as `validate`, `default`, or `pattern`) are
+metadata; they do not automatically run validators or assign defaults.
 
 ```go
 type Account struct {

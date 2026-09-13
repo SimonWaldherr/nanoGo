@@ -12,11 +12,14 @@ package interp
 // sync with installImportedPackage's cases.
 var BuiltinImportPaths = map[string]bool{
 	"fmt":           true,
+	"flag":          true,
 	"debug":         true,
 	"time":          true,
 	"math":          true,
 	"numeric":       true,
 	"math/rand":     true,
+	"crypto/rand":   true,
+	"crypto/sha256": true,
 	"encoding/json": true,
 	"encoding/gob":  true,
 	"json":          true,

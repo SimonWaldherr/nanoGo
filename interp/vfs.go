@@ -384,10 +384,30 @@ func (fs *VFS) ReadDir(p string) ([]*VFSFileInfo, error) {
 
 // Getenv returns the value of the environment variable.
 func (fs *VFS) Getenv(key string) string {
-	fs.mu.RLock()
-	value := fs.env[key]
-	fs.mu.RUnlock()
+	value, _ := fs.LookupEnv(key)
 	return value
+}
+
+// LookupEnv distinguishes unset variables from variables set to an empty value.
+func (fs *VFS) LookupEnv(key string) (string, bool) {
+	fs.mu.RLock()
+	value, found := fs.env[key]
+	fs.mu.RUnlock()
+	return value, found
+}
+
+// Unsetenv removes a variable from the virtual environment only.
+func (fs *VFS) Unsetenv(key string) {
+	fs.mu.Lock()
+	delete(fs.env, key)
+	fs.mu.Unlock()
+}
+
+// Clearenv clears the virtual environment, never the host's environment.
+func (fs *VFS) Clearenv() {
+	fs.mu.Lock()
+	clear(fs.env)
+	fs.mu.Unlock()
 }
 
 // Setenv sets an environment variable.

@@ -154,6 +154,11 @@ func reflectTypeForName(vm *Interpreter, typ string) *reflectTypeInfo {
 
 func reflectTypeForValue(vm *Interpreter, value any) *reflectTypeInfo {
 	switch v := value.(type) {
+	case *PointerVal:
+		if v == nil {
+			return nil
+		}
+		return reflectTypeForName(vm, "*"+v.ElementType)
 	case *SliceVal:
 		if v == nil {
 			return nil
@@ -272,6 +277,24 @@ func reflectDeepEqualSeen(left, right any, seen map[reflectDeepVisit]struct{}) b
 		return false
 	}
 	switch l := left.(type) {
+	case *PointerVal:
+		r, ok := right.(*PointerVal)
+		if !ok || l == nil || r == nil {
+			return ok && l == nil && r == nil
+		}
+		if l.ElementType != r.ElementType {
+			return false
+		}
+		if samePointer(l, r) {
+			return true
+		}
+		if nilGuestReference(l) || nilGuestReference(r) {
+			return false
+		}
+		if visit(l, r) {
+			return true
+		}
+		return reflectDeepEqualSeen(l.ref.get(), r.ref.get(), seen)
 	case *StructVal:
 		r, ok := right.(*StructVal)
 		if !ok || l == nil || r == nil {
@@ -391,6 +414,15 @@ func registerReflectPackage(vm *Interpreter) {
 		raw, _ := tag.field("__value")
 		value, _ := structTagValue(ToString(raw), ToString(args[1]))
 		return value, nil
+	}}
+	tagDef.Methods["Lookup"] = &Function{Name: "Lookup", RecvType: tagDef.Name, Params: []string{"key"}, Native: func(args []any) (any, error) {
+		tag, ok := args[0].(*StructVal)
+		if !ok {
+			return nil, NewRuntimeError("reflect: StructTag.Lookup on non-tag")
+		}
+		raw, _ := tag.field("__value")
+		value, found := structTagValue(ToString(raw), ToString(args[1]))
+		return ReturnValues{value, found}, nil
 	}}
 	fieldDef := &TypeDef{Name: "reflect.StructField", Kind: "struct", Fields: []FieldDef{{Name: "Name", Type: "string"}, {Name: "Type", Type: "reflect.Type"}, {Name: "Index", Type: "int"}, {Name: "Tag", Type: "reflect.StructTag"}}, Methods: map[string]*Function{}}
 	vm.types[typeDef.Name], vm.types[valueDef.Name], vm.types[fieldDef.Name], vm.types[tagDef.Name] = typeDef, valueDef, fieldDef, tagDef
@@ -572,9 +604,26 @@ func registerReflectPackage(vm *Interpreter) {
 		}
 		switch v.typ.kind {
 		case hostreflect.Chan, hostreflect.Func, hostreflect.Interface, hostreflect.Map, hostreflect.Ptr, hostreflect.Slice:
-			return v.value == nil, nil
+			return nilGuestReference(v.value), nil
 		}
 		return false, NewRuntimeError("reflect: IsNil of " + v.typ.spelling)
+	}}
+	valueDef.Methods["Elem"] = &Function{Name: "Elem", RecvType: valueDef.Name, Native: func(args []any) (any, error) {
+		v, err := reflectValueArg(args[0])
+		if err != nil {
+			return nil, err
+		}
+		if !v.valid || v.typ == nil || v.typ.kind != hostreflect.Ptr {
+			return nil, NewRuntimeError("reflect: Elem of non-pointer")
+		}
+		if nilGuestReference(v.value) {
+			return wrapValue(nil, nil, false), nil
+		}
+		value, err := dereference(v.value)
+		if err != nil {
+			return nil, err
+		}
+		return wrapValue(value, v.typ.elem, true), nil
 	}}
 	valueDef.Methods["IsZero"] = &Function{Name: "IsZero", RecvType: valueDef.Name, Native: func(args []any) (any, error) {
 		v, err := reflectValueArg(args[0])
@@ -777,7 +826,9 @@ func registerRuntimePackage(vm *Interpreter) {
 	runtimePkg.Funcs["NumCPU"] = &Function{Name: "NumCPU", Native: func([]any) (any, error) { return goruntime.NumCPU(), nil }}
 	runtimePkg.Funcs["NumGoroutine"] = &Function{Name: "NumGoroutine", Native: func([]any) (any, error) {
 		if vm.activeExecution != nil {
-			return int(vm.activeExecution.goroutines.Load()), nil
+			// The active caller is also a guest goroutine; the execution counter
+			// tracks only spawned workers for joining and resource limits.
+			return 1 + int(vm.activeExecution.goroutines.Load()), nil
 		}
 		return 0, nil
 	}}

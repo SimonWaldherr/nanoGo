@@ -4,6 +4,9 @@ package interp
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,8 +33,23 @@ func (e *RuntimeError) Error() string {
 }
 func NewRuntimeError(msg string) error { return &RuntimeError{msg: msg} }
 
+// ReturnValues carries multiple function results across the host/guest
+// boundary. Native functions may return ReturnValues{...}, nil; a plain []any
+// remains a single container value. Guest functions with multiple results also
+// return this type to embedding hosts.
+type ReturnValues []any
+
+type multipleValues = ReturnValues
+
 // panicError is used internally to model Go's panic unwinding.
 type panicError struct{ value any }
+
+func guestPanic(value any) *panicError {
+	if value == nil {
+		value = &runtime.PanicNilError{}
+	}
+	return &panicError{value: value}
+}
 
 func (e *panicError) Error() string { return fmt.Sprintf("panic: %v", e.value) }
 
@@ -77,10 +95,10 @@ type TypeDef struct {
 	// (nil/empty for the empty interface). It has no *Function bodies —
 	// an interface declares signatures, not implementations — so a type
 	// assertion against it checks a candidate value's own registered
-	// TypeDef.Methods for each of these names instead. Embedded interfaces
-	// in the declaration are not expanded into this list (see the
-	// InterfaceType case in evaluator.go/package_scope.go).
+	// TypeDef.Methods for each name. Embedded named interfaces are resolved
+	// separately through InterfaceEmbeds, including forward declarations.
 	InterfaceMethods []string
+	InterfaceEmbeds  []string
 }
 
 // Function represents either a user-defined or native function.
@@ -102,10 +120,12 @@ type Function struct {
 	// Results names this function's named result parameters, e.g. ["result"]
 	// for `func f() (result int)`, or nil for unnamed/no results (Go requires
 	// all-or-nothing naming, so a partial list never occurs). callFunction
-	// declares each of these as a local before running the body; only when
-	// there is exactly one does it also feed back into the function's
-	// actual return value (see callFrame.namedResult).
-	Results []string
+	// declares each as a typed zero value and reads them after defers finish.
+	Results         []string
+	resultTypes     []string
+	syntax          *ast.FuncType
+	generic         *genericFunction
+	genericInstance *genericInstance
 
 	// frameFree marks parsed guest functions whose bodies never need a
 	// callFrame when diagnostics are disabled. It is deliberately internal and
@@ -366,6 +386,13 @@ func (m *MapVal) originalKey(hashed string) any {
 // understand MapVal, SliceVal, or StructVal.
 func ToNativeValue(v any) any {
 	switch x := v.(type) {
+	case *PointerVal:
+		if x == nil {
+			return nil
+		}
+		return ToNativeValue(x.ref.get())
+	case ReturnValues:
+		return ToNativeValue([]any(x))
 	case *MapVal:
 		out := make(map[string]any, len(x.Data))
 		for hashedKey, value := range x.Data {
@@ -434,56 +461,28 @@ func jsonFieldOptions(defaultName, tag string) (name string, omitEmpty, skip boo
 	if !ok {
 		return name, false, false
 	}
-	parts := strings.Split(raw, ",")
-	if parts[0] == "-" {
+	if raw == "-" {
 		return "", false, true
 	}
-	if parts[0] != "" {
-		name = parts[0]
+	tagName, options, _ := strings.Cut(raw, ",")
+	if tagName != "" {
+		name = tagName
 	}
-	for _, option := range parts[1:] {
+	for options != "" {
+		var option string
+		option, options, _ = strings.Cut(options, ",")
 		if option == "omitempty" {
 			omitEmpty = true
+			break
 		}
 	}
 	return name, omitEmpty, false
 }
 
-// structTagValue is the equivalent of reflect.StructTag.Get for the simple
-// key/value lookup used by nanoGo's curated packages.
+// structTagValue shares Go's validation and escape semantics. Lookup scans
+// without allocating unless the requested value itself needs unescaping.
 func structTagValue(tag, key string) (string, bool) {
-	for tag != "" {
-		tag = strings.TrimLeft(tag, " ")
-		i := strings.IndexByte(tag, ':')
-		if i <= 0 || i+1 >= len(tag) || tag[i+1] != '"' {
-			return "", false
-		}
-		name := tag[:i]
-		tag = tag[i+1:]
-		end := 1
-		for end < len(tag) {
-			if tag[end] == '\\' {
-				end += 2 // skip an escaped quote or backslash
-				continue
-			}
-			if tag[end] == '"' {
-				break
-			}
-			end++
-		}
-		if end == len(tag) {
-			return "", false
-		}
-		value, err := strconv.Unquote(tag[:end+1])
-		if err != nil {
-			return "", false
-		}
-		if name == key {
-			return value, true
-		}
-		tag = tag[end+1:]
-	}
-	return "", false
+	return reflect.StructTag(tag).Lookup(key)
 }
 
 func isEmptyJSONValue(value any) bool {
@@ -540,6 +539,8 @@ const (
 
 func hashKey(v any) string {
 	switch t := v.(type) {
+	case *PointerVal:
+		return pointerHash(t)
 	case int:
 		return "i:" + strconv.Itoa(t)
 	case int64:

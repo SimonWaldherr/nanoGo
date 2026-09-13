@@ -179,7 +179,11 @@ func (v reusableBlockVisitor) Visit(node ast.Node) ast.Visitor {
 		return nil
 	}
 
-	if _, isFuncLit := node.(*ast.FuncLit); isFuncLit {
+	_, escapes := node.(*ast.FuncLit)
+	if unary, ok := node.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+		escapes = true
+	}
+	if escapes {
 		for _, info := range v.state.stack {
 			info.hasFuncLit = true
 		}
@@ -206,6 +210,7 @@ type execution struct {
 	// creates a fresh closure bound to its own environment. The cache dies
 	// with the run and is safe for simultaneous guest goroutines.
 	anonTemplates sync.Map // *ast.FuncLit -> *Function (Env == nil)
+	rangeEscapes  sync.Map // *ast.RangeStmt -> bool (iteration bindings escape)
 	ctx           context.Context
 	cancel        context.CancelFunc
 	limits        ExecutionLimits

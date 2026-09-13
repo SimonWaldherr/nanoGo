@@ -5,6 +5,7 @@ import (
 	"context"
 	"go/ast"
 	"go/token"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -110,7 +111,7 @@ func (ps *PackageScope) CollectDecls(file *ast.File, fset *token.FileSet) error 
 					vm.types[td.Name] = td
 					ps.declaredTypes[td.Name] = true
 				case *ast.InterfaceType:
-					vm.types[ts.Name.Name] = &TypeDef{Name: ts.Name.Name, Kind: "interface", InterfaceMethods: interfaceMethodNames(tt)}
+					vm.types[ts.Name.Name] = &TypeDef{Name: ts.Name.Name, Kind: "interface", InterfaceMethods: interfaceMethodNames(tt), InterfaceEmbeds: interfaceEmbeddedNames(tt)}
 					ps.declaredTypes[ts.Name.Name] = true
 				default:
 					underlying := typeString(tt)
@@ -163,6 +164,8 @@ func (ps *PackageScope) BuildFunction(d *ast.FuncDecl) *Function {
 		}
 	}
 	fn := &Function{Name: d.Name.Name, Body: d.Body, Env: ps.env, frameFree: frameFree, envReusable: envReusable}
+	fn.syntax = d.Type
+	fn.generic = genericMetadata(d)
 	if d.Type.Params != nil {
 		for i, f := range d.Type.Params.List {
 			for _, n := range f.Names {
@@ -176,6 +179,7 @@ func (ps *PackageScope) BuildFunction(d *ast.FuncDecl) *Function {
 		}
 	}
 	fn.Results = namedResults(d.Type.Results)
+	fn.resultTypes = namedResultTypes(d.Type.Results)
 	return fn
 }
 
@@ -189,9 +193,11 @@ func namedResults(results *ast.FieldList) []string {
 	var names []string
 	for _, f := range results.List {
 		for _, n := range f.Names {
-			if n.Name != "_" {
-				names = append(names, n.Name)
+			name := n.Name
+			if name == "_" {
+				name = "\x00result" + strconv.Itoa(len(names))
 			}
+			names = append(names, name)
 		}
 	}
 	return names
@@ -219,12 +225,38 @@ func (ps *PackageScope) EvalDecls(ctx context.Context, file *ast.File) error {
 		if !ok || (d.Tok != token.CONST && d.Tok != token.VAR) {
 			continue
 		}
+		if d.Tok == token.CONST {
+			if err := vm.evalConstantGroup(d, ps.env); err != nil {
+				return err
+			}
+			for _, spec := range d.Specs {
+				for _, name := range spec.(*ast.ValueSpec).Names {
+					if name.Name != "_" {
+						ps.declared[name.Name] = true
+					}
+				}
+			}
+			continue
+		}
 		for _, spec := range d.Specs {
 			vs, ok := spec.(*ast.ValueSpec)
 			if !ok {
 				continue
 			}
 			for i, name := range vs.Names {
+				if i == 0 {
+					if handled, err := vm.declareResultAssignment(vs, ps.env); handled {
+						if err != nil {
+							return err
+						}
+						for _, n := range vs.Names {
+							if n.Name != "_" {
+								ps.declared[n.Name] = true
+							}
+						}
+						break
+					}
+				}
 				if name.Name == "_" {
 					continue
 				}

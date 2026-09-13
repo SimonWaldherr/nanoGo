@@ -119,7 +119,7 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 						// TypeDef.InterfaceMethods — so a type assertion
 						// against this name checks a candidate value's own
 						// TypeDef.Methods instead (evalTypeAssert).
-						vm.types[ts.Name.Name] = &TypeDef{Name: ts.Name.Name, Kind: "interface", InterfaceMethods: interfaceMethodNames(tt)}
+						vm.types[ts.Name.Name] = &TypeDef{Name: ts.Name.Name, Kind: "interface", InterfaceMethods: interfaceMethodNames(tt), InterfaceEmbeds: interfaceEmbeddedNames(tt)}
 					default:
 						underlying := typeString(tt)
 						if isBuiltinType(underlying) {
@@ -130,8 +130,20 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 					}
 				}
 			case token.CONST, token.VAR:
+				if d.Tok == token.CONST {
+					if err := vm.evalConstantGroup(d, global); err != nil {
+						return err
+					}
+					break
+				}
 				for _, spec := range d.Specs {
 					vs := spec.(*ast.ValueSpec)
+					if handled, err := vm.declareResultAssignment(vs, global); handled {
+						if err != nil {
+							return err
+						}
+						continue
+					}
 					for i, name := range vs.Names {
 						if name.Name == "_" {
 							continue
@@ -170,6 +182,8 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 				}
 			}
 			fn := &Function{Name: d.Name.Name, Body: d.Body, Env: global, frameFree: frameFree, envReusable: envReusable}
+			fn.syntax = d.Type
+			fn.generic = genericMetadata(d)
 			// Params
 			if d.Type.Params != nil {
 				for i, f := range d.Type.Params.List {
@@ -185,6 +199,7 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 				}
 			}
 			fn.Results = namedResults(d.Type.Results)
+			fn.resultTypes = namedResultTypes(d.Type.Results)
 			// Method receiver?
 			if d.Recv != nil && len(d.Recv.List) > 0 {
 				rcv := d.Recv.List[0]
@@ -373,7 +388,17 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		}
 		return nil, NewRuntimeError("undefined: " + ex.Name)
 
+	case *ast.StarExpr:
+		value, err := vm.evalExpr(ex.X, env)
+		if err != nil {
+			return nil, err
+		}
+		return dereference(value)
+
 	case *ast.UnaryExpr:
+		if ex.Op == token.AND {
+			return vm.addressOf(ex.X, env)
+		}
 		if ex.Op == token.ARROW {
 			// Receive from channel: <-ch  (single value; two-value handled in assign)
 			v, err := vm.evalExpr(ex.X, env)
@@ -416,8 +441,6 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			return +ToInt(v), nil
 		case token.XOR:
 			return ^ToInt(v), nil
-		case token.AND:
-			return v, nil // address-of ignored
 		default:
 			return nil, NewRuntimeError("unsupported unary op")
 		}
@@ -535,6 +558,13 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 	case *ast.CallExpr:
 		// Builtins: make, len, cap, append, copy, close, delete, panic
 		if id, ok := ex.Fun.(*ast.Ident); ok {
+			if id.Name == "new" {
+				if len(ex.Args) != 1 {
+					return nil, NewRuntimeError("new: expected one type")
+				}
+				typ := typeString(ex.Args[0])
+				return newPointerValue(vm.zeroValueForType(typ), typ), nil
+			}
 			// recover is frame-sensitive and has no arguments. Handle it before
 			// the generic builtin-name dispatch, keeping the normal no-panic path
 			// to a few pointer checks.
@@ -629,7 +659,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 					if err != nil {
 						return nil, err
 					}
-					return nil, &panicError{value: v}
+					return nil, guestPanic(v)
 				}
 			}
 			if isBuiltinCallName(id.Name) {
@@ -730,9 +760,11 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 									return nil, err
 								}
 								if sv, ok := v.(*SliceVal); ok {
-									args = append(args, sv.Data...)
+									args = appendSpreadArguments(fn, args, sv)
+								} else if v == nil {
+									args = appendSpreadArguments(fn, args, &SliceVal{ElementType: "any"})
 								} else {
-									args = append(args, v)
+									return nil, NewRuntimeError("variadic expansion requires a slice")
 								}
 							} else {
 								v, err := vm.evalExpr(a, env)
@@ -763,6 +795,10 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			if err != nil {
 				return nil, err
 			}
+			recv, err = structReceiver(recv)
+			if err != nil {
+				return nil, err
+			}
 			recvType := typeOfValue(vm, recv)
 			td := vm.types[recvType]
 			if td == nil || td.Methods == nil {
@@ -785,9 +821,11 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 							return nil, err
 						}
 						if sv, ok := v.(*SliceVal); ok {
-							args = append(args, sv.Data...)
+							args = appendSpreadArguments(fn, args, sv)
+						} else if v == nil {
+							args = appendSpreadArguments(fn, args, &SliceVal{ElementType: "any"})
 						} else {
-							args = append(args, v)
+							return nil, NewRuntimeError("variadic expansion requires a slice")
 						}
 					} else {
 						v, err := vm.evalExpr(a, env)
@@ -851,9 +889,11 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 							return nil, err
 						}
 						if sv, ok := v.(*SliceVal); ok {
-							args = append(args, sv.Data...)
+							args = appendSpreadArguments(fn, args, sv)
+						} else if v == nil {
+							args = appendSpreadArguments(fn, args, &SliceVal{ElementType: "any"})
 						} else {
-							args = append(args, v)
+							return nil, NewRuntimeError("variadic expansion requires a slice")
 						}
 					} else {
 						v, err := vm.evalExpr(a, env)
@@ -878,10 +918,24 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			return nil, NewRuntimeError("not a function")
 		}
 
+	case *ast.IndexListExpr:
+		value, err := vm.evalExpr(ex.X, env)
+		if err != nil {
+			return nil, err
+		}
+		fn, ok := value.(*Function)
+		if !ok || fn.generic == nil {
+			return nil, NewRuntimeError("type arguments require a generic function")
+		}
+		return fn.generic.explicit(fn, ex.Indices)
+
 	case *ast.IndexExpr:
 		v, err := vm.evalExpr(ex.X, env)
 		if err != nil {
 			return nil, err
+		}
+		if fn, ok := v.(*Function); ok && fn.generic != nil {
+			return fn.generic.explicit(fn, []ast.Expr{ex.Index})
 		}
 		i, err := vm.evalExpr(ex.Index, env)
 		if err != nil {
@@ -969,6 +1023,10 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		}
 		// Struct field access is handled when receiver is *StructVal during method calls or via fieldRef in assignments.
 		recv, err := vm.evalExpr(ex.X, env)
+		if err != nil {
+			return nil, err
+		}
+		recv, err = structReceiver(recv)
 		if err != nil {
 			return nil, err
 		}
@@ -2764,14 +2822,13 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			// When there are exactly 2 LHS targets and 1 RHS call expression,
 			// capture the call error as the second value rather than propagating it.
 			// This enables the idiomatic Go pattern: val, err := pkg.Func().
-			if len(st.Lhs) == 2 && len(st.Rhs) == 1 {
+			if len(st.Lhs) > 1 && len(st.Rhs) == 1 {
 				if _, isCall := r.(*ast.CallExpr); isCall {
-					v, callErr := vm.evalExpr(r, env)
-					if callErr != nil {
-						rightVals = []any{v, callErr}
-					} else {
-						rightVals = []any{v, nil}
+					values, err := vm.evalResultAssignment(r, len(st.Lhs), env)
+					if err != nil {
+						return controlFlow{}, err
 					}
+					rightVals = values
 					goto RHS_DONE
 				}
 			}
@@ -2974,8 +3031,20 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		decl := st.Decl.(*ast.GenDecl)
 		switch decl.Tok {
 		case token.VAR, token.CONST:
+			if decl.Tok == token.CONST {
+				if err := vm.evalConstantGroup(decl, env); err != nil {
+					return controlFlow{}, err
+				}
+				break
+			}
 			for _, sp := range decl.Specs {
 				vs := sp.(*ast.ValueSpec)
+				if handled, err := vm.declareResultAssignment(vs, env); handled {
+					if err != nil {
+						return controlFlow{}, err
+					}
+					continue
+				}
 				for i, n := range vs.Names {
 					if n.Name == "_" {
 						continue
@@ -3154,6 +3223,46 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 		return controlFlow{}, nil
 
 	case *ast.ReturnStmt:
+		if env.frame != nil && len(env.frame.namedResults) > 1 {
+			if len(st.Results) == 0 {
+				return controlFlow{kind: controlReturn}, nil
+			}
+			var values []any
+			if len(st.Results) == 1 {
+				var err error
+				values, err = vm.evalResultAssignment(st.Results[0], len(env.frame.namedResults), env)
+				if err != nil {
+					return controlFlow{}, err
+				}
+			} else {
+				values = make([]any, len(st.Results))
+				for i, expr := range st.Results {
+					value, err := vm.evalExpr(expr, env)
+					if err != nil {
+						return controlFlow{}, err
+					}
+					values[i] = value
+				}
+			}
+			if len(values) != len(env.frame.namedResults) {
+				return controlFlow{}, NewRuntimeError("return count mismatch")
+			}
+			for i, name := range env.frame.namedResults {
+				vm.set(name, values[i], env.frame.resultEnv)
+			}
+			return controlFlow{kind: controlReturn}, nil
+		}
+		if len(st.Results) > 1 {
+			values := make(multipleValues, len(st.Results))
+			for i, expr := range st.Results {
+				value, err := vm.evalExpr(expr, env)
+				if err != nil {
+					return controlFlow{}, err
+				}
+				values[i] = value
+			}
+			return controlFlow{kind: controlReturn, val: values}, nil
+		}
 		// namedResult is "" for a function with zero or 2+ named results —
 		// see callFrame.namedResult — in which case this behaves exactly
 		// as before.
@@ -3180,7 +3289,7 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			// value, because a defer running afterward (callFunction's
 			// closure) re-reads name as the final word on what's returned,
 			// and would otherwise clobber this with name's stale prior value.
-			vm.set(namedResult, v, env)
+			vm.set(namedResult, v, env.frame.resultEnv)
 		}
 		return controlFlow{kind: controlReturn, val: v}, nil
 
@@ -3398,6 +3507,7 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 	// scope, so reusing env avoids an Env allocation on every execution of a
 	// range loop (especially useful when the loop sits inside another loop).
 	local := env
+	fresh := st.Tok == token.DEFINE && vm.rangeBindingsEscape(st)
 	if st.Tok == token.DEFINE {
 		local = NewEnv(env)
 	}
@@ -3411,6 +3521,9 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 	switch s := x.(type) {
 	case *SliceVal:
 		for i := 0; i < len(s.Data); i++ {
+			if fresh {
+				local = NewEnv(env)
+			}
 			vm.bindRangeInt(keyBinding, i, local, trackVariables)
 			vm.bindRangeValue(valueBinding, s.Data[i], local, trackVariables)
 			if c, err, stop := vm.evalRangeBody(st.Body, local, label); stop {
@@ -3419,6 +3532,9 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 		}
 	case *MapVal:
 		for hk, val := range s.Data {
+			if fresh {
+				local = NewEnv(env)
+			}
 			key := s.originalKey(hk)
 			vm.bindRangeValue(keyBinding, key, local, trackVariables)
 			vm.bindRangeValue(valueBinding, val, local, trackVariables)
@@ -3431,6 +3547,9 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 		// by individual bytes. This matters for the Unicode-heavy display
 		// and serial protocols commonly used by TinyGo targets as well.
 		for i, r := range s {
+			if fresh {
+				local = NewEnv(env)
+			}
 			vm.bindRangeInt(keyBinding, i, local, trackVariables)
 			vm.bindRangeInt(valueBinding, int(r), local, trackVariables)
 			if c, err, stop := vm.evalRangeBody(st.Body, local, label); stop {
@@ -3441,6 +3560,9 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 		// Go 1.22 added `for i := range n`. It is a compact, allocation-free
 		// loop form that maps well to firmware-style TinyGo code.
 		for i := 0; i < s; i++ {
+			if fresh {
+				local = NewEnv(env)
+			}
 			vm.bindRangeInt(keyBinding, i, local, trackVariables)
 			if c, err, stop := vm.evalRangeBody(st.Body, local, label); stop {
 				return c, err
@@ -3454,6 +3576,9 @@ func (vm *Interpreter) evalRangeStmt(st *ast.RangeStmt, env *Env, label string) 
 			}
 			if !open {
 				break
+			}
+			if fresh {
+				local = NewEnv(env)
 			}
 			vm.bindRangeValue(keyBinding, v, local, trackVariables)
 			if c, err, stop := vm.evalRangeBody(st.Body, local, label); stop {
@@ -3967,6 +4092,18 @@ func (vm *Interpreter) validateShortDecl(lhs []ast.Expr, env *Env) error {
 
 func (vm *Interpreter) resolveLvalue(l ast.Expr, env *Env) (lvalueRef, error) {
 	switch ee := l.(type) {
+	case *ast.ParenExpr:
+		return vm.resolveLvalue(ee.X, env)
+	case *ast.StarExpr:
+		value, err := vm.evalExpr(ee.X, env)
+		if err != nil {
+			return lvalueRef{}, err
+		}
+		pointer, err := pointerLocation(value)
+		if err != nil {
+			return lvalueRef{}, err
+		}
+		return pointer.ref, nil
 	case *ast.Ident:
 		return lvalueRef{kind: lvalueVar, vm: vm, env: env, name: ee.Name}, nil
 	case *ast.IndexExpr:
@@ -3992,6 +4129,10 @@ func (vm *Interpreter) resolveLvalue(l ast.Expr, env *Env) (lvalueRef, error) {
 		}
 	case *ast.SelectorExpr:
 		recv, err := vm.evalExpr(ee.X, env)
+		if err != nil {
+			return lvalueRef{}, err
+		}
+		recv, err = structReceiver(recv)
 		if err != nil {
 			return lvalueRef{}, err
 		}
@@ -4088,6 +4229,8 @@ func (vm *Interpreter) anonymousTemplate(ex *ast.FuncLit) *Function {
 	}
 	frameFree, _, reusable := analyzeFunctionMetadata(ex.Body)
 	fn := &Function{Name: "<anon>", Body: ex.Body, frameFree: frameFree, envReusable: reusable, Results: namedResults(ex.Type.Results)}
+	fn.syntax = ex.Type
+	fn.resultTypes = namedResultTypes(ex.Type.Results)
 	if ex.Type.Params != nil {
 		for i, f := range ex.Type.Params.List {
 			for _, n := range f.Names {
@@ -4107,6 +4250,11 @@ func (vm *Interpreter) anonymousTemplate(ex *ast.FuncLit) *Function {
 
 // Copy exactly once: a variadic result/closure may retain this backing store.
 func variadicValue(args []any, start int) *SliceVal {
+	if len(args) == start+1 {
+		if spread, ok := args[start].(spreadSlice); ok {
+			return &spread.value
+		}
+	}
 	var rest []any
 	if start < len(args) {
 		rest = make([]any, len(args)-start)
@@ -4116,11 +4264,24 @@ func variadicValue(args []any, start int) *SliceVal {
 }
 
 func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []any) (ret any, err error) {
+	args = expandResultArgument(args)
+	if fn.generic != nil {
+		specialized, err := fn.generic.infer(fn, args)
+		if err != nil {
+			return nil, err
+		}
+		fn = specialized
+	}
 	if err := vm.executionError(); err != nil {
 		return nil, err
 	}
 	if vm.canFastCall(fn) {
 		return vm.callFrameFreeFunction(fn, recv, args)
+	}
+	if fn.genericInstance != nil {
+		if err := fn.genericInstance.validate(args); err != nil {
+			return nil, err
+		}
 	}
 	vm.emitTrace("call_start", fn.Name, "", nil)
 	if fn.Native != nil || fn.NativeContext != nil {
@@ -4140,6 +4301,7 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 		frameDepth = env.frame.depth + 1
 	}
 	frame := &callFrame{funcName: fn.Name, caller: env.frame, depth: frameDepth}
+	frame.namedResults = fn.Results
 	if len(fn.Results) == 1 {
 		frame.namedResult = fn.Results[0]
 	}
@@ -4194,6 +4356,9 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 				ret = v
 			}
 		}
+		if local != nil && len(frame.namedResults) > 1 {
+			ret = vm.readNamedResults(frame.namedResults, local)
+		}
 		message := "ok"
 		if err != nil {
 			message = err.Error()
@@ -4203,6 +4368,7 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 
 	// User-defined function
 	local = NewEnv(fn.Env)
+	frame.resultEnv = local
 	local.frame = frame
 	argIndex := 0
 	if fn.RecvName != "" && recv != nil {
@@ -4248,13 +4414,14 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 			argIndex++
 		}
 	}
-	// Named results start out nil — nanoGo has no per-type zero-value
-	// tracking for them (consistent with a missing argument also
-	// defaulting to nil above, rather than 0/""/false) — so they exist as
-	// ordinary locals a naked `return` or a deferred function can read and
-	// write by name.
-	for _, name := range fn.Results {
-		vm.declare(name, nil, local)
+	// Named results are typed zero values that naked returns and defers can
+	// read and update before the final result tuple is assembled.
+	for i, name := range fn.Results {
+		var zero any
+		if i < len(fn.resultTypes) {
+			zero = vm.zeroValueForType(fn.resultTypes[i])
+		}
+		vm.declare(name, zero, local)
 	}
 
 	c, bodyErr := vm.execStmtList(fn.Body.(*ast.BlockStmt).List, local)
@@ -4287,6 +4454,9 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 // observe a callFrame, so allocating one (and its defer/recover closure)
 // merely adds GC work to recursive and call-heavy programs.
 func (vm *Interpreter) canFastCall(fn *Function) bool {
+	if fn.generic != nil {
+		return false
+	}
 	exec := vm.activeExecution
 	if exec != nil {
 		if !exec.fastCallsAllowed {
@@ -4342,6 +4512,12 @@ func (vm *Interpreter) callNativeFunction(fn *Function, recv *any, args []any) (
 // handling explicit leaves the full recover/defer machinery out of the hot
 // path without changing behavior in observable or debuggable modes.
 func (vm *Interpreter) callFrameFreeFunction(fn *Function, recv *any, args []any) (any, error) {
+	args = expandResultArgument(args)
+	if fn.genericInstance != nil {
+		if err := fn.genericInstance.validate(args); err != nil {
+			return nil, err
+		}
+	}
 	var local *Env
 	if fn.envReusable {
 		local = vm.acquireFastEnv(fn.Env)
@@ -4430,6 +4606,10 @@ func analyzeFunctionMetadata(body *ast.BlockStmt) (frameFree bool, needsFrames b
 			return false
 		}
 		switch n := node.(type) {
+		case *ast.UnaryExpr:
+			if n.Op == token.AND {
+				reusable = false
+			}
 		case *ast.DeferStmt:
 			frameFree = false
 			return true
@@ -4615,7 +4795,7 @@ func (vm *Interpreter) applyBuiltin(name string, args []any) (any, error) {
 		if len(args) == 0 {
 			return nil, &panicError{value: "panic"}
 		}
-		return nil, &panicError{value: args[0]}
+		return nil, guestPanic(args[0])
 	default:
 		return nil, NewRuntimeError("unknown builtin: " + name)
 	}
@@ -4664,12 +4844,16 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 					}
 					args[i] = v
 				}
-				return fn, nil, args, nil
+				return preparedArguments(fn, nil, call, args)
 			}
 		}
 
 		// Method call on struct
 		recv, err := vm.evalExpr(sel.X, env)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		recv, err = structReceiver(recv)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -4690,7 +4874,7 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 			}
 			args[i] = v
 		}
-		return fn, &recv, args, nil
+		return preparedArguments(fn, &recv, call, args)
 	}
 
 	callee, err := vm.evalExpr(call.Fun, env)
@@ -4709,7 +4893,7 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 		}
 		args[i] = v
 	}
-	return fn, nil, args, nil
+	return preparedArguments(fn, nil, call, args)
 }
 
 // ---------------- Helpers ----------------------------------------
@@ -4883,6 +5067,11 @@ func isFloat(v any) bool { _, ok := v.(float64); return ok }
 
 func typeOfValue(vm *Interpreter, v any) string {
 	switch x := v.(type) {
+	case *PointerVal:
+		if x == nil {
+			return "<nil>"
+		}
+		return "*" + x.ElementType
 	case *StructVal:
 		if x == nil {
 			return "<nil>"
@@ -4943,6 +5132,9 @@ func (vm *Interpreter) evalTypeAssert(ex *ast.TypeAssertExpr, env *Env) (asserte
 	switch t := ex.Type.(type) {
 	case *ast.InterfaceType:
 		names := vm.cachedInterfaceMethodNames(t)
+		if embeds := interfaceEmbeddedNames(t); len(embeds) != 0 {
+			return dyn, dyn, vm.valueSatisfiesInterface(dyn, &TypeDef{InterfaceMethods: names, InterfaceEmbeds: embeds}, nil), nil
+		}
 		if len(names) == 0 {
 			return dyn, dyn, true, nil // interface{} / inline empty interface
 		}
@@ -4958,13 +5150,16 @@ func (vm *Interpreter) evalTypeAssert(ex *ast.TypeAssertExpr, env *Env) (asserte
 			return dyn, dyn, vm.valueSatisfiesMethods(dyn, []string{"Error"}), nil
 		}
 		if td, found := vm.types[t.Name]; found && td.Kind == "interface" {
-			return dyn, dyn, vm.valueSatisfiesMethods(dyn, td.InterfaceMethods), nil
+			return dyn, dyn, vm.valueSatisfiesInterface(dyn, td, nil), nil
 		}
 	}
 	// Concrete type: compare dynamic type against the asserted type name,
 	// ignoring a leading "*" since nanoGo represents a struct the same way
 	// whether it was declared by value or by pointer (see StructVal).
-	want := strings.TrimPrefix(vm.typeStringCached(ex.Type), "*")
+	want := vm.typeStringCached(ex.Type)
+	if _, pointer := dyn.(*PointerVal); !pointer {
+		want = strings.TrimPrefix(want, "*")
+	}
 	if want != "" && typeOfValue(vm, dyn) == want {
 		return dyn, dyn, true, nil
 	}
@@ -4972,10 +5167,8 @@ func (vm *Interpreter) evalTypeAssert(ex *ast.TypeAssertExpr, env *Env) (asserte
 }
 
 // interfaceMethodNames collects the directly-declared method names of an
-// interface type literal. Embedded interfaces (a Field with no Names) are
-// not expanded — a documented simplification, since resolving one requires
-// looking it up by name and nanoGo's grammar allows arbitrary embedding
-// expressions here, not just a plain identifier.
+// interface type literal. Embedded names are collected separately and
+// resolved against the interpreter's current type registry on assertion.
 func interfaceMethodNames(it *ast.InterfaceType) []string {
 	if it.Methods == nil {
 		return nil
@@ -5010,6 +5203,21 @@ func namesOf(f *ast.Field) []string {
 // a declaration for) satisfies only the empty method set.
 func (vm *Interpreter) valueSatisfiesMethods(v any, names []string) bool {
 	if len(names) == 0 {
+		return true
+	}
+	if pointer, ok := v.(*PointerVal); ok {
+		if pointer == nil {
+			return false
+		}
+		td := vm.types[pointer.ElementType]
+		if td == nil {
+			return false
+		}
+		for _, method := range names {
+			if td.Methods[method] == nil {
+				return false
+			}
+		}
 		return true
 	}
 	// Named structs dominate non-empty interface assertions. Their type name
@@ -5057,9 +5265,12 @@ func interfaceConversionMessage(vm *Interpreter, target ast.Expr, dyn any) strin
 func equals(a, b any) bool {
 	// Handle nil explicitly to avoid surprises with typed nils.
 	if a == nil || b == nil {
-		return a == nil && b == nil
+		return nilGuestReference(a) && nilGuestReference(b)
 	}
 	switch x := a.(type) {
+	case *PointerVal:
+		y, ok := b.(*PointerVal)
+		return ok && samePointer(x, y)
 	case int:
 		return x == ToInt(b)
 	case float64:

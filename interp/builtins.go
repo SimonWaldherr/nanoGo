@@ -110,7 +110,7 @@ func zeroValue(typ string) any {
 		return nil
 	default:
 		if strings.HasPrefix(typ, "*") {
-			return (*StructVal)(nil)
+			return &PointerVal{ElementType: typ[1:], ref: lvalueRef{kind: lvalueNil}}
 		}
 		if strings.HasPrefix(typ, "[]") {
 			return &SliceVal{ElementType: typ[2:], Data: []any{}}
@@ -120,7 +120,7 @@ func zeroValue(typ string) any {
 			return &MapVal{KeyType: k, ElementType: v, Data: map[string]any{}}
 		}
 		if strings.HasPrefix(typ, "chan ") {
-			return &ChannelVal{ElementType: typ[5:], C: make(chan any)}
+			return &ChannelVal{ElementType: typ[5:]}
 		}
 		return &StructVal{TypeName: typ, Fields: map[string]any{}}
 	}
