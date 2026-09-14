@@ -1,6 +1,7 @@
-.PHONY: all build-wasm build-wasm-compressed build-cli build-mcp build-repl run-demo clean test test-web test-race vet vet-wasm fmt-check fuzz benchmark benchmark-go profile-cpu profile-mem trace tidy size-report
+.PHONY: all build-wasm build-wasm-optimized build-wasm-compressed build-wasm-optimized-compressed build-cli build-mcp build-repl run-demo clean test test-web test-wasm test-wasm-artifact test-race vet vet-wasm fmt-check fuzz benchmark benchmark-go profile-cpu profile-mem trace tidy size-report
 
 MODULE := simonwaldherr.de/go/nanogo
+GO ?= go
 
 # Output directories
 BUILD_DIR := build
@@ -12,15 +13,21 @@ MCP_OUT := $(BUILD_DIR)/nanogo-mcp
 
 build-mcp:
 	@mkdir -p $(BUILD_DIR)
-	go build -o $(MCP_OUT) ./cmd/mcp
+	$(GO) build -o $(MCP_OUT) ./cmd/mcp
 
 # ---------- REPL ----------
 build-repl:
 	@mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/nanogo-repl ./cmd/repl
+	$(GO) build -o $(BUILD_DIR)/nanogo-repl ./cmd/repl
 
 # ---------- WASM target (for the web playground) ----------
-WASM_OUT := web/nanogo.wasm
+WASM_OUT ?= web/nanogo.wasm
+WASM_EXEC_OUT ?= $(dir $(WASM_OUT))wasm_exec.js
+WASM_OPTIMIZE ?= 0
+WASM_OPT ?= wasm-opt
+# Go emits bulk-memory and saturating conversion instructions. Enable only
+# those extensions so Binaryen does not introduce newer browser requirements.
+WASM_OPT_FLAGS ?= -Oz --enable-bulk-memory --enable-nontrapping-float-to-int
 # Fast publication defaults. Override these in release jobs that prioritise
 # the last few percent of transfer size over local/CI turnaround, e.g.
 # `make build-wasm-compressed GZIP_LEVEL=9 BROTLI_QUALITY=11`.
@@ -28,18 +35,50 @@ GZIP_LEVEL ?= 6
 BROTLI_QUALITY ?= 6
 
 build-wasm:
-	@mkdir -p $(dir $(WASM_OUT))
-	GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o $(WASM_OUT) ./cmd/wasm
+	@mkdir -p "$(dir $(WASM_OUT))" "$(dir $(WASM_EXEC_OUT))"
+	@set -eu; \
+	if [ "$(WASM_OPTIMIZE)" = 1 ]; then \
+		command -v "$(WASM_OPT)" >/dev/null 2>&1 || { echo "wasm-opt is required; install Binaryen or use make build-wasm."; exit 1; }; \
+	fi; \
+	go_root=$$($(GO) env GOROOT); \
+	exec_source="$$go_root/lib/wasm/wasm_exec.js"; \
+	if [ ! -f "$$exec_source" ]; then exec_source="$$go_root/misc/wasm/wasm_exec.js"; fi; \
+	[ -f "$$exec_source" ] || { echo "Cannot find wasm_exec.js in $$go_root"; exit 1; }; \
+	wasm_tmp=$$(mktemp "$(WASM_OUT).tmp.XXXXXX"); \
+	opt_tmp=; exec_tmp=; \
+	trap 'rm -f "$$wasm_tmp" "$$opt_tmp" "$$exec_tmp"' 0; \
+	echo "Building $(WASM_OUT)"; \
+	GOOS=js GOARCH=wasm $(GO) build -trimpath -ldflags="-s -w" -o "$$wasm_tmp" ./cmd/wasm; \
+	if [ "$(WASM_OPTIMIZE)" = 1 ]; then \
+		opt_tmp=$$(mktemp "$(WASM_OUT).opt.XXXXXX"); \
+		"$(WASM_OPT)" "$$wasm_tmp" $(WASM_OPT_FLAGS) -o "$$opt_tmp"; \
+		mv "$$opt_tmp" "$$wasm_tmp"; \
+	fi; \
+	exec_tmp=$$(mktemp "$(WASM_EXEC_OUT).tmp.XXXXXX"); \
+	cp "$$exec_source" "$$exec_tmp"; \
+	chmod 644 "$$wasm_tmp" "$$exec_tmp"; \
+	mv "$$wasm_tmp" "$(WASM_OUT)"; \
+	mv "$$exec_tmp" "$(WASM_EXEC_OUT)"; \
+	rm -f "$(WASM_OUT).gz" "$(WASM_OUT).br"
+
+# Optional, full-feature binary optimization; normal development builds need
+# only Go. Temporary files keep a failed optimization from replacing a build.
+build-wasm-optimized:
+	@$(MAKE) --no-print-directory build-wasm WASM_OPTIMIZE=1
+
+build-wasm-optimized-compressed:
+	@$(MAKE) --no-print-directory build-wasm-compressed WASM_OPTIMIZE=1
 
 # Build the WASM and emit pre-compressed .gz/.br variants for static HTTP
 # servers that support Content-Encoding negotiation. Brotli is optional;
 # the target succeeds even if the `brotli` binary is not installed.
+# gzip -n omits the filename and timestamp for reproducible, smaller headers.
 build-wasm-compressed: build-wasm
 	@echo "--- gzip ---"
-	@gzip -$(GZIP_LEVEL) -k -f $(WASM_OUT)
+	@gzip -n -$(GZIP_LEVEL) -k -f "$(WASM_OUT)"
 	@if command -v brotli >/dev/null 2>&1; then \
 		echo "--- brotli ---"; \
-		brotli -f -q $(BROTLI_QUALITY) -k $(WASM_OUT); \
+		brotli -f -q $(BROTLI_QUALITY) -k "$(WASM_OUT)"; \
 	else \
 		echo "(brotli not installed — skipping .br; install with 'apt-get install brotli')"; \
 	fi
@@ -50,7 +89,7 @@ CLI_OUT := $(BUILD_DIR)/nanogo-cli
 
 build-cli:
 	@mkdir -p $(BUILD_DIR)
-	go build -o $(CLI_OUT) ./cmd/cli
+	$(GO) build -o $(CLI_OUT) ./cmd/cli
 
 run-demo: build-cli
 	@echo "--- running samples/features_demo.go ---"
@@ -58,26 +97,43 @@ run-demo: build-cli
 
 # ---------- Tests ----------
 test:
-	go test ./interp ./interp/loader ./interp/index ./cmd/mcp ./cmd/repl
+	$(GO) test ./interp ./interp/loader ./interp/index ./cmd/cli ./cmd/mcp ./cmd/repl
 
 test-web:
 	node --test web/tests/*.test.cjs
 
+# Run the js/wasm Go tests in Node using the selected compiler's own launcher.
+test-wasm:
+	@command -v node >/dev/null 2>&1 || { echo "Node.js is required for test-wasm."; exit 1; }
+	@set -eu; \
+	go_root=$$($(GO) env GOROOT); \
+	runner="$$go_root/lib/wasm/go_js_wasm_exec"; \
+	if [ ! -f "$$runner" ]; then runner="$$go_root/misc/wasm/go_js_wasm_exec"; fi; \
+	GOOS=js GOARCH=wasm $(GO) test -exec "$$runner" ./cmd/wasm ./runtime
+
+# Exercise the exact published artifact, including optional Binaryen passes.
+test-wasm-artifact:
+	node scripts/smoke-wasm.cjs "$(WASM_OUT)" "$(WASM_EXEC_OUT)"
+
+.PHONY: test-compat
+test-compat:
+	$(GO) test ./compat -count=1
+
 # Race detection only finds concurrent paths that execute. Keep it as a
 # first-class target for the interpreter, loader and public hosts.
 test-race:
-	go test -race ./interp ./interp/loader ./interp/index ./cmd/mcp ./cmd/repl
+	$(GO) test -race ./interp ./interp/loader ./interp/index ./cmd/cli ./cmd/mcp ./cmd/repl
 
 vet:
 	# cmd/wasm and runtime are js/wasm-only; vet the native packages here and
 	# validate the browser side separately through build-wasm and vet-wasm.
 	# examples/ is included so a runnable example that stops compiling is
 	# caught here rather than by whoever next follows the README.
-	go vet ./interp ./interp/loader ./interp/index ./cmd/cli ./cmd/mcp ./cmd/repl ./examples/...
+	$(GO) vet ./interp ./interp/loader ./interp/index ./cmd/cli ./cmd/mcp ./cmd/repl ./examples/...
 
 # Vet the js/wasm-only packages that `vet` cannot build for the host.
 vet-wasm:
-	GOOS=js GOARCH=wasm go vet ./cmd/wasm ./runtime
+	GOOS=js GOARCH=wasm $(GO) vet ./cmd/wasm ./runtime
 
 # Fail if any tracked Go file is not gofmt-formatted. This runs clean on an
 # LF checkout (enforced by .gitattributes); on a stale CRLF working tree run
@@ -94,7 +150,7 @@ fmt-check:
 # A short, reproducible coverage-guided fuzz pass. Run longer fuzz campaigns
 # in CI or locally with: go test ./interp -run '^$$' -fuzz=FuzzInterpreterNeverPanics -fuzztime=10m
 fuzz:
-	go test ./interp -run '^$$' -fuzz=FuzzInterpreterNeverPanics -fuzztime=15s -parallel=1
+	$(GO) test ./interp -run '^$$' -fuzz=FuzzInterpreterNeverPanics -fuzztime=15s -parallel=1
 
 # ---------- Benchmarks (informational; no -cpuprofile by default) ----------
 benchmark: build-cli
@@ -104,25 +160,25 @@ benchmark: build-cli
 # Host implementation benchmarks: time, allocation volume, and allocation
 # count. Guest-level deterministic work is reported separately as steps/op.
 benchmark-go:
-	go test ./interp -run '^$$' -bench=. -benchmem
+	$(GO) test ./interp -run '^$$' -bench=. -benchmem
 
 # Capture profiles only on demand; binary artifacts stay in build/ and are
 # ignored. Open with: go tool pprof build/nanogo-cpu.pprof
 profile-cpu:
 	@mkdir -p $(BUILD_DIR)
-	go test ./interp -run '^$$' -bench='Benchmark(FibRecursive|EvalExprArithmetic)' -cpuprofile $(BUILD_DIR)/nanogo-cpu.pprof
+	$(GO) test ./interp -run '^$$' -bench='Benchmark(FibRecursive|EvalExprArithmetic)' -cpuprofile $(BUILD_DIR)/nanogo-cpu.pprof
 
 # Allocation profile for the same evaluator-heavy workload. Open with:
 # go tool pprof -alloc_space build/nanogo-mem.pprof
 profile-mem:
 	@mkdir -p $(BUILD_DIR)
-	go test ./interp -run '^$$' -bench='Benchmark(FibRecursive|EvalExprArithmetic)' -memprofile $(BUILD_DIR)/nanogo-mem.pprof
+	$(GO) test ./interp -run '^$$' -bench='Benchmark(FibRecursive|EvalExprArithmetic)' -memprofile $(BUILD_DIR)/nanogo-mem.pprof
 
 # Produces a native Go execution trace carrying opt-in nanoGo annotations.
 # View with `go tool trace build/nanogo.trace` or `gotraceui build/nanogo.trace`.
 trace:
 	@mkdir -p $(BUILD_DIR)
-	go test ./interp -run '^TestRuntimeTraceAnnotationsAreOptIn$$' -trace $(BUILD_DIR)/nanogo.trace
+	$(GO) test ./interp -run '^TestRuntimeTraceAnnotationsAreOptIn$$' -trace $(BUILD_DIR)/nanogo.trace
 
 # ---------- Size report for the WASM artifact ----------
 # Prints uncompressed/gzip/brotli sizes so PRs can quote the delta.
@@ -134,7 +190,7 @@ size-report:
 	@if [ -f $(WASM_OUT).gz ]; then \
 		printf "%-20s %s\n" "gzip (.gz):" "$$(wc -c <$(WASM_OUT).gz | tr -d ' ') bytes ($$(du -h $(WASM_OUT).gz | cut -f1))"; \
 	else \
-		gz=$$(gzip -9 -c $(WASM_OUT) | wc -c | tr -d ' '); \
+		gz=$$(gzip -n -9 -c $(WASM_OUT) | wc -c | tr -d ' '); \
 		printf "%-20s %s\n" "gzip (in-memory):" "$$gz bytes"; \
 	fi
 	@if [ -f $(WASM_OUT).br ]; then \
@@ -152,5 +208,5 @@ clean:
 	rm -f $(WASM_OUT) $(WASM_OUT).gz $(WASM_OUT).br
 
 tidy:
-	go mod tidy
+	$(GO) mod tidy
 	$(MAKE) --no-print-directory vet

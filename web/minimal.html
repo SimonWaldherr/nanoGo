@@ -14,7 +14,7 @@
   This is NOT the production playground (see index.html for that); it is
   the shortest working reference for a third party who wants to build
   their own frontend against the same WASM worker. See the README's
-  "Embedding" section and app.js's comments for the full protocol.
+  "Embedding" section and nanogo.mjs for the reusable async client.
 -->
 <style>
   body { margin: 0; padding: 24px; background: #0b0f17; color: #e6edf7; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
@@ -33,7 +33,7 @@
 </head>
 <body>
   <h1>nanoGo — minimal embedding reference</h1>
-  <p class="sub">Plain HTML/JS, no framework, no CodeMirror — see app.js for the whole implementation.</p>
+  <p class="sub">Plain HTML/JS with the async nanoGo client — see app.js and nanogo.mjs.</p>
 
   <div class="row">
     <span id="status" class="status loading">loading…</span>
@@ -63,7 +63,6 @@
   </div>
   <div id="output"></div>
 
-  <script src="wasm_exec.js"></script>
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

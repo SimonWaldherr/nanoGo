@@ -125,7 +125,9 @@ func (ps *PackageScope) CollectDecls(file *ast.File, fset *token.FileSet) error 
 			fn := ps.BuildFunction(d)
 			if d.Recv != nil && len(d.Recv.List) > 0 {
 				rcv := d.Recv.List[0]
-				fn.RecvName = rcv.Names[0].Name
+				if len(rcv.Names) > 0 {
+					fn.RecvName = rcv.Names[0].Name
+				}
 				fn.RecvType = strings.TrimPrefix(typeString(rcv.Type), "*")
 				td := vm.types[fn.RecvType]
 				if td == nil {
@@ -258,6 +260,11 @@ func (ps *PackageScope) EvalDecls(ctx context.Context, file *ast.File) error {
 					}
 				}
 				if name.Name == "_" {
+					if i < len(vs.Values) {
+						if _, err := vm.evalExpr(vs.Values[i], ps.env); err != nil {
+							return err
+						}
+					}
 					continue
 				}
 				if i < len(vs.Values) {
@@ -274,6 +281,9 @@ func (ps *PackageScope) EvalDecls(ctx context.Context, file *ast.File) error {
 					v, err := vm.evalExpr(vs.Values[i], ps.env)
 					if err != nil {
 						return err
+					}
+					if vs.Type != nil {
+						v = vm.coerceToType(v, typeString(vs.Type))
 					}
 					val = v
 				} else {

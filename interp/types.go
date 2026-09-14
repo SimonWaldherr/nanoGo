@@ -542,14 +542,20 @@ func hashKey(v any) string {
 	case *PointerVal:
 		return pointerHash(t)
 	case int:
-		return "i:" + strconv.Itoa(t)
+		var buf [22]byte
+		buf[0], buf[1] = 'i', ':'
+		return string(strconv.AppendInt(buf[:2], int64(t), 10))
 	case int64:
-		return "I:" + strconv.FormatInt(t, 10)
+		var buf [22]byte
+		buf[0], buf[1] = 'I', ':'
+		return string(strconv.AppendInt(buf[:2], t, 10))
 	case float64:
 		// Floats otherwise take the fmt fallback below, which is needlessly
 		// expensive for a perfectly ordinary map key. Keep a distinct prefix
 		// so int(1) and float64(1) continue to be different dynamic keys.
-		return "f:" + strconv.FormatFloat(t, 'g', -1, 64)
+		var buf [32]byte
+		buf[0], buf[1] = 'f', ':'
+		return string(strconv.AppendFloat(buf[:2], t, 'g', -1, 64))
 	case string:
 		return "s:" + t
 	case bool:

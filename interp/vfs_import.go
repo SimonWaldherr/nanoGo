@@ -1,11 +1,13 @@
 package interp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	iofs "io/fs"
+	"math"
 	"os"
 	"path"
 	"strings"
@@ -263,7 +265,14 @@ func (r contextReader) Read(p []byte) (int, error) {
 }
 
 func readWithContext(ctx context.Context, reader io.Reader, maxBytes int64) ([]byte, error) {
-	limited := io.LimitReader(contextReader{ctx: ctx, r: reader}, maxBytes+1)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	limit := maxBytes
+	if limit < math.MaxInt64 {
+		limit++
+	}
+	limited := io.LimitReader(contextReader{ctx: ctx, r: reader}, limit)
 	var data []byte
 	var err error
 	// bytes.Reader, strings.Reader and bytes.Buffer expose their unread size.
@@ -273,7 +282,18 @@ func readWithContext(ctx context.Context, reader io.Reader, maxBytes int64) ([]b
 	// Len implementation cannot bypass the import bound.
 	if sized, ok := reader.(interface{ Len() int }); ok {
 		hint := int64(sized.Len())
-		if hint > 0 && hint <= maxBytes && hint < int64(^uint(0)>>1) {
+		// These concrete memory readers have exact remaining lengths. Read
+		// directly into the final allocation; no spare EOF byte (which can
+		// move a power-of-two payload into the next allocation size class).
+		exact := false
+		switch reader.(type) {
+		case *bytes.Reader, *bytes.Buffer, *strings.Reader:
+			exact = true
+		}
+		if exact && hint >= 0 && hint <= maxBytes {
+			data = make([]byte, int(hint))
+			_, err = io.ReadFull(limited, data)
+		} else if hint > 0 && hint <= maxBytes && hint < int64(^uint(0)>>1) {
 			data, err = readKnownSize(limited, int(hint))
 		} else {
 			data, err = io.ReadAll(limited)

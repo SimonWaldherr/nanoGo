@@ -1,6 +1,6 @@
 // quickstart is the smallest possible nanoGo embedding: create an
-// interpreter, register the standard packages and the two natives fmt
-// needs, then run a guest program and check the error. Run it with:
+// interpreter, enable the curated packages and connect console output,
+// then run a guest program and check the error. Run it with:
 // go run ./examples/quickstart
 package main
 
@@ -22,18 +22,11 @@ func main() {
 		}
 		return nil, nil
 	})
-	vm.RegisterNative("__hostSprintf", func(args []any) (any, error) {
-		if len(args) == 0 {
-			return "", nil
-		}
-		format := interp.ToString(args[0])
-		return fmt.Sprintf(format, args[1:]...), nil
-	})
-
 	if err := vm.Run(`package main
+import "fmt"
 func main() {
 	fmt.Println("hello from nanoGo!")
-	fmt.Printf("6 * 7 = %d\n", 6*7)
+	fmt.Println(fmt.Sprintf("6 * 7 = %d", 6*7))
 }`); err != nil {
 		log.Fatal(err)
 	}

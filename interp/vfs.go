@@ -58,7 +58,7 @@ type VFSFileInfo struct {
 func NewVFS() *VFS {
 	now := time.Now()
 	fs := &VFS{
-		nodes:    map[string]*vfsNode{},
+		nodes:    make(map[string]*vfsNode, 10),
 		children: map[string]map[string]struct{}{},
 		env:      map[string]string{"HOME": "/home/user", "PATH": "/usr/bin:/bin", "USER": "user"},
 		cwd:      "/home/user",

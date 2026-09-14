@@ -512,8 +512,9 @@
       }
 
       function postWorkspaceRequest(type, fields) {
-        const payload = workspacePayload();
+        saveActiveWorkspaceSource();
         if (workerWorkspaceRevision !== workspaceRevision) {
+          const payload = workspacePayload();
           worker.postMessage({
             type: 'workspace-sync', files: payload.files, modulePath: payload.modulePath,
             workspaceRevision
@@ -1366,13 +1367,11 @@
         _canvasImageData32.fill(CANVAS_PALETTE_U32[0]);
       }
       function applyCanvasFrame(cells) {
-        // The guest ships a whole grid of palette levels, one byte per cell,
-        // already clamped and bounds-checked on the Go side -- so adopting a
-        // frame is a memcpy rather than a per-cell decode. A length mismatch
-        // means this frame predates the matching canvas-size, so drop it.
-        if (cells && cells.length === _canvasCells.length) {
-          _canvasCells.set(cells);
-        }
+        // Worker messages give this window its own buffer, so keep it directly
+        // until the next frame. Rendering reads it without another grid copy.
+        if (!cells || cells.length !== _canvasCells.length) return;
+        if (cells instanceof Uint8Array) _canvasCells = cells;
+        else _canvasCells.set(cells); // Compatibility with array-based clients.
         _scheduleCanvasRender();
       }
 
@@ -3050,6 +3049,11 @@
       // default. An integrator who needs to restrict this can still check
       // `event.origin` on their own side of the channel.
       function postToHost(msg) {
+        // Completion must follow all output, including the batch still waiting
+        // for its microtask. flushHostOutput clears its queue before posting.
+        if (msg.type !== 'nanogo:output' && msg.type !== 'nanogo:output-batch') {
+          flushHostOutput();
+        }
         if (window.parent && window.parent !== window) {
           try { window.parent.postMessage(msg, '*'); } catch (e) { /* ignore */ }
         }

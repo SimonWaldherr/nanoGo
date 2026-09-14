@@ -7,16 +7,26 @@
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-654FF0?logo=webassembly&logoColor=white)](https://webassembly.org/)
 [![DOI](https://zenodo.org/badge/1075593525.svg)](https://doi.org/10.5281/zenodo.18649874)
 
+**Start here:** [integration guide](docs/integration.md) ·
+[build and performance guide](docs/performance.md) ·
+[compatibility and upgrades](docs/upgrading.md) ·
+[changelog](CHANGELOG.md) ·
+[language compatibility](compat/README.md) ·
+[runnable examples](examples)
 
 ## 🚀 Overview
 
 nanoGo is a **minimalist Go interpreter** written in Go. It can run Go source dynamically in a native host (CLI, REPL, or an embedding application) and, when built for `js/wasm`, in a browser. While projects like TinyGo compile Go programs to WASM, nanoGo instead compiles the interpreter to WASM and evaluates guest Go source at runtime.
 
-**Key Distinction:** Instead of compiling Go programs ahead-of-time to WASM, nanoGo is an interpreter written in Go, compiled to WASM, that can execute Go source code dynamically at runtime.
-
 ## ✨ What nanoGo provides
 
 nanoGo is useful where executing a small, controlled Go-like program at runtime is more important than compiling a complete Go application. It parses and evaluates a supported subset of Go; it does **not** invoke the Go compiler or perform complete static type checking. Consequently, a program that works in nanoGo is not automatically portable to Go, and a valid Go program may use language or library features nanoGo does not implement.
+
+The supported subset should match standard Go semantics. `make test-compat`
+compiles and runs deterministic programs with the installed Go toolchain and
+compares their output with both nanoGo `RunContext` and the package loader.
+CI runs this independently of the interpreter's unit tests. See
+[the compatibility policy](compat/README.md) for coverage and known limits.
 
 - **Interactive execution:** edit and run supported Go source in a browser, REPL, CLI, or embedded host.
 - **Concurrency primitives:** guest goroutines, channels, `select`, timers, and a `sync.WaitGroup` subset.
@@ -144,13 +154,17 @@ go get simonwaldherr.de/go/nanogo
 import "simonwaldherr.de/go/nanogo/interp"
 ```
 
-The shortest complete example — an interpreter, the two natives `fmt`
-needs, and one guest program — lives in
+The shortest complete example — an interpreter, one console callback,
+and one guest program — lives in
 [examples/quickstart](examples/quickstart):
 
 ```bash
 go run ./examples/quickstart
 ```
+
+`fmt.Sprintf` and `fmt.Printf` already have a built-in formatter; the
+`__hostSprintf` callback is optional. The [integration guide](docs/integration.md)
+includes a complete host with cancellation, output capture, and execution limits.
 
 For the single most common real-world embedding — running untrusted guest
 snippets inside a `net/http` handler, one isolated interpreter per request,
@@ -245,18 +259,47 @@ Incoming (your page → the iframe's `contentWindow`):
 
 ### 3. Build your own frontend from scratch
 
-The production playground (`web/index.html`, a ~500-line shell, plus its
-~3000-line `web/playground.js` controller) is a full-featured CodeMirror-based
-editor — more than most integrations need to read through just to learn the
-WASM worker's message protocol. [web/minimal.html](web/minimal.html)
-and [web/app.js](web/app.js) are a from-scratch, framework-free reference
-frontend (a plain `<textarea>`, a handful of buttons, no CDN dependency)
-that implements the same protocol in well under 300 lines — a copyable
-starting point for a custom UI. Build the WASM module once (`make
-build-wasm`), then serve `web/` and open `minimal.html`.
+Use the dependency-free ES module [web/nanogo.mjs](web/nanogo.mjs), with
+[TypeScript declarations](web/nanogo.d.mts), to create a ready worker and call
+the interpreter through Promises:
 
-The one non-obvious detail either reference implementation needs to get
-right: `wasm_worker.js` coalesces high-frequency messages (console lines,
+```js
+import { createNanoGo } from './nanogo.mjs';
+
+const nano = await createNanoGo({
+  onMessage: message => {
+    if (message.type === 'log') console.log(message.text);
+  }
+});
+try {
+  const { stats } = await nano.run('package main; func main() { ConsoleLog(42) }');
+  console.log(stats.steps);
+} finally {
+  nano.dispose();
+}
+```
+
+The client queues concurrent calls, unwraps output batches, and rejects pending
+operations on startup failure or disposal. It also exposes formatting, vetting,
+tests, and multi-file workspace operations. Its default worker URL is relative
+to the module, making it usable from pages in other directories. See the
+[integration guide](docs/integration.md#browser-a-promise-based-client) for API,
+asset configuration, error handling, and lifecycle details.
+
+[web/minimal.html](web/minimal.html) and [web/app.js](web/app.js) provide a
+framework-free reference frontend using this client: a plain `<textarea>`,
+buttons, and a canvas, with no CDN dependency. Build with `make build-wasm`,
+serve `web/`, and open `minimal.html`.
+
+**Upgrading an existing page:** `app.js` accepts both classic and module script
+tags. Ship `nanogo.mjs` alongside it; the client loads through dynamic import. Existing Go
+host APIs and raw worker operation names remain available. Publish
+`nanogo.wasm` with the `wasm_exec.js` produced by the same toolchain. See the
+[upgrade guide](docs/upgrading.md) for the compatibility matrix, error/completion
+changes, deployment steps, and the limits of historical-version testing.
+
+For clients using the raw worker protocol, `wasm_worker.js` coalesces
+high-frequency messages (console lines,
 canvas updates) into `{type:'batch', items:[...]}` so a tight guest loop
 costs one `postMessage` instead of thousands. Canvas frames transfer their
 fresh byte grid to the window rather than structured-cloning it, avoiding a
@@ -299,7 +342,7 @@ worker.postMessage({
 });
 ```
 
-`workspace-check-result` reports `{ok, workspace}` with the resolved module,
+`workspace-check-result` reports `result: {ok, workspace}` with the resolved module,
 packages, files, and imports. `workspace-done` carries the normal run stats
 plus `stats.workspace`; `workspace-test-result` aggregates the supported
 `TestXxx` subset across packages. Paths are relative, must end in `.go` or be `go.mod`,
@@ -1279,6 +1322,8 @@ for _, entry := range entries {
 
 - Go 1.25.0 or later
 - Make (optional, for convenience)
+- Node.js for browser and WASM tests
+- Binaryen's `wasm-opt` for the optional optimized WASM build
 
 ### Build Commands
 
@@ -1289,9 +1334,14 @@ make all
 # Build WebAssembly module only
 make build-wasm
 
+# Reduce the raw WASM size with Binaryen, preserving all features
+make build-wasm-optimized
+
 # Build the WASM and emit pre-compressed .gz / .br variants
 # (brotli is optional; the target falls back gracefully when not installed)
 make build-wasm-compressed
+# Or combine binary optimization and compression
+make build-wasm-optimized-compressed
 
 # Print uncompressed / gzip / brotli sizes of web/nanogo.wasm
 make size-report
@@ -1307,6 +1357,9 @@ make build-repl
 
 # Run tests
 make test
+make test-web
+make test-wasm
+make test-wasm-artifact # executes the already-built WASM
 
 # Static checks, races and a short coverage-guided fuzz pass
 make vet
@@ -1380,7 +1433,9 @@ go test ./cmd/cli
 `go test ./...` is not the native test command for this repository: `cmd/wasm`
 and `runtime` import `syscall/js` and must be built for `GOOS=js GOARCH=wasm`,
 while `samples/` intentionally contains multiple independent `main` programs.
-Use `make build-wasm` to verify the WASM target instead.
+Use `make test-wasm` for its Go tests and `make test-wasm-artifact` after building
+to execute the actual browser artifact. See the [build guide](docs/performance.md)
+for the full validation and benchmarking workflow.
 
 ## Exact numbers and geometry
 
@@ -1404,6 +1459,15 @@ scalar operators and `++`/`--` reject these values. `Vec2`, `Vec3` and Cartesian
 in JSON and host exports, including amounts above JavaScript's safe integer range.
 
 ## ⚡ Performance & Deployment
+
+The [build and performance guide](docs/performance.md) gives reproducible
+commands and measured before/after results. Numeric compound assignments now
+update inline bindings directly, avoiding temporary boxed values; focused
+integer and float workloads measured 37–40% less time and about 67% fewer
+allocations on an Apple M2 Max with Go 1.27.1. Measure your own workload with
+`BenchmarkCompoundAssignments`. The optional Binaryen build reduced the raw
+WASM by 8.65% in the recorded comparison while retaining all features; its
+gzip transfer-size improvement was much smaller (0.26%, with Brotli slightly larger).
 
 The [bit-parallel Game of Life sample](samples/game_of_life) processes 32 cells
 per word and reuses two buffers. It also powers the playground’s Life demo.
@@ -1448,15 +1512,11 @@ few deployment tweaks can improve cold-load time:
 ### 1. Serve pre-compressed WASM
 
 `make build-wasm-compressed` produces `web/nanogo.wasm.gz` and (if `brotli` is
-installed) `web/nanogo.wasm.br`. It defaults to compression level 6 for much
-faster local and CI builds; releases can opt into maximum compression with
-`GZIP_LEVEL=9 BROTLI_QUALITY=11`. Typical maximum-compression sizes:
-
-| Encoding     | Size          |
-|--------------|---------------|
-| uncompressed | ~7.7 MB       |
-| gzip (-9)    | ~2.0 MB (-74%)|
-| brotli (-11) | ~1.4 MB (-82%)|
+installed) `web/nanogo.wasm.br`. It defaults to compression level 6 for faster
+local and CI builds; releases can opt into maximum compression with
+`GZIP_LEVEL=9 BROTLI_QUALITY=11`. Use `make build-wasm-optimized-compressed` to
+also optimize the raw binary with Binaryen. The build copies `wasm_exec.js`
+from the selected Go toolchain and removes compressed files from earlier builds.
 
 Run `make size-report` after building to see the exact numbers for your tree.
 
@@ -1468,7 +1528,7 @@ location /nanogo.wasm {
     brotli_static on;         # serves nanogo.wasm.br when client supports br
     types { application/wasm wasm; }
     default_type application/wasm;
-    add_header Cache-Control "public, max-age=31536000, immutable";
+    add_header Cache-Control "public, max-age=0, must-revalidate";
 }
 ```
 
@@ -1477,9 +1537,15 @@ location /nanogo.wasm {
 ```caddyfile
 @wasm path *.wasm
 header @wasm Content-Type application/wasm
-header @wasm Cache-Control "public, max-age=31536000, immutable"
+header @wasm Cache-Control "public, max-age=0, must-revalidate"
 encode zstd gzip
 ```
+
+These snippets revalidate stable filenames. For assets published under a
+versioned URL, use a long-lived immutable policy. nginx's Brotli directive
+requires its Brotli module; Caddy's example compresses responses dynamically.
+Creating `.gz`/`.br` files alone does not make a static server serve them with
+the appropriate `Content-Encoding`.
 
 ### 2. Streaming instantiation
 

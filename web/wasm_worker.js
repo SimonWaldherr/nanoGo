@@ -2,6 +2,8 @@
 // Runs the Go WASM in a Web Worker and forwards structured messages to the main thread.
 
 let goReady = false;
+let _initPromise;
+let _runtimeFailure;
 // Resolved by Go (via the `nanoGoSignalReady` host helper) once all
 // `nanoGo*` globals have been registered. This avoids the previous
 // busy-wait loop that polled every 10 ms for up to 3 seconds.
@@ -142,10 +144,10 @@ self.onmessage = async function (ev) {
   const msg = ev.data;
   if (msg && msg.type === 'init') {
     try {
-      await initWasmWorker();
+      await initWasmWorker(msg);
       self.postMessage({ type: 'ready', capabilities: getCapabilities() });
     } catch (e) {
-      self.postMessage({ type: 'error', text: 'WASM init failed: ' + (e && e.message ? e.message : String(e)) });
+      self.postMessage({ type: 'error', fatal: true, text: 'WASM init failed: ' + (e && e.message ? e.message : String(e)) });
     }
     return;
   }
@@ -155,8 +157,9 @@ self.onmessage = async function (ev) {
       return;
     }
     const t0 = Date.now();
+    let stats = null;
+    let error;
     try {
-      let stats = null;
       if (msg.mode === 'deferred') {
         // Buffer all worker->host messages until the run completes,
         // then flush them in order. Wrap in try/finally so a thrown
@@ -171,17 +174,20 @@ self.onmessage = async function (ev) {
           flushBatch();
           self.postMessage = origPost;
           for (const m of buffer) { postGuestPayload(origPost, m); }
-          origPost.call(self, { type: 'done', elapsed: Date.now() - t0, stats: stats });
         }
       } else {
         stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace, !!msg.profile, msg.breakpoints || []));
         flushBatch();
-        self.postMessage({ type: 'done', elapsed: Date.now() - t0, stats: stats });
       }
     } catch (err) {
       flushBatch();
-      self.postMessage({ type: 'error', text: String(err) });
+      error = String(err);
+      self.postMessage({ type: 'error', text: error });
     }
+    // Every initialized run has exactly one terminal response, after all
+    // output (including thrown JS errors). Promise clients rely on this to
+    // advance their queue without mixing consecutive executions.
+    self.postMessage({ type: 'done', elapsed: Date.now() - t0, stats, ...(error ? { error } : {}) });
     return;
   }
   if (msg && msg.type === 'workspace-sync') {
@@ -485,9 +491,16 @@ async function instantiateWasm(url, imports) {
   return (await WebAssembly.instantiate(await response.arrayBuffer(), imports)).instance;
 }
 
-async function initWasmWorker() {
-  if (goReady) return;
-  importScripts('wasm_exec.js');
+function initWasmWorker(options = {}) {
+  // Concurrent init messages share both the download and the Go runtime.
+  // A failed partially-started runtime must be replaced with a new worker.
+  if (_runtimeFailure) return Promise.reject(_runtimeFailure);
+  if (!_initPromise) _initPromise = startWasmWorker(options);
+  return _initPromise;
+}
+
+async function startWasmWorker(options) {
+  importScripts(options.wasmExecURL || 'wasm_exec.js');
   const go = new Go();
 
   // Hook for Go to signal readiness once it has registered its globals.
@@ -505,29 +518,50 @@ async function initWasmWorker() {
   // all — on a browser that never installs (or hasn't yet activated) the
   // service worker, the plain HTTP cache could keep serving a stale
   // interpreter build indefinitely after a deploy.
-  const WASM_URL = 'nanogo.wasm?8';
+  const WASM_URL = options.wasmURL || 'nanogo.wasm?8';
 
   // Prefer streaming instantiation: starts compilation while bytes are
   // still arriving and avoids buffering the full module in memory.
   const instance = await instantiateWasm(WASM_URL, go.importObject);
 
   // Run the Go program (this registers nanoGo* globals via syscall/js).
-  go.run(instance);
+  const exited = Promise.resolve(go.run(instance)).then(() => {
+    throw new Error('Go runtime exited');
+  });
+  // Observe later exits too, after startup has already completed. Without
+  // this handler Go failures become unhandled rejections and clients wait
+  // forever for replies from a runtime that no longer exists.
+  exited.catch((error) => {
+    _runtimeFailure = error;
+    if (!goReady) return;
+    goReady = false;
+    self.postMessage({ type: 'error', fatal: true, text: String(error) });
+  });
 
   // If the Go side calls nanoGoSignalReady the promise is resolved
   // synchronously during go.run. If the build doesn't include that
   // hook (older WASM), fall back to a short bounded poll so old
   // builds still work — but we only spin for a short window.
-  await Promise.race([
-    _readyPromise,
-    (async () => {
-      const deadline = Date.now() + 3000;
-      while (typeof self.nanoGoRun !== 'function') {
-        if (Date.now() > deadline) throw new Error('nanoGoRun not registered');
-        await new Promise(r => setTimeout(r, 10));
-      }
-    })()
-  ]);
+  let pollTimer;
+  let readyTimer;
+  try {
+    await Promise.race([
+      _readyPromise,
+      exited,
+      new Promise((resolve, reject) => {
+        const poll = () => {
+          if (typeof self.nanoGoRun === 'function') resolve();
+          else pollTimer = setTimeout(poll, 10);
+        };
+        readyTimer = setTimeout(() => reject(new Error('nanoGoRun not registered')), 3000);
+        poll();
+      })
+    ]);
+  } finally {
+    clearTimeout(pollTimer);
+    clearTimeout(readyTimer);
+  }
+  if (_runtimeFailure) throw _runtimeFailure;
 
   // Make sure references are populated (Go usually puts them on globalThis).
   self.nanoGoRun      = self.nanoGoRun      || self.globalThis?.nanoGoRun;

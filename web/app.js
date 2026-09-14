@@ -1,13 +1,8 @@
-/* global window */
 //
 // app.js — a minimal, from-scratch reference frontend for nanoGo's WASM
-// worker, independent of index.html's full CodeMirror-based playground.
+// worker, using the reusable promise client in nanogo.mjs.
 //
-// This is NOT loaded by index.html (that page owns its UI directly in an
-// inline <script>). It exists for third parties who want to build their own
-// frontend against cmd/wasm's WASM build and need a short, readable example
-// of the worker message protocol rather than reverse-engineering it out of
-// the ~2000-line production UI. Pair it with web/minimal.html, which
+// Pair it with web/minimal.html, which
 // supplies the plain <textarea>/<button> markup this file expects, and
 // reuses this same directory's already-built nanogo.wasm, wasm_exec.js and
 // wasm_worker.js — no separate build step.
@@ -92,40 +87,48 @@ func main() {
     else ctx.clearRect(x * cellSize, y * cellSize, cellSize, cellSize);
   }
 
-  let worker = null;
+  let client = null;
+  let starting = false;
 
-  function startWorker() {
-    if (worker) return;
-    worker = new Worker('wasm_worker.js');
-
-    // The worker coalesces high-frequency messages (console lines, canvas
-    // updates) into `{type:'batch', items:[...]}` so a tight guest loop
-    // doesn't cost one postMessage per line/pixel. Unwrap it through the
-    // same dispatcher as an ordinary message, or a program like the "Life"
-    // demo in the full playground will appear to produce almost no output.
-    worker.onmessage = (ev) => {
-      const msg = ev.data;
-      if (!msg || !msg.type) return;
-      if (msg.type === 'batch') {
-        for (const item of msg.items) handleMessage(item);
-        return;
-      }
-      handleMessage(msg);
-    };
-    worker.onerror = (err) => {
+  async function startWorker() {
+    if (client || starting) return;
+    starting = true;
+    if (runBtn) runBtn.disabled = true;
+    if (stopBtn) stopBtn.disabled = true;
+    try {
+      // The client owns startup, output batching, and operation ordering.
+      // Dynamic import keeps this external file usable as a classic script
+      // and as a module. Relative imports resolve against app.js itself.
+      const { createNanoGo } = await import('./nanogo.mjs');
+      client = await createNanoGo({ onMessage: handleMessage });
+      if (runBtn) runBtn.disabled = false;
+      if (stopBtn) stopBtn.disabled = false;
+    } catch (error) {
       setStatus('Worker error', 'error');
-      log('worker error: ' + err.message);
-    };
-    worker.postMessage({ type: 'init' });
+      log(error.message);
+    } finally {
+      starting = false;
+    }
+  }
+
+  function request(method, ...args) {
+    if (!client) return;
+    const activeClient = client;
+    activeClient[method](...args).catch((error) => {
+      // Protocol errors already went through handleMessage. Disposing a
+      // worker on Stop intentionally cancels its pending operations.
+      if (client === activeClient && !error.response) {
+        setStatus('Worker error', 'error');
+        log(error.message);
+      }
+    });
   }
 
   function handleMessage(m) {
     switch (m.type) {
       case 'ready':
         setStatus('Ready', 'ready');
-        if (runBtn) runBtn.disabled = false;
         log('WASM ready. Capabilities: ' + JSON.stringify(m.capabilities || {}));
-        loadCodeFromURL();
         break;
       case 'log':
         log(String(m.text));
@@ -215,7 +218,8 @@ func main() {
         break;
       case 'done':
         log('=== finished' + (m.elapsed != null ? ' (' + m.elapsed + 'ms)' : '') + ' ===');
-        setStatus('Ready', 'ready');
+        setStatus(m.error || (m.stats && m.stats.error) ? 'Runtime error' : 'Ready',
+          m.error || (m.stats && m.stats.error) ? 'error' : 'ready');
         break;
       default:
         console.log('worker:', m);
@@ -223,33 +227,33 @@ func main() {
   }
 
   function runCode() {
-    if (!worker) return;
+    if (!client) return;
     if (canvasEl) canvasEl.getContext('2d').clearRect(0, 0, canvasEl.width, canvasEl.height);
     log('=== running ===');
     setStatus('Running…', 'loading');
-    worker.postMessage({ type: 'run', source: srcEl.value, mode: 'stream' });
+    request('run', srcEl.value, { mode: 'stream' });
   }
   if (runBtn) runBtn.onclick = runCode;
 
   if (stopBtn) stopBtn.onclick = () => {
-    if (!worker) return;
-    worker.terminate();
-    worker = null;
+    if (!client) return;
+    client.dispose();
+    client = null;
     setStatus('Stopped', 'error');
     log('=== stopped ===');
     startWorker();
   };
 
   if (formatBtn) formatBtn.onclick = () => {
-    if (worker) worker.postMessage({ type: 'format', source: srcEl.value });
+    request('format', srcEl.value);
   };
 
   if (vetBtn) vetBtn.onclick = () => {
-    if (worker) worker.postMessage({ type: 'vet', source: srcEl.value });
+    request('vet', srcEl.value);
   };
 
   if (testBtn) testBtn.onclick = () => {
-    if (worker) worker.postMessage({ type: 'test', source: srcEl.value, filter: testFilterEl ? testFilterEl.value.trim() : '' });
+    request('test', srcEl.value, { filter: testFilterEl ? testFilterEl.value.trim() : '' });
   };
 
   if (clearBtn) clearBtn.onclick = () => {
@@ -258,7 +262,7 @@ func main() {
   };
 
   if (shareBtn) shareBtn.onclick = () => {
-    const b64 = btoa(unescape(encodeURIComponent(srcEl.value)));
+    const b64 = btoa(Array.from(new TextEncoder().encode(srcEl.value), byte => String.fromCharCode(byte)).join(''));
     const url = location.origin + location.pathname + '#code=' + b64;
     navigator.clipboard.writeText(url).then(
       () => log('share URL copied to clipboard'),
@@ -270,7 +274,7 @@ func main() {
     const hash = location.hash.startsWith('#code=') ? location.hash.slice(6) : '';
     if (hash) {
       try {
-        srcEl.value = decodeURIComponent(atob(hash));
+        srcEl.value = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(hash), char => char.charCodeAt(0)));
         log('code loaded from URL');
         return;
       } catch (e) { /* fall through to the default example below */ }
@@ -292,6 +296,7 @@ func main() {
     if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') { runCode(); ev.preventDefault(); }
   });
 
+  loadCodeFromURL();
   if (location.protocol === 'file:') {
     setStatus('Error: serve over HTTP, not file://', 'error');
     log('WebAssembly requires an HTTP server; opening this file directly will not work.');

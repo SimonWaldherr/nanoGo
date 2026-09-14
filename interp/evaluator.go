@@ -91,8 +91,23 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 		}
 	}
 
-	// Collect top-level declarations.
+	// Register types/functions before evaluating package initializers, which
+	// may call functions declared later in the file. Preserve source order
+	// within the variable/constant declarations and within init functions.
+	decls := make([]ast.Decl, 0, len(file.Decls))
 	for _, decl := range file.Decls {
+		if gd, ok := decl.(*ast.GenDecl); ok && (gd.Tok == token.CONST || gd.Tok == token.VAR) {
+			continue
+		}
+		decls = append(decls, decl)
+	}
+	for _, decl := range file.Decls {
+		if gd, ok := decl.(*ast.GenDecl); ok && (gd.Tok == token.CONST || gd.Tok == token.VAR) {
+			decls = append(decls, decl)
+		}
+	}
+	var inits []*Function
+	for _, decl := range decls {
 		if err := exec.err(); err != nil {
 			return err
 		}
@@ -146,6 +161,11 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 					}
 					for i, name := range vs.Names {
 						if name.Name == "_" {
+							if i < len(vs.Values) {
+								if _, err := vm.evalExpr(vs.Values[i], global); err != nil {
+									return err
+								}
+							}
 							continue
 						}
 						if i < len(vs.Values) {
@@ -161,6 +181,9 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 							v, err := vm.evalExpr(vs.Values[i], global)
 							if err != nil {
 								return err
+							}
+							if vs.Type != nil {
+								v = vm.coerceToType(v, typeString(vs.Type))
 							}
 							val = v
 						} else {
@@ -216,6 +239,8 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 					vm.types[fn.RecvType] = td
 				}
 				td.Methods[fn.Name] = fn
+			} else if fn.Name == "init" {
+				inits = append(inits, fn)
 			} else {
 				vm.funcs[fn.Name] = fn
 				vm.declare(fn.Name, fn, vm.globals)
@@ -223,6 +248,11 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 		}
 	}
 
+	for _, fn := range inits {
+		if _, err := vm.callFunction(fn, global, nil, nil); err != nil {
+			return err
+		}
+	}
 	// Execute main()
 	mainFn, ok := vm.funcs["main"]
 	if !ok {
@@ -414,7 +444,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 				return nil, err
 			}
 			if !ok2 {
-				return zeroValue(ch.ElementType), nil
+				return vm.zeroValueForType(ch.ElementType), nil
 			}
 			return val, nil
 		}
@@ -2294,8 +2324,14 @@ func (vm *Interpreter) tryEvalIntExpr(e ast.Expr, env *Env, checkpoint bool) (va
 			}
 			return left % right, true, nil
 		case token.SHL:
+			if right < 0 {
+				return 0, true, &panicError{value: "runtime error: negative shift amount"}
+			}
 			return left << uint(right), true, nil
 		case token.SHR:
+			if right < 0 {
+				return 0, true, &panicError{value: "runtime error: negative shift amount"}
+			}
 			return left >> uint(right), true, nil
 		case token.AND:
 			return left & right, true, nil
@@ -2814,6 +2850,9 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 					if err != nil {
 						return controlFlow{}, err
 					}
+					if !ok2 {
+						v = vm.zeroValueForType(ch.ElementType)
+					}
 					rightVals = []any{v, ok2}
 					goto RHS_DONE
 				}
@@ -2943,6 +2982,13 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				return controlFlow{}, NewRuntimeError("unsupported assignment token")
 			}
 			if id, ok := st.Lhs[0].(*ast.Ident); ok {
+				if handled, err := vm.compoundNumeric(id.Name, base, rightVals[0], env); handled {
+					if err == nil && vm.trackingVariables() {
+						value, _ := vm.get(id.Name, env)
+						vm.recordVariable(id.Name, value, id, env)
+					}
+					return controlFlow{}, err
+				}
 				cur, _ := vm.get(id.Name, env)
 				newVal, err := vm.applyBinaryOp(base, cur, rightVals[0])
 				if err != nil {
@@ -3047,6 +3093,11 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				}
 				for i, n := range vs.Names {
 					if n.Name == "_" {
+						if i < len(vs.Values) {
+							if _, err := vm.evalExpr(vs.Values[i], env); err != nil {
+								return controlFlow{}, err
+							}
+						}
 						continue
 					}
 					if i < len(vs.Values) {
@@ -3804,7 +3855,7 @@ func (vm *Interpreter) evalSelectStmt(st *ast.SelectStmt, env *Env, label string
 			if ch.direction == channelSendOnly {
 				return controlFlow{}, NewRuntimeError("receive on send-only host channel")
 			}
-			appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.C)}, selectChoice{clause: cc})
+			appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.C)}, selectChoice{clause: cc, channel: ch})
 			if ch.done != nil {
 				appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.done)}, selectChoice{clause: cc, channel: ch, closed: true})
 			}
@@ -3828,7 +3879,7 @@ func (vm *Interpreter) evalSelectStmt(st *ast.SelectStmt, env *Env, label string
 			if ch.direction == channelSendOnly {
 				return controlFlow{}, NewRuntimeError("receive on send-only host channel")
 			}
-			appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.C)}, selectChoice{clause: cc})
+			appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.C)}, selectChoice{clause: cc, channel: ch})
 			if ch.done != nil {
 				appendCase(reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch.done)}, selectChoice{clause: cc, channel: ch, closed: true})
 			}
@@ -3910,6 +3961,9 @@ func (vm *Interpreter) evalSelectStmt(st *ast.SelectStmt, env *Env, label string
 		var rv any
 		if recvVal.IsValid() {
 			rv = recvVal.Interface()
+		}
+		if !recvOK && choice.channel != nil {
+			rv = vm.zeroValueForType(choice.channel.ElementType)
 		}
 		bindVar := func(name string, val any) {
 			if name == "_" {
@@ -3996,6 +4050,9 @@ func (vm *Interpreter) evalSingleSelectClause(cc *ast.CommClause, env *Env, labe
 		recvVal, recvOK, err = ch.Receive(vm.Context())
 		if err != nil {
 			return controlFlow{}, true, err
+		}
+		if !recvOK {
+			recvVal = vm.zeroValueForType(ch.ElementType)
 		}
 	case *ast.SendStmt:
 		chv, err := vm.evalExpr(comm.Chan, env)
@@ -4917,8 +4974,14 @@ func (vm *Interpreter) applyBinaryOp(op token.Token, left, right any) (any, erro
 			case token.AND_NOT:
 				return l &^ r, nil
 			case token.SHL:
+				if r < 0 {
+					return nil, &panicError{value: "runtime error: negative shift amount"}
+				}
 				return l << uint(r), nil
 			case token.SHR:
+				if r < 0 {
+					return nil, &panicError{value: "runtime error: negative shift amount"}
+				}
 				return l >> uint(r), nil
 			case token.EQL:
 				return l == r, nil
@@ -5019,9 +5082,17 @@ func (vm *Interpreter) applyBinaryOp(op token.Token, left, right any) (any, erro
 		}
 		return ToInt(left) % ToInt(right), nil
 	case token.SHL:
-		return ToInt(left) << uint(ToInt(right)), nil
+		amount := ToInt(right)
+		if amount < 0 {
+			return nil, &panicError{value: "runtime error: negative shift amount"}
+		}
+		return ToInt(left) << uint(amount), nil
 	case token.SHR:
-		return ToInt(left) >> uint(ToInt(right)), nil
+		amount := ToInt(right)
+		if amount < 0 {
+			return nil, &panicError{value: "runtime error: negative shift amount"}
+		}
+		return ToInt(left) >> uint(amount), nil
 	case token.AND:
 		return ToInt(left) & ToInt(right), nil
 	case token.OR:

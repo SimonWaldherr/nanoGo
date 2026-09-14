@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"io"
 	"math"
 	mrand "math/rand"
 	"path"
@@ -466,14 +467,27 @@ func registerJSONPackage(vm *Interpreter) {
 // registerGobPackage exposes compact binary serialization for values that can
 // cross nanoGo's host bridge. Unlike JSON this keeps a byte slice throughout
 // the guest runtime, avoiding a binary-to-string round trip.
+// Only output buffers are reused: gob encoders cache transmitted type IDs and
+// must remain fresh for every independent message. Large buffers are discarded
+// so an exceptional message does not pin its capacity in the pool.
+var gobOutputBuffers = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+const maxPooledGobBuffer = 64 << 10
+
 func registerGobPackage(vm *Interpreter) {
 	gobPkg := &Package{Name: "encoding/gob", Funcs: map[string]*Function{}}
 	gobPkg.Funcs["Encode"] = &Function{Name: "Encode", Params: []string{"value"}, Native: func(args []any) (any, error) {
 		if len(args) == 0 {
 			return nil, NewRuntimeError("gob.Encode: missing value")
 		}
-		var buffer bytes.Buffer
-		if err := gob.NewEncoder(&buffer).Encode(gobEnvelope{Value: ToNativeValue(args[0])}); err != nil {
+		buffer := gobOutputBuffers.Get().(*bytes.Buffer)
+		defer func() {
+			if buffer.Cap() <= maxPooledGobBuffer {
+				buffer.Reset()
+				gobOutputBuffers.Put(buffer)
+			}
+		}()
+		if err := gob.NewEncoder(buffer).Encode(gobEnvelope{Value: ToNativeValue(args[0])}); err != nil {
 			return nil, err
 		}
 		return byteSliceValue(buffer.Bytes()), nil
@@ -483,7 +497,7 @@ func registerGobPackage(vm *Interpreter) {
 			return nil, NewRuntimeError("gob.Decode: missing data")
 		}
 		var envelope gobEnvelope
-		if err := gob.NewDecoder(bytes.NewReader(binaryArg(args[0]))).Decode(&envelope); err != nil {
+		if err := gob.NewDecoder(binaryReader(args[0])).Decode(&envelope); err != nil {
 			return nil, err
 		}
 		return bridgeToGuest(envelope.Value)
@@ -558,6 +572,34 @@ func binaryArg(value any) []byte {
 		return data
 	}
 	return []byte(ToString(value))
+}
+
+// Both readers implement io.ByteReader, so gob needs neither a string copy
+// nor an additional buffered reader. Each decode still owns its stream state.
+func binaryReader(value any) io.Reader {
+	if text, ok := value.(string); ok {
+		return strlib.NewReader(text)
+	}
+	return bytes.NewReader(binaryArg(value))
+}
+
+// Write guest bytes into the buffer's own free capacity instead of allocating
+// a temporary []byte. The guest slice remains independent of the buffer.
+func writeBufferValue(buf *bytes.Buffer, value any) (int, error) {
+	switch value := value.(type) {
+	case string:
+		return buf.WriteString(value)
+	case *SliceVal:
+		if isByteType(value.ElementType) {
+			buf.Grow(len(value.Data))
+			data := buf.AvailableBuffer()[:len(value.Data)]
+			for i, element := range value.Data {
+				data[i] = byte(ToInt(element))
+			}
+			return buf.Write(data)
+		}
+	}
+	return buf.Write(binaryArg(value))
 }
 
 func registerStringsPackage(vm *Interpreter) {
@@ -895,7 +937,7 @@ func registerBytesPackage(vm *Interpreter) {
 	bufType := &TypeDef{Name: "Buffer", Kind: "struct", Fields: []FieldDef{}, Methods: map[string]*Function{}}
 	vm.types[bufType.Name] = bufType
 	bufType.Methods["Write"] = &Function{Name: "Write", RecvType: "Buffer", Params: []string{"data"}, Native: func(args []any) (any, error) {
-		n, _ := ensureNativeBuffer(args[0]).Write(binaryArg(args[1]))
+		n, _ := writeBufferValue(ensureNativeBuffer(args[0]), args[1])
 		return n, nil
 	}}
 	bufType.Methods["WriteString"] = &Function{Name: "WriteString", RecvType: "Buffer", Params: []string{"s"}, Native: func(args []any) (any, error) {
