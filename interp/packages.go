@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
-	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"io"
@@ -44,19 +43,21 @@ var builtinPackageBuilders map[string]func(*Interpreter)
 
 func init() {
 	builtinPackageBuilders = map[string]func(*Interpreter){
-		"fmt":           registerFmtPackage,
-		"flag":          registerFlagPackage,
-		"debug":         registerDebugPackage,
-		"time":          registerTimePackage,
-		"math":          registerMathPackage,
-		"numeric":       registerNumericPackage,
-		"math/rand":     registerRandPackage,
-		"crypto/rand":   registerCryptoRandPackage,
-		"crypto/sha256": registerSHA256Package,
-		"encoding/json": registerJSONPackage,
-		"encoding/gob":  registerGobPackage,
-		"protobuf":      registerProtobufPackage,
-		"grpc":          registerGRPCPackage,
+		"fmt":               registerFmtPackage,
+		"flag":              registerFlagPackage,
+		"debug":             registerDebugPackage,
+		"time":              registerTimePackage,
+		"math":              registerMathPackage,
+		"numeric":           registerNumericPackage,
+		"math/rand":         registerRandPackage,
+		"crypto/rand":       registerCryptoRandPackage,
+		"crypto/sha256":     registerSHA256Package,
+		"encoding/json":     registerJSONPackage,
+		"nanogo/host":       func(vm *Interpreter) { vm.installHostPackage() },
+		"nanogo/jsonlegacy": registerJSONLegacyPackage,
+		"encoding/gob":      registerGobPackage,
+		"protobuf":          registerProtobufPackage,
+		"grpc":              registerGRPCPackage,
 		// json is a convenience alias for encoding/json; the builder registers
 		// the same *Package object under both names.
 		"json":          registerJSONPackage,
@@ -435,33 +436,6 @@ func registerRandPackage(vm *Interpreter) {
 		return value, nil
 	}}
 	vm.RegisterPackage("math/rand", randPkg)
-}
-
-func registerJSONPackage(vm *Interpreter) {
-	// --- encoding/json --- (very small facade)
-	jsonPkg := &Package{Name: "encoding/json", Funcs: map[string]*Function{}}
-	// Marshal(v any) -> string
-	jsonPkg.Funcs["Marshal"] = &Function{Name: "Marshal", Native: func(args []any) (any, error) {
-		if len(args) == 0 {
-			return "null", nil
-		}
-		b, err := json.Marshal(ToNativeValue(args[0]))
-		if err != nil {
-			return "", err
-		}
-		return string(b), nil
-	}}
-	// Unmarshal(s string) -> any   (NOTE: diverges from stdlib, returns value instead of filling a pointer)
-	jsonPkg.Funcs["Unmarshal"] = &Function{Name: "Unmarshal", Native: func(args []any) (any, error) {
-		if len(args) == 0 {
-			return nil, nil
-		}
-		var v any
-		err := json.Unmarshal([]byte(ToString(args[0])), &v)
-		return v, err
-	}}
-	vm.RegisterPackage("encoding/json", jsonPkg)
-	vm.RegisterPackage("json", jsonPkg) // convenience alias
 }
 
 // registerGobPackage exposes compact binary serialization for values that can

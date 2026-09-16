@@ -272,6 +272,9 @@ func attachRuntimeErrorLocation(err error, loc SourceLocation) {
 	if re, ok := err.(*RuntimeError); ok && re.Loc.Line == 0 {
 		re.Loc = loc
 	}
+	if pe, ok := err.(*panicError); ok && pe.Loc.Line == 0 {
+		pe.Loc = loc
+	}
 }
 
 // debugExpression returns canonical source for a probe expression. Identifiers

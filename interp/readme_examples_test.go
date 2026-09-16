@@ -97,7 +97,7 @@ func TestReadmeGoExamples(t *testing.T) {
 				if !strings.Contains(got, "JSON: {\"features\":[\"wasm\",\"browser\",\"lightweight\"],\"name\":\"nanoGo\",\"version\":\"1.0\"}") {
 					t.Errorf("JSON output did not contain the documented data: %q", got)
 				}
-				if !strings.Contains(got, "Parsed: map[features:[wasm browser lightweight] name:nanoGo version:1.0]") {
+				if !strings.Contains(got, "Parsed: nanoGo 1.0 3") {
 					t.Errorf("unexpected parsed JSON output: %q", got)
 				}
 			case 5:

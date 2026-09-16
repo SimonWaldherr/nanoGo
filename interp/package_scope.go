@@ -22,7 +22,8 @@ import (
 // registration; it is new, additive machinery used only by hosts that call
 // it directly (typically through interp/loader).
 type PackageScope struct {
-	Name string
+	Name     string
+	identity string
 
 	vm  *Interpreter
 	env *Env
@@ -59,13 +60,21 @@ type PackageScope struct {
 // BindHostContext are visible to every package without a separate import
 // step; user-package imports are added explicitly via Import.
 func (vm *Interpreter) NewPackageScope(name string) *PackageScope {
+	return vm.NewPackageScopeWithIdentity(name, name)
+}
+
+// NewPackageScopeWithIdentity isolates named types using a stable package identity.
+// Loaders should supply a module import path or resolved source directory.
+func (vm *Interpreter) NewPackageScopeWithIdentity(name, identity string) *PackageScope {
 	env := NewEnv(vm.globals)
+	vm.declare(typeBindingPrefix, identity, env)
 	// PackageScope.Replace is expressly supported while a loaded package is
 	// running. Mark only this host-mutable boundary as shared; function and
 	// block scopes underneath keep Environment's lock-free evaluator path.
 	env.shared = true
 	return &PackageScope{
 		Name:          name,
+		identity:      identity,
 		vm:            vm,
 		env:           env,
 		declared:      map[string]bool{},
@@ -79,11 +88,7 @@ func (vm *Interpreter) NewPackageScope(name string) *PackageScope {
 // package before calling EvalDecls on any file in the package, so forward
 // references across files resolve regardless of file order.
 //
-// Struct types are registered into the interpreter's single shared, global
-// type registry (matching Run/RunContext's existing behavior) — nanoGo does
-// not namespace method dispatch per package, so two different packages
-// defining a same-named struct type collide (last registration wins). This
-// is a deliberate, documented scope cut; see the loader package docs.
+// Type names are resolved against this package and its explicit imports.
 func (ps *PackageScope) CollectDecls(file *ast.File, fset *token.FileSet) error {
 	vm := ps.vm
 	for _, decl := range file.Decls {
@@ -97,29 +102,9 @@ func (ps *PackageScope) CollectDecls(file *ast.File, fset *token.FileSet) error 
 				if !ok {
 					continue
 				}
-				switch tt := ts.Type.(type) {
-				case *ast.StructType:
-					td := &TypeDef{Name: ts.Name.Name, Kind: "struct", Fields: []FieldDef{}, Methods: map[string]*Function{}}
-					for _, f := range tt.Fields.List {
-						ft := typeString(f.Type)
-						tag := astStructTag(f.Tag)
-						for _, n := range f.Names {
-							td.Fields = append(td.Fields, newFieldDef(n.Name, ft, tag))
-						}
-					}
-					td.allIntFields = structFieldsAreInts(td.Fields)
-					vm.types[td.Name] = td
-					ps.declaredTypes[td.Name] = true
-				case *ast.InterfaceType:
-					vm.types[ts.Name.Name] = &TypeDef{Name: ts.Name.Name, Kind: "interface", InterfaceMethods: interfaceMethodNames(tt), InterfaceEmbeds: interfaceEmbeddedNames(tt)}
-					ps.declaredTypes[ts.Name.Name] = true
-				default:
-					underlying := typeString(tt)
-					if isBuiltinType(underlying) {
-						vm.types[ts.Name.Name] = &TypeDef{Name: ts.Name.Name, Kind: "alias", Underlying: underlying}
-						ps.declaredTypes[ts.Name.Name] = true
-					}
-				}
+				canonical := ps.identity + "." + ts.Name.Name
+				vm.registerTypeSpec(ts, ps.env, canonical)
+				ps.declaredTypes[ts.Name.Name] = true
 			}
 		case *ast.FuncDecl:
 			fn := ps.BuildFunction(d)
@@ -128,7 +113,7 @@ func (ps *PackageScope) CollectDecls(file *ast.File, fset *token.FileSet) error 
 				if len(rcv.Names) > 0 {
 					fn.RecvName = rcv.Names[0].Name
 				}
-				fn.RecvType = strings.TrimPrefix(typeString(rcv.Type), "*")
+				fn.RecvType = strings.TrimPrefix(vm.typeStringInEnv(rcv.Type, ps.env), "*")
 				td := vm.types[fn.RecvType]
 				if td == nil {
 					td = &TypeDef{Name: fn.RecvType, Kind: "struct", Methods: map[string]*Function{}}
@@ -261,7 +246,7 @@ func (ps *PackageScope) EvalDecls(ctx context.Context, file *ast.File) error {
 				}
 				if name.Name == "_" {
 					if i < len(vs.Values) {
-						if _, err := vm.evalExpr(vs.Values[i], ps.env); err != nil {
+						if _, err := vm.evalSingleExpr(vs.Values[i], ps.env); err != nil {
 							return err
 						}
 					}
@@ -278,18 +263,21 @@ func (ps *PackageScope) EvalDecls(ctx context.Context, file *ast.File) error {
 				}
 				var val any
 				if i < len(vs.Values) {
-					v, err := vm.evalExpr(vs.Values[i], ps.env)
+					v, err := vm.evalSingleExpr(vs.Values[i], ps.env)
 					if err != nil {
 						return err
 					}
 					if vs.Type != nil {
-						v = vm.coerceToType(v, typeString(vs.Type))
+						v = vm.coerceToType(v, vm.typeStringInEnv(vs.Type, ps.env))
 					}
 					val = v
 				} else {
-					val = vm.zeroValueForType(typeString(vs.Type))
+					val = vm.zeroValueForType(vm.typeStringInEnv(vs.Type, ps.env))
 				}
 				vm.declare(name.Name, val, ps.env)
+				if vs.Type != nil {
+					vm.declare(declaredTypePrefix+name.Name, vm.typeStringInEnv(vs.Type, ps.env), ps.env)
+				}
 				vm.recordVariable(name.Name, val, name, ps.env)
 				ps.declared[name.Name] = true
 			}
@@ -342,13 +330,19 @@ func (ps *PackageScope) Exports() *Package {
 			pkg.Funcs[name] = fn
 		} else {
 			pkg.Vars[name] = v
+			if value, _ := ps.vm.getLocal(constantBindingPrefix+name, ps.env); value == true {
+				if pkg.untypedConstants == nil {
+					pkg.untypedConstants = map[string]bool{}
+				}
+				pkg.untypedConstants[name] = true
+			}
 		}
 	}
 	for name := range ps.declaredTypes {
 		if !isExportedName(name) {
 			continue
 		}
-		if td, ok := ps.vm.types[name]; ok {
+		if td, ok := ps.vm.types[ps.identity+"."+name]; ok {
 			pkg.Types[name] = td
 		}
 	}

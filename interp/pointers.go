@@ -60,7 +60,7 @@ func (vm *Interpreter) addressOf(expr ast.Expr, env *Env) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return newPointerValue(value, typeString(literal.Type)), nil
+		return newPointerValue(value, vm.typeStringInEnv(literal.Type, env)), nil
 	}
 	ref, err := vm.resolveLvalue(expr, env)
 	if err != nil {
@@ -84,7 +84,24 @@ func (vm *Interpreter) addressOf(expr ast.Expr, env *Env) (any, error) {
 		header := *ref.s
 		ref.s = &header
 	}
-	return &PointerVal{ElementType: typeOfValue(vm, ref.get()), ref: ref}, nil
+	typ := typeOfValue(vm, ref.get())
+	if ref.kind == lvalueVar {
+		if declared := vm.declaredType(ref.name, ref.env); declared != "" {
+			typ = declared
+		}
+	} else if ref.kind == lvalueField {
+		if td := vm.types[ref.sv.TypeName]; td != nil {
+			for _, field := range td.Fields {
+				if field.Name == ref.name {
+					typ = field.Type
+					break
+				}
+			}
+		}
+	} else if ref.kind == lvalueSliceIndex {
+		typ = ref.s.ElementType
+	}
+	return &PointerVal{ElementType: typ, ref: ref}, nil
 }
 
 func samePointer(a, b *PointerVal) bool {
@@ -116,6 +133,10 @@ func nilGuestReference(value any) bool {
 		return v == nil || v.ref.kind == lvalueNil
 	case *ChannelVal:
 		return v == nil || v.C == nil
+	case *SliceVal:
+		return v == nil || !v.Fixed && v.Data == nil
+	case *MapVal:
+		return v == nil || v.Data == nil
 	default:
 		return value == nil
 	}

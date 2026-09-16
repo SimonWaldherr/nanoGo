@@ -4,6 +4,7 @@ package interp
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -323,21 +324,27 @@ func NewEnv(parent *Env) *Env {
 // startup and never mutated afterward, so they never contend on mu in
 // practice, but every access still goes through it uniformly for safety.
 type Package struct {
-	Name  string
-	Funcs map[string]*Function
-	Types map[string]*TypeDef
-	Vars  map[string]any
+	Name             string
+	Funcs            map[string]*Function
+	Types            map[string]*TypeDef
+	Vars             map[string]any
+	untypedConstants map[string]bool
 
 	mu sync.RWMutex
 }
 
 // Interpreter holds global state: functions, types, packages, natives.
 type Interpreter struct {
-	globals  *Env
-	types    map[string]*TypeDef
-	funcs    map[string]*Function
-	natives  map[string]func(args []any) (any, error)
-	packages map[string]*Package
+	// BridgeLimits configures copied inputs/results; set before execution.
+	BridgeLimits BridgeLimits
+	hostInputs   any
+	resultsMu    sync.Mutex
+	lastResults  ExecutionResults
+	globals      *Env
+	types        map[string]*TypeDef
+	funcs        map[string]*Function
+	natives      map[string]func(args []any) (any, error)
+	packages     map[string]*Package
 	// templateCache is allocated only if text/template is imported, then shared
 	// by the normal package native and evaluator fast path for RenderString.
 	templateCache *templateCache
@@ -445,8 +452,12 @@ const DefaultMaxContainerSize = 1 << 20
 // measured in evaluator checkpoints (expressions and statements), not Go CPU
 // instructions, so it is deterministic across machines.
 type ExecutionLimits struct {
-	MaxSteps      uint64
-	MaxGoroutines int
+	MaxSteps           uint64 `json:"maxSteps"`
+	MaxGoroutines      int    `json:"maxGoroutines"`
+	MaxCallDepth       uint64 `json:"maxCallDepth"`
+	MaxOutputBytes     uint64 `json:"maxOutputBytes"`
+	MaxAllocationUnits uint64 `json:"maxAllocationUnits"`
+	MaxResultBytes     uint64 `json:"maxResultBytes"`
 }
 
 // DefaultExecutionLimits keeps a guest from creating an unbounded number of
@@ -512,6 +523,7 @@ func NewInterpreterWithVFS(vfs *VFS) *Interpreter {
 // entirely, regardless of the host's configured Capabilities. Use
 // RegisterInternalNative for those instead.
 func (vm *Interpreter) RegisterNative(name string, f func(args []any) (any, error)) {
+	f = vm.budgetNativeOutput(name, f)
 	vm.natives[name] = f
 	vm.declare(name, &Function{Name: name, Native: f}, vm.globals)
 }
@@ -523,10 +535,9 @@ func (vm *Interpreter) RegisterNative(name string, f func(args []any) (any, erro
 // and use RegisterInternalNativeContext instead for a capability-gated
 // primitive.
 func (vm *Interpreter) RegisterNativeContext(name string, f func(context.Context, []any) (any, error)) {
-	vm.natives[name] = func(args []any) (any, error) {
-		return f(vm.Context(), args)
-	}
-	vm.declare(name, &Function{Name: name, NativeContext: f}, vm.globals)
+	wrapped := vm.budgetNativeOutput(name, func(args []any) (any, error) { return f(vm.Context(), args) })
+	vm.natives[name] = wrapped
+	vm.declare(name, &Function{Name: name, Native: wrapped}, vm.globals)
 }
 
 // RegisterInternalNative registers f under name for other native Go code to
@@ -807,6 +818,17 @@ func declareInEnv(env *Env, name string, val any) {
 }
 
 func (vm *Interpreter) set(name string, val any, env *Env) {
+	if val == nil {
+		typ := vm.declaredType(name, env)
+		if typ == "" {
+			if old, ok := vm.get(name, env); ok {
+				typ = typeOfValue(vm, old)
+			}
+		}
+		if strings.HasPrefix(typ, "[]") || strings.HasPrefix(typ, "map[") || strings.HasPrefix(typ, "*") || strings.HasPrefix(typ, "chan ") {
+			val = vm.zeroValueForType(typ)
+		}
+	}
 	// A loaded PackageScope may be replaced by the host while its child
 	// function scopes execute. Lock per scope so those shared ancestors stay
 	// safe without making purely local assignments pay synchronization.
@@ -1133,11 +1155,15 @@ func (r lvalueRef) set(v any) error {
 	case lvalueSliceIndex:
 		r.s.Data[r.i] = v
 	case lvalueMapIndex:
-		if v == nil {
-			r.m.deleteByKey(r.k)
-		} else {
-			r.m.setByKey(r.k, v)
+		if r.m.Data == nil {
+			return &panicError{value: "assignment to entry in nil map"}
 		}
+		if _, exists := r.m.getByKey(r.k); !exists && r.vm != nil {
+			if err := r.vm.chargeAllocation(1); err != nil {
+				return err
+			}
+		}
+		r.m.setByKey(r.k, v)
 	case lvalueField:
 		r.sv.setField(r.name, v)
 	}
@@ -1171,11 +1197,10 @@ type mapIndexRef struct {
 
 func (r *mapIndexRef) Get() any { v, _ := r.m.getByKey(r.k); return v }
 func (r *mapIndexRef) Set(v any) error {
-	if v == nil {
-		r.m.deleteByKey(r.k)
-	} else {
-		r.m.setByKey(r.k, v)
+	if r.m.Data == nil {
+		return &panicError{value: "assignment to entry in nil map"}
 	}
+	r.m.setByKey(r.k, v)
 	return nil
 }
 
@@ -1213,6 +1238,7 @@ type callFrame struct {
 	caller    *callFrame
 	panicking bool
 	panicVal  any
+	panicErr  *panicError
 	// depth is caller.depth+1 (0 for a goroutine's outermost call), set once
 	// at construction. DebugController uses frame *identity* (not depth) to
 	// decide step-over/into/out, but depth is cheap to keep around for

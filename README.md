@@ -14,6 +14,13 @@
 [language compatibility](compat/README.md) ·
 [runnable examples](examples)
 
+For fresh repeated execution, copied inputs and named results, structured
+errors, and resource budgets, see [embedding](docs/embedding.md) and run
+`go run ./examples/prepared`. For a single-file browser distribution with
+supplied WASM/runtime assets and no network requests, see [offline embedding](docs/offline.md).
+JSON migration details are in [JSON interoperability](docs/json.md); the
+[Go compatibility guide](docs/go-compatibility.md) defines the supported subset.
+
 ## 🚀 Overview
 
 nanoGo is a **minimalist Go interpreter** written in Go. It can run Go source dynamically in a native host (CLI, REPL, or an embedding application) and, when built for `js/wasm`, in a browser. While projects like TinyGo compile Go programs to WASM, nanoGo instead compiles the interpreter to WASM and evaluates guest Go source at runtime.
@@ -584,13 +591,14 @@ func main() {
         "features": []string{"wasm", "browser", "lightweight"},
     }
     
-    jsonStr := json.Marshal(data)
-    fmt.Println("JSON:", jsonStr)
-    
-    // nanoGo returns the decoded value; unlike encoding/json in Go, it does
-    // not take a destination pointer or return an error.
-    parsed := json.Unmarshal(jsonStr)
-    fmt.Println("Parsed:", parsed)
+    jsonBytes, err := json.Marshal(data)
+    if err != nil { panic(err) }
+    fmt.Println("JSON:", string(jsonBytes))
+
+    var parsed map[string]any
+    if err := json.Unmarshal(jsonBytes, &parsed); err != nil { panic(err) }
+    features := parsed["features"].([]any)
+    fmt.Println("Parsed:", parsed["name"], parsed["version"], len(features))
 }
 ```
 
@@ -1012,9 +1020,9 @@ nanoGo includes a curated set of built-in packages:
 This is deliberately not the full Go standard library: each listed package is
 a subset with only the functions described by its registration in
 [`interp/packages.go`](interp/packages.go). In particular,
-`encoding/json.Unmarshal` returns the decoded value instead of filling a
-pointer, so guest code should follow nanoGo's API rather than assume complete
-stdlib compatibility. `path` provides `Base`, `Clean`, `Dir`, `Ext`, `IsAbs`,
+`encoding/json` follows Go's `Marshal(v) ([]byte, error)` and
+`Unmarshal(data, &target) error` contracts for its [documented subset](docs/json.md).
+The old convenience signatures remain at `nanogo/jsonlegacy`. `path` provides `Base`, `Clean`, `Dir`, `Ext`, `IsAbs`,
 and `Join`; `unicode/utf8` provides `RuneCountInString`, `RuneLen`,
 `ValidRune`, and `ValidString`, plus `RuneError`, `RuneSelf`, and `UTFMax`.
 
@@ -1131,8 +1139,9 @@ type Account struct {
 }
 ```
 
-`json.Unmarshal` still follows nanoGo's documented convenience API and
-returns a decoded value rather than populating a destination pointer.
+`json.Unmarshal(data, &target)` populates typed destinations and returns an
+ordinary guest error. See [JSON interoperability and migration](docs/json.md)
+for the supported subset, bounded conversion, and legacy import path.
 
 ### Text Templates
 

@@ -21,8 +21,9 @@ import (
 // so hosts constructing one directly (NewRuntimeError) don't need to know
 // about source positions at all.
 type RuntimeError struct {
-	msg string
-	Loc SourceLocation
+	msg   string
+	Loc   SourceLocation
+	Stack []DiagnosticFrame
 }
 
 func (e *RuntimeError) Error() string {
@@ -42,7 +43,11 @@ type ReturnValues []any
 type multipleValues = ReturnValues
 
 // panicError is used internally to model Go's panic unwinding.
-type panicError struct{ value any }
+type panicError struct {
+	value any
+	Loc   SourceLocation
+	Stack []DiagnosticFrame
+}
 
 func guestPanic(value any) *panicError {
 	if value == nil {
@@ -85,12 +90,13 @@ func newFieldDef(name, typ, tag string) FieldDef {
 }
 
 type TypeDef struct {
-	Name         string
-	Kind         string // "struct", "interface", "chan", "alias"
-	Underlying   string // scalar representation for a named or alias type
-	Fields       []FieldDef
-	Methods      map[string]*Function
-	allIntFields bool
+	Name              string
+	Kind              string // "struct", "interface", "chan", "alias"
+	Underlying        string // scalar representation for a named or alias type
+	Fields            []FieldDef
+	Methods           map[string]*Function
+	allIntFields      bool
+	hasEmbeddedFields bool
 	// InterfaceMethods names the method set of a Kind=="interface" TypeDef
 	// (nil/empty for the empty interface). It has no *Function bodies —
 	// an interface declares signatures, not implementations — so a type
@@ -386,6 +392,8 @@ func (m *MapVal) originalKey(hashed string) any {
 // understand MapVal, SliceVal, or StructVal.
 func ToNativeValue(v any) any {
 	switch x := v.(type) {
+	case NamedValue:
+		return ToNativeValue(x.Value)
 	case *PointerVal:
 		if x == nil {
 			return nil
@@ -487,6 +495,8 @@ func structTagValue(tag, key string) (string, bool) {
 
 func isEmptyJSONValue(value any) bool {
 	switch v := value.(type) {
+	case NamedValue:
+		return isEmptyJSONValue(v.Value)
 	case nil:
 		return true
 	case bool:
@@ -621,6 +631,8 @@ func mapKeyToString(k any) string {
 
 func ToInt(v any) int {
 	switch x := v.(type) {
+	case NamedValue:
+		return ToInt(x.Value)
 	case int:
 		return x
 	case int64:
@@ -656,6 +668,8 @@ func ToInt(v any) int {
 
 func ToFloat(v any) float64 {
 	switch x := v.(type) {
+	case NamedValue:
+		return ToFloat(x.Value)
 	case float64:
 		return x
 	case int:
@@ -697,6 +711,8 @@ func ToFloat(v any) float64 {
 
 func ToBool(v any) bool {
 	switch x := v.(type) {
+	case NamedValue:
+		return ToBool(x.Value)
 	case bool:
 		return x
 	case int:
@@ -713,6 +729,8 @@ func ToBool(v any) bool {
 
 func ToString(v any) string {
 	switch x := v.(type) {
+	case NamedValue:
+		return ToString(x.Value)
 	case string:
 		return x
 	case int:
@@ -740,6 +758,8 @@ func ToString(v any) string {
 
 func IsZero(v any) bool {
 	switch x := v.(type) {
+	case NamedValue:
+		return IsZero(x.Value)
 	case nil:
 		return true
 	case int:

@@ -61,7 +61,11 @@ func main() {
   fmt.Println(value)
   text, err := json.Marshal(map[string]int{"answer": 42})
   if err != nil { panic(err) }
-  fmt.Println(text)
+  fmt.Println(string(text))
+  var decoded map[string]int
+  if err := json.Unmarshal(text, &decoded); err != nil { panic(err) }
+  if decoded["answer"] != 42 { panic("JSON round trip") }
+  if err := json.Unmarshal([]byte("{"), &decoded); err == nil { panic("JSON syntax error missing") }
   rendered, err := template.RenderString("Hello {{.Name}}", map[string]string{"Name": "nanoGo"})
   if err != nil { panic(err) }
   fmt.Println(rendered)

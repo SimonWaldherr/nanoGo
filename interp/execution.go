@@ -206,6 +206,12 @@ func (v reusableBlockVisitor) Visit(node ast.Node) ast.Visitor {
 // execution contains state that belongs to exactly one RunContext call.
 // It is shared by guest goroutines, but never by two host executions.
 type execution struct {
+	resultsMu       sync.Mutex
+	results         []ResultEvent
+	calls           atomic.Uint64
+	outputBytes     atomic.Uint64
+	allocationUnits atomic.Uint64
+	resultBytes     atomic.Uint64
 	// Templates hold immutable syntax metadata only; each evaluation still
 	// creates a fresh closure bound to its own environment. The cache dies
 	// with the run and is safe for simultaneous guest goroutines.
@@ -588,6 +594,9 @@ func (vm *Interpreter) beginExecution(parent context.Context) (*execution, error
 		parent = context.Background()
 	}
 	vm.runMu.Lock()
+	vm.resultsMu.Lock()
+	vm.lastResults = ExecutionResults{}
+	vm.resultsMu.Unlock()
 	if err := parent.Err(); err != nil {
 		vm.runMu.Unlock()
 		return nil, err

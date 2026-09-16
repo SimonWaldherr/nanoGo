@@ -117,7 +117,7 @@ func main() {
   fmt.Println("submatch:", m)
   obj := map[string]any{"x": 1, "s": "hi"}
   b, _ := json.Marshal(obj)
-  fmt.Println("json:", b)
+  fmt.Println("json:", string(b))
 }
 `,
   "Strings/Sort": `package main
@@ -1340,10 +1340,12 @@ func main() {
   obj := map[string]any{"name":"nanoGo","v":1}
   b, _ := json.Marshal(obj)
   fmt.Println("json:", string(b))
-  // nanoGo's JSON facade returns the decoded value instead of filling a
-  // pointer like encoding/json.Unmarshal in the Go standard library.
-  decoded := json.Unmarshal(b)
-  fmt.Println("unmarshalled:", decoded)
+  var decoded map[string]any
+  if err := json.Unmarshal(b, &decoded); err != nil {
+    fmt.Println("decode error:", err)
+    return
+  }
+  fmt.Println("unmarshalled:", decoded["name"], decoded["v"])
 }
 `,"Virtual FS (os)": `package main
 

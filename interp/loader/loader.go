@@ -130,7 +130,8 @@ type Program struct {
 // root/go.mod's module line, which wins if present) for local packages, and
 // against interp.BuiltinImportPaths for curated builtins. Anything else is a
 // hard, immediate error — never a silent best-effort skip.
-func LoadModule(vfs *interp.VFS, root string, opts Options) (*Program, error) {
+func LoadModule(vfs *interp.VFS, root string, opts Options) (program *Program, err error) {
+	defer func() { err = interp.WithDiagnostic(err, "load") }()
 	root = path.Clean(root)
 	modulePath := opts.ModulePath
 	var rootModule ModuleFile
@@ -157,6 +158,7 @@ func LoadModule(vfs *interp.VFS, root string, opts Options) (*Program, error) {
 	entryDir = path.Clean(entryDir)
 
 	packages := map[string]*ParsedPackage{}
+	sharedFileSet := token.NewFileSet()
 	queue := []string{entryDir}
 	queued := map[string]bool{entryDir: true}
 	configuredRoots := map[string]bool{root: true}
@@ -171,7 +173,7 @@ func LoadModule(vfs *interp.VFS, root string, opts Options) (*Program, error) {
 			configuredRoots[moduleRoot] = true
 		}
 
-		files, testFiles, fset, err := interp.ParsePackageDirFull(vfs, dir)
+		files, testFiles, fset, err := interp.ParsePackageDirFullWithFileSet(vfs, dir, sharedFileSet)
 		if err != nil {
 			return nil, fmt.Errorf("nanogo/loader: parsing package at %s: %w", dir, err)
 		}

@@ -49,36 +49,38 @@ func buildPackageScopes(ctx context.Context, vm *interp.Interpreter, prog *Progr
 	if !ok {
 		return fmt.Errorf("nanogo/loader: entry package %s not found", prog.Entry)
 	}
-	return vm.WithExecution(ctx, entryPkg.FSet, func() error {
-		for _, dir := range order {
-			if _, exists := built[dir]; exists {
-				continue
-			}
-			pp := prog.Packages[dir]
-			ps := vm.NewPackageScope(pp.Name)
+	return vm.WithExecution(ctx, entryPkg.FSet, func() error { return buildPackageScopesInExecution(ctx, vm, prog, order, built) })
+}
 
-			if err := bindImports(vm, ps, pp.Imports, built, dir); err != nil {
-				return err
-			}
+func buildPackageScopesInExecution(ctx context.Context, vm *interp.Interpreter, prog *Program, order []string, built map[string]*interp.PackageScope) error {
+	for _, dir := range order {
+		if _, exists := built[dir]; exists {
+			continue
+		}
+		pp := prog.Packages[dir]
+		ps := vm.NewPackageScopeWithIdentity(pp.Name, pp.Dir)
 
-			for _, f := range pp.Files {
-				if err := ps.CollectDecls(f, pp.FSet); err != nil {
-					return fmt.Errorf("nanogo/loader: %s: %w", dir, err)
-				}
-			}
-			for _, f := range pp.Files {
-				if err := ps.EvalDecls(ctx, f); err != nil {
-					return fmt.Errorf("nanogo/loader: %s: %w", dir, err)
-				}
-			}
-			if err := ps.RunInit(ctx); err != nil {
+		if err := bindImports(vm, ps, pp.Imports, built, dir); err != nil {
+			return err
+		}
+
+		for _, f := range pp.Files {
+			if err := ps.CollectDecls(f, pp.FSet); err != nil {
 				return fmt.Errorf("nanogo/loader: %s: %w", dir, err)
 			}
-
-			built[dir] = ps
 		}
-		return nil
-	})
+		for _, f := range pp.Files {
+			if err := ps.EvalDecls(ctx, f); err != nil {
+				return fmt.Errorf("nanogo/loader: %s: %w", dir, err)
+			}
+		}
+		if err := ps.RunInit(ctx); err != nil {
+			return fmt.Errorf("nanogo/loader: %s: %w", dir, err)
+		}
+
+		built[dir] = ps
+	}
+	return nil
 }
 
 // bindImports wires one package scope to its already-built local dependencies
@@ -159,7 +161,7 @@ func ensureExternalTests(ctx context.Context, vm *interp.Interpreter, prog *Prog
 			return ps, nil
 		}
 	}
-	ps := vm.NewPackageScope(pp.ExternalTestName)
+	ps := vm.NewPackageScopeWithIdentity(pp.ExternalTestName, pp.Dir+"_test")
 	err := vm.WithExecution(ctx, pp.FSet, func() error {
 		if err := bindImports(vm, ps, pp.ExternalTestImports, prog.built, dir); err != nil {
 			return err

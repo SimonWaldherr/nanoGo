@@ -34,6 +34,8 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 		exec.finish()
 		exec.wg.Wait()
 		err = exec.finalError(err)
+		vm.completeResults(exec, err)
+		err = vm.executionDiagnostic(exec, err)
 		message := "ok"
 		if err != nil {
 			message = err.Error()
@@ -117,32 +119,7 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 			case token.TYPE:
 				for _, spec := range d.Specs {
 					ts := spec.(*ast.TypeSpec)
-					switch tt := ts.Type.(type) {
-					case *ast.StructType:
-						td := &TypeDef{Name: ts.Name.Name, Kind: "struct", Fields: []FieldDef{}, Methods: map[string]*Function{}}
-						for _, f := range tt.Fields.List {
-							ft := typeString(f.Type)
-							tag := astStructTag(f.Tag)
-							for _, n := range f.Names {
-								td.Fields = append(td.Fields, newFieldDef(n.Name, ft, tag))
-							}
-						}
-						td.allIntFields = structFieldsAreInts(td.Fields)
-						vm.types[td.Name] = td
-					case *ast.InterfaceType:
-						// No implementation to store here — see
-						// TypeDef.InterfaceMethods — so a type assertion
-						// against this name checks a candidate value's own
-						// TypeDef.Methods instead (evalTypeAssert).
-						vm.types[ts.Name.Name] = &TypeDef{Name: ts.Name.Name, Kind: "interface", InterfaceMethods: interfaceMethodNames(tt), InterfaceEmbeds: interfaceEmbeddedNames(tt)}
-					default:
-						underlying := typeString(tt)
-						if isBuiltinType(underlying) {
-							// Keep named scalar types useful for firmware-style code
-							// without introducing a second runtime representation.
-							vm.types[ts.Name.Name] = &TypeDef{Name: ts.Name.Name, Kind: "alias", Underlying: underlying}
-						}
-					}
+					vm.registerTypeSpec(ts, global, ts.Name.Name)
 				}
 			case token.CONST, token.VAR:
 				if d.Tok == token.CONST {
@@ -162,7 +139,7 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 					for i, name := range vs.Names {
 						if name.Name == "_" {
 							if i < len(vs.Values) {
-								if _, err := vm.evalExpr(vs.Values[i], global); err != nil {
+								if _, err := vm.evalSingleExpr(vs.Values[i], global); err != nil {
 									return err
 								}
 							}
@@ -178,18 +155,21 @@ func (vm *Interpreter) RunContext(ctx context.Context, src string) (err error) {
 						}
 						var val any
 						if i < len(vs.Values) {
-							v, err := vm.evalExpr(vs.Values[i], global)
+							v, err := vm.evalSingleExpr(vs.Values[i], global)
 							if err != nil {
 								return err
 							}
 							if vs.Type != nil {
-								v = vm.coerceToType(v, typeString(vs.Type))
+								v = vm.coerceToType(v, vm.typeStringInEnv(vs.Type, global))
 							}
 							val = v
 						} else {
-							val = vm.zeroValueForType(typeString(vs.Type))
+							val = vm.zeroValueForType(vm.typeStringInEnv(vs.Type, global))
 						}
 						vm.declare(name.Name, val, global)
+						if vs.Type != nil {
+							vm.declare(declaredTypePrefix+name.Name, vm.typeStringInEnv(vs.Type, global), global)
+						}
 						if vm.trackingVariables() {
 							vm.recordVariable(name.Name, val, name, global)
 						}
@@ -283,6 +263,12 @@ func (vm *Interpreter) evalExpr(e ast.Expr, env *Env) (any, error) {
 	if err != nil {
 		attachRuntimeErrorLocation(err, vm.traceLocation(e.Pos()))
 	}
+	if err == nil {
+		if values, ok := v.(ReturnValues); ok && len(values) == 1 {
+			return values[0], nil
+		}
+	}
+
 	return v, err
 }
 
@@ -377,12 +363,13 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		if v, ok := vm.get(ex.Name, env); ok {
 			return v, nil
 		}
-		if isBuiltinType(ex.Name) {
+		resolvedName := vm.resolveTypeName(ex.Name, env)
+		if isBuiltinType(resolvedName) {
 			return &Function{Name: ex.Name, Native: func(args []any) (any, error) {
 				if len(args) == 0 {
-					return zeroValue(ex.Name), nil
+					return zeroValue(resolvedName), nil
 				}
-				return builtinConvert(ex.Name, args[0]), nil
+				return builtinConvert(resolvedName, args[0]), nil
 			}}, nil
 		}
 		if f, ok := vm.funcs[ex.Name]; ok {
@@ -391,13 +378,13 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		if n, ok := vm.natives[ex.Name]; ok {
 			return &Function{Name: ex.Name, Native: n}, nil
 		}
-		if td, ok := vm.types[ex.Name]; ok {
-			if td.Kind == "alias" {
+		if td, ok := vm.types[vm.resolveTypeName(ex.Name, env)]; ok {
+			if td.Kind == "alias" || td.Kind == "named" {
 				return &Function{Name: ex.Name, Native: func(args []any) (any, error) {
 					if len(args) == 0 {
-						return vm.zeroValueForType(ex.Name), nil
+						return vm.zeroValueForType(td.Name), nil
 					}
-					return vm.coerceToType(args[0], ex.Name), nil
+					return vm.coerceToType(args[0], td.Name), nil
 				}}, nil
 			}
 			return ex.Name, nil
@@ -454,6 +441,26 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		}
 		if ex.Op != token.AND && isNumericValue(v) {
 			return nil, numericError("use explicit numeric methods such as Neg or Scale")
+		}
+		if named, ok := v.(NamedValue); ok {
+			var result any
+			switch ex.Op {
+			case token.NOT:
+				result = !ToBool(named.Value)
+			case token.ADD:
+				result = named.Value
+			case token.SUB:
+				if _, floating := named.Value.(float64); floating {
+					result = -ToFloat(named.Value)
+				} else {
+					result = -ToInt(named.Value)
+				}
+			case token.XOR:
+				result = ^ToInt(named.Value)
+			default:
+				return nil, NewRuntimeError("unsupported unary op")
+			}
+			return vm.coerceToType(result, named.TypeName), nil
 		}
 
 		switch ex.Op {
@@ -586,13 +593,23 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		return vm.applyBinaryOp(ex.Op, l, r)
 
 	case *ast.CallExpr:
+		if array, ok := ex.Fun.(*ast.ArrayType); ok && array.Len == nil {
+			if len(ex.Args) != 1 {
+				return nil, NewRuntimeError("slice conversion requires one argument")
+			}
+			value, err := vm.evalExpr(ex.Args[0], env)
+			if err != nil {
+				return nil, err
+			}
+			return vm.convertSlice(vm.typeStringInEnv(array, env), value)
+		}
 		// Builtins: make, len, cap, append, copy, close, delete, panic
 		if id, ok := ex.Fun.(*ast.Ident); ok {
 			if id.Name == "new" {
 				if len(ex.Args) != 1 {
 					return nil, NewRuntimeError("new: expected one type")
 				}
-				typ := typeString(ex.Args[0])
+				typ := vm.typeStringInEnv(ex.Args[0], env)
 				return newPointerValue(vm.zeroValueForType(typ), typ), nil
 			}
 			// recover is frame-sensitive and has no arguments. Handle it before
@@ -604,6 +621,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 						v := caller.panicVal
 						caller.panicking = false
 						caller.panicVal = nil
+						caller.panicErr = nil
 						return v, nil
 					}
 				}
@@ -768,6 +786,16 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 					if !ok2 {
 						return nil, NewRuntimeError("unknown package member: " + pid.Name + "." + sel.Sel.Name)
 					}
+					if td, ok := member.(*TypeDef); ok {
+						if len(ex.Args) != 1 {
+							return nil, NewRuntimeError("type conversion requires one argument")
+						}
+						v, err := vm.evalExpr(ex.Args[0], env)
+						if err != nil {
+							return nil, err
+						}
+						return vm.coerceToType(v, td.Name), nil
+					}
 					fn, ok3 := member.(*Function)
 					if !ok3 {
 						return nil, NewRuntimeError("package member is not function")
@@ -785,7 +813,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 						args = make([]any, 0, len(ex.Args))
 						for i, a := range ex.Args {
 							if i == len(ex.Args)-1 {
-								v, err := vm.evalExpr(a, env)
+								v, err := vm.evalCallArgument(fn, len(args), a, env)
 								if err != nil {
 									return nil, err
 								}
@@ -797,7 +825,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 									return nil, NewRuntimeError("variadic expansion requires a slice")
 								}
 							} else {
-								v, err := vm.evalExpr(a, env)
+								v, err := vm.evalCallArgument(fn, len(args), a, env)
 								if err != nil {
 									return nil, err
 								}
@@ -807,7 +835,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 					} else {
 						args = make([]any, len(ex.Args))
 						for i, a := range ex.Args {
-							v, err := vm.evalExpr(a, env)
+							v, err := vm.evalCallArgument(fn, i, a, env)
 							if err != nil {
 								return nil, err
 							}
@@ -824,6 +852,12 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			recv, err := vm.evalExpr(sel.X, env)
 			if err != nil {
 				return nil, err
+			}
+			if guestErr, ok := recv.(error); ok && sel.Sel.Name == "Error" {
+				if len(ex.Args) != 0 {
+					return nil, NewRuntimeError("error.Error takes no arguments")
+				}
+				return guestErr.Error(), nil
 			}
 			recv, err = structReceiver(recv)
 			if err != nil {
@@ -846,7 +880,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			if ex.Ellipsis != token.NoPos && len(ex.Args) > 0 {
 				for i, a := range ex.Args {
 					if i == len(ex.Args)-1 {
-						v, err := vm.evalExpr(a, env)
+						v, err := vm.evalCallArgument(fn, len(args), a, env)
 						if err != nil {
 							return nil, err
 						}
@@ -858,7 +892,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 							return nil, NewRuntimeError("variadic expansion requires a slice")
 						}
 					} else {
-						v, err := vm.evalExpr(a, env)
+						v, err := vm.evalCallArgument(fn, len(args), a, env)
 						if err != nil {
 							return nil, err
 						}
@@ -867,7 +901,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 				}
 			} else {
 				for _, a := range ex.Args {
-					v, err := vm.evalExpr(a, env)
+					v, err := vm.evalCallArgument(fn, len(args), a, env)
 					if err != nil {
 						return nil, err
 					}
@@ -897,7 +931,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 				len(fn.Params) == len(ex.Args) && fn.RecvName == "" && vm.canFastCall(fn) {
 				var args [3]any
 				for i, expr := range ex.Args {
-					arg, err := vm.evalExpr(expr, env)
+					arg, err := vm.evalCallArgument(fn, i, expr, env)
 					if err != nil {
 						return nil, err
 					}
@@ -914,7 +948,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 				args = make([]any, 0, len(ex.Args))
 				for i, a := range ex.Args {
 					if i == len(ex.Args)-1 {
-						v, err := vm.evalExpr(a, env)
+						v, err := vm.evalCallArgument(fn, len(args), a, env)
 						if err != nil {
 							return nil, err
 						}
@@ -926,7 +960,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 							return nil, NewRuntimeError("variadic expansion requires a slice")
 						}
 					} else {
-						v, err := vm.evalExpr(a, env)
+						v, err := vm.evalCallArgument(fn, len(args), a, env)
 						if err != nil {
 							return nil, err
 						}
@@ -936,7 +970,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			} else {
 				args = make([]any, len(ex.Args))
 				for i, a := range ex.Args {
-					v, err := vm.evalExpr(a, env)
+					v, err := vm.evalCallArgument(fn, i, a, env)
 					if err != nil {
 						return nil, err
 					}
@@ -984,7 +1018,10 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			}
 			return t.Data[ii], nil
 		case *MapVal:
-			val, _ := t.getByKey(i)
+			val, found := t.getByKey(i)
+			if !found {
+				val = vm.zeroValueForType(t.ElementType)
+			}
 			return val, nil
 		case string:
 			idx := ToInt(i)
@@ -1056,6 +1093,9 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if guestErr, ok := recv.(error); ok && ex.Sel.Name == "Error" {
+			return errorMethod(guestErr), nil
+		}
 		recv, err = structReceiver(recv)
 		if err != nil {
 			return nil, err
@@ -1069,7 +1109,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 
 	case *ast.CompositeLit:
 		// Struct, slice, map literals.
-		typ := vm.typeStringCached(ex.Type)
+		typ := vm.typeStringInEnv(ex.Type, env)
 		if strings.HasPrefix(typ, "[]") || strings.HasPrefix(typ, "[") {
 			elem := ""
 			length := 0
@@ -1083,6 +1123,16 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 					return nil, NewRuntimeError("array literal requires a constant length")
 				}
 				fixed = true
+			}
+			slots := len(ex.Elts)
+			if fixed {
+				slots = length
+			}
+			if slots > vm.maxContainerSize() {
+				return nil, NewRuntimeError("literal exceeds interpreter limit")
+			}
+			if err := vm.chargeAllocation(uint64(slots)); err != nil {
+				return nil, err
 			}
 			data := make([]any, 0, len(ex.Elts))
 			if fixed {
@@ -1108,7 +1158,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 					return nil, NewRuntimeError("array literal index out of bounds")
 				}
 				for i, valueExpr := range ex.Elts {
-					v, err := vm.evalExpr(valueExpr, env)
+					v, err := vm.evalTypedExpr(valueExpr, elem, env)
 					if err != nil {
 						return nil, err
 					}
@@ -1128,7 +1178,7 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 					index = ToInt(indexValue)
 					valueExpr = keyed.Value
 				}
-				v, err := vm.evalExpr(valueExpr, env)
+				v, err := vm.evalTypedExpr(valueExpr, elem, env)
 				if err != nil {
 					return nil, err
 				}
@@ -1138,6 +1188,14 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 					}
 					data[index] = vm.coerceToType(v, elem)
 				} else {
+					if index < 0 || index >= vm.maxContainerSize() {
+						return nil, NewRuntimeError("literal index exceeds interpreter limit")
+					}
+					if index >= len(data) {
+						if err := vm.chargeAllocation(uint64(index + 1 - len(data))); err != nil {
+							return nil, err
+						}
+					}
 					for len(data) <= index {
 						data = append(data, vm.zeroValueForType(elem))
 					}
@@ -1149,17 +1207,23 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 		}
 		if strings.HasPrefix(typ, "map[") {
 			k, v := parseMapType(typ)
+			if len(ex.Elts) > vm.maxContainerSize() {
+				return nil, NewRuntimeError("literal exceeds interpreter limit")
+			}
+			if err := vm.chargeAllocation(uint64(len(ex.Elts))); err != nil {
+				return nil, err
+			}
 			lit := &MapVal{KeyType: k, ElementType: v, Data: make(map[string]any, len(ex.Elts))}
 			for _, elt := range ex.Elts {
 				kv, ok := elt.(*ast.KeyValueExpr)
 				if !ok {
 					continue
 				}
-				key, err := vm.evalExpr(kv.Key, env)
+				key, err := vm.evalTypedExpr(kv.Key, k, env)
 				if err != nil {
 					return nil, err
 				}
-				val, err := vm.evalExpr(kv.Value, env)
+				val, err := vm.evalTypedExpr(kv.Value, v, env)
 				if err != nil {
 					return nil, err
 				}
@@ -1167,11 +1231,14 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 			}
 			return lit, nil
 		}
-		// Struct literal with keyed fields (package prefix reduced by typeString)
+		// Struct literals retain canonical package identity.
 		typ = strings.TrimPrefix(typ, "*")
 		td := vm.types[typ]
 		if td == nil || td.Kind != "struct" {
 			return nil, NewRuntimeError("unknown struct type: " + typ)
+		}
+		if err := vm.chargeAllocation(uint64(len(td.Fields))); err != nil {
+			return nil, err
 		}
 		obj := vm.newPackedStruct(td)
 		if !td.allIntFields {
@@ -1179,23 +1246,31 @@ func (vm *Interpreter) evalExprNode(e ast.Expr, env *Env) (any, error) {
 				obj.packedFields[i] = vm.zeroValueForType(f.Type)
 			}
 		}
-		for _, elt := range ex.Elts {
-			kv, ok := elt.(*ast.KeyValueExpr)
-			if !ok {
-				continue
-			}
-			key := kv.Key.(*ast.Ident).Name
-			if td.allIntFields {
-				val, intOK, err := vm.tryEvalIntExpr(kv.Value, env, true)
-				if err != nil {
-					return nil, err
+		for index, elt := range ex.Elts {
+			key, valueExpr := "", elt
+			if kv, ok := elt.(*ast.KeyValueExpr); ok {
+				id, ok := kv.Key.(*ast.Ident)
+				if !ok {
+					return nil, NewRuntimeError("invalid struct field")
 				}
-				if intOK {
-					obj.setIntField(key, val)
-					continue
+				key, valueExpr = id.Name, kv.Value
+			} else {
+				if index >= len(td.Fields) {
+					return nil, NewRuntimeError("too many values in struct literal")
+				}
+				key = td.Fields[index].Name
+			}
+			fieldType := ""
+			for _, field := range td.Fields {
+				if field.Name == key {
+					fieldType = field.Type
+					break
 				}
 			}
-			val, err := vm.evalExpr(kv.Value, env)
+			if fieldType == "" {
+				return nil, NewRuntimeError("unknown struct field: " + key)
+			}
+			val, err := vm.evalTypedExpr(valueExpr, fieldType, env)
 			if err != nil {
 				return nil, err
 			}
@@ -1539,7 +1614,7 @@ func (vm *Interpreter) evalMakeCall(call *ast.CallExpr, env *Env) (any, error) {
 	if len(call.Args) == 0 {
 		return nil, NewRuntimeError("make: missing type")
 	}
-	typ := vm.typeStringCached(call.Args[0])
+	typ := vm.typeStringInEnv(call.Args[0], env)
 	length, capacity := 0, 0
 	for i, arg := range call.Args[1:] {
 		value, err := vm.evalExpr(arg, env)
@@ -2807,6 +2882,14 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 					if err := vm.executionErrors(3); err != nil {
 						return controlFlow{}, err
 					}
+					if m.Data == nil {
+						return controlFlow{}, &panicError{value: "assignment to entry in nil map"}
+					}
+					if _, exists := m.getByKey(key); !exists {
+						if err := vm.chargeAllocation(1); err != nil {
+							return controlFlow{}, err
+						}
+					}
 					m.setByKey(key, value)
 					if vm.trackingVariables() {
 						vm.recordAssignedExpression(st.Lhs[0], value, env)
@@ -2895,7 +2978,7 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 					goto RHS_DONE
 				}
 			}
-			v, err := vm.evalExpr(r, env)
+			v, err := vm.evalSingleExpr(r, env)
 			if err != nil {
 				return controlFlow{}, err
 			}
@@ -3081,7 +3164,7 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				for i, n := range vs.Names {
 					if n.Name == "_" {
 						if i < len(vs.Values) {
-							if _, err := vm.evalExpr(vs.Values[i], env); err != nil {
+							if _, err := vm.evalSingleExpr(vs.Values[i], env); err != nil {
 								return controlFlow{}, err
 							}
 						}
@@ -3097,18 +3180,21 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 					}
 					var val any
 					if i < len(vs.Values) {
-						v, err := vm.evalExpr(vs.Values[i], env)
+						v, err := vm.evalSingleExpr(vs.Values[i], env)
 						if err != nil {
 							return controlFlow{}, err
 						}
 						if vs.Type != nil {
-							v = vm.coerceToType(v, typeString(vs.Type))
+							v = vm.coerceToType(v, vm.typeStringInEnv(vs.Type, env))
 						}
 						val = v
 					} else {
-						val = vm.zeroValueForType(typeString(vs.Type))
+						val = vm.zeroValueForType(vm.typeStringInEnv(vs.Type, env))
 					}
 					vm.declare(n.Name, val, env)
+					if vs.Type != nil {
+						vm.declare(declaredTypePrefix+n.Name, vm.typeStringInEnv(vs.Type, env), env)
+					}
 					if vm.trackingVariables() {
 						vm.recordVariable(n.Name, val, n, env)
 					}
@@ -3229,6 +3315,7 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 				if pe, ok := derr.(*panicError); ok {
 					frame.panicking = true
 					frame.panicVal = pe.value
+					frame.panicErr = pe
 				}
 			}
 		})
@@ -4167,7 +4254,7 @@ func (vm *Interpreter) resolveLvalue(l ast.Expr, env *Env) (lvalueRef, error) {
 			}
 			return lvalueRef{kind: lvalueSliceIndex, s: s, i: ii}, nil
 		case *MapVal:
-			return lvalueRef{kind: lvalueMapIndex, m: s, k: i}, nil
+			return lvalueRef{kind: lvalueMapIndex, vm: vm, m: s, k: i}, nil
 		default:
 			return lvalueRef{}, NewRuntimeError("index assign unsupported")
 		}
@@ -4251,7 +4338,7 @@ func (vm *Interpreter) resolveRef(l ast.Expr, env *Env) (Ref, error) {
 func (vm *Interpreter) evalSmallPackageCall(fn *Function, exprs []ast.Expr, env *Env) (any, error) {
 	var args [3]any
 	for i, expr := range exprs {
-		arg, err := vm.evalExpr(expr, env)
+		arg, err := vm.evalCallArgument(fn, i, expr, env)
 		if err != nil {
 			return nil, err
 		}
@@ -4332,6 +4419,14 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 		return vm.callNativeFunction(fn, recv, args)
 	}
 
+	leave, limitErr := vm.enterCall()
+	if limitErr != nil {
+		return nil, limitErr
+	}
+	defer leave()
+
+	defer func() { vm.appendDiagnosticFrame(err, fn) }()
+
 	// Run defers in LIFO order on exit; also handle panic unwinding.
 	// caller: env.frame is the call site's own active frame (nil at the
 	// outermost call), letting debug.Stack() walk this chain later. It also
@@ -4373,8 +4468,10 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 			frame.panicking = true
 			if pe, ok := r.(*panicError); ok {
 				frame.panicVal = pe.value
+				frame.panicErr = pe
 			} else {
 				frame.panicVal = fmt.Sprintf("%v", r)
+				frame.panicErr = &panicError{value: frame.panicVal}
 			}
 		}
 		// Execute defers in reverse order. Each runs via callFunction,
@@ -4385,7 +4482,10 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 			frame.defers[i]()
 		}
 		if frame.panicking {
-			err = &panicError{value: frame.panicVal}
+			err = frame.panicErr
+			if frame.panicErr == nil {
+				err = &panicError{value: frame.panicVal}
+			}
 		}
 		// A single named result is the final authority on what this call
 		// returns, re-read here (after every defer, including one that
@@ -4458,12 +4558,13 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 			argIndex++
 		}
 	}
+	vm.recordParameterTypes(fn, local)
 	// Named results are typed zero values that naked returns and defers can
 	// read and update before the final result tuple is assembled.
 	for i, name := range fn.Results {
 		var zero any
 		if i < len(fn.resultTypes) {
-			zero = vm.zeroValueForType(fn.resultTypes[i])
+			zero = vm.zeroValueForType(vm.resolveTypeName(fn.resultTypes[i], fn.Env))
 		}
 		vm.declare(name, zero, local)
 	}
@@ -4477,6 +4578,7 @@ func (vm *Interpreter) callFunction(fn *Function, env *Env, recv *any, args []an
 			// guest defer calls recover() and clears it first).
 			frame.panicking = true
 			frame.panicVal = pe.value
+			frame.panicErr = pe
 			return nil, nil
 		}
 		return nil, bodyErr
@@ -4525,6 +4627,13 @@ func (vm *Interpreter) canFastCall(fn *Function) bool {
 // callNativeFunction retains native panic conversion and tracing without
 // allocating a guest call frame: native functions cannot own guest defers.
 func (vm *Interpreter) callNativeFunction(fn *Function, recv *any, args []any) (ret any, err error) {
+	leave, limitErr := vm.enterCall()
+	if limitErr != nil {
+		return nil, limitErr
+	}
+	defer leave()
+	defer func() { vm.appendDiagnosticFrame(err, fn) }()
+
 	defer func() {
 		if r := recover(); r != nil {
 			if pe, ok := r.(*panicError); ok {
@@ -4555,7 +4664,13 @@ func (vm *Interpreter) callNativeFunction(fn *Function, recv *any, args []any) (
 // precondition is canFastCall(fn); keeping its binding and control-flow
 // handling explicit leaves the full recover/defer machinery out of the hot
 // path without changing behavior in observable or debuggable modes.
-func (vm *Interpreter) callFrameFreeFunction(fn *Function, recv *any, args []any) (any, error) {
+func (vm *Interpreter) callFrameFreeFunction(fn *Function, recv *any, args []any) (ret any, err error) {
+	defer func() { vm.appendDiagnosticFrame(err, fn) }()
+	leave, limitErr := vm.enterCall()
+	if limitErr != nil {
+		return nil, limitErr
+	}
+	defer leave()
 	args = expandResultArgument(args)
 	if fn.genericInstance != nil {
 		if err := fn.genericInstance.validate(args); err != nil {
@@ -4589,6 +4704,7 @@ func (vm *Interpreter) callFrameFreeFunction(fn *Function, recv *any, args []any
 		vm.declare(fn.Params[len(fn.Params)-1], variadicValue(args, argIndex), local)
 	}
 
+	vm.recordParameterTypes(fn, local)
 	c, err := vm.execStmtList(fn.Body.(*ast.BlockStmt).List, local)
 	if err != nil {
 		return nil, err
@@ -4742,7 +4858,7 @@ func (vm *Interpreter) evalBuiltinArgs(name string, call *ast.CallExpr, env *Env
 		if len(call.Args) == 0 {
 			return nil, NewRuntimeError("make: missing type")
 		}
-		args := []any{typeString(call.Args[0])}
+		args := []any{vm.typeStringInEnv(call.Args[0], env)}
 		for _, a := range call.Args[1:] {
 			v, err := vm.evalExpr(a, env)
 			if err != nil {
@@ -4882,7 +4998,7 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 				}
 				args := make([]any, len(call.Args))
 				for i, a := range call.Args {
-					v, err := vm.evalExpr(a, env)
+					v, err := vm.evalCallArgument(fn, i, a, env)
 					if err != nil {
 						return nil, nil, nil, err
 					}
@@ -4896,6 +5012,12 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 		recv, err := vm.evalExpr(sel.X, env)
 		if err != nil {
 			return nil, nil, nil, err
+		}
+		if guestErr, ok := recv.(error); ok && sel.Sel.Name == "Error" {
+			if len(call.Args) != 0 {
+				return nil, nil, nil, NewRuntimeError("error.Error takes no arguments")
+			}
+			return errorMethod(guestErr), nil, nil, nil
 		}
 		recv, err = structReceiver(recv)
 		if err != nil {
@@ -4912,7 +5034,7 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 		}
 		args := make([]any, len(call.Args))
 		for i, a := range call.Args {
-			v, err := vm.evalExpr(a, env)
+			v, err := vm.evalCallArgument(fn, i, a, env)
 			if err != nil {
 				return nil, nil, nil, err
 			}
@@ -4931,7 +5053,7 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 	}
 	args := make([]any, len(call.Args))
 	for i, a := range call.Args {
-		v, err := vm.evalExpr(a, env)
+		v, err := vm.evalCallArgument(fn, i, a, env)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -4943,6 +5065,26 @@ func (vm *Interpreter) prepareCall(call *ast.CallExpr, env *Env) (*Function, *an
 // ---------------- Helpers ----------------------------------------
 
 func (vm *Interpreter) applyBinaryOp(op token.Token, left, right any) (any, error) {
+	leftNamed, leftOK := left.(NamedValue)
+	rightNamed, rightOK := right.(NamedValue)
+	if leftOK || rightOK {
+		if leftOK && rightOK && leftNamed.TypeName != rightNamed.TypeName {
+			return nil, NewRuntimeError("mismatched named operand types")
+		}
+		result, err := vm.applyBinaryOp(op, unwrapNamedValue(left), unwrapNamedValue(right))
+		if err != nil {
+			return nil, err
+		}
+		if _, comparison := result.(bool); comparison {
+			return result, nil
+		}
+		name := leftNamed.TypeName
+		if !leftOK {
+			name = rightNamed.TypeName
+		}
+		return vm.coerceToType(result, name), nil
+	}
+
 	if l, ok := left.(int); ok {
 		if r, ok := right.(int); ok {
 			switch op {
@@ -5125,6 +5267,8 @@ func isFloat(v any) bool { _, ok := v.(float64); return ok }
 
 func typeOfValue(vm *Interpreter, v any) string {
 	switch x := v.(type) {
+	case NamedValue:
+		return x.TypeName
 	case *PointerVal:
 		if x == nil {
 			return "<nil>"
@@ -5207,14 +5351,14 @@ func (vm *Interpreter) evalTypeAssert(ex *ast.TypeAssertExpr, env *Env) (asserte
 			}
 			return dyn, dyn, vm.valueSatisfiesMethods(dyn, []string{"Error"}), nil
 		}
-		if td, found := vm.types[t.Name]; found && td.Kind == "interface" {
+		if td, found := vm.types[vm.resolveTypeName(t.Name, env)]; found && td.Kind == "interface" {
 			return dyn, dyn, vm.valueSatisfiesInterface(dyn, td, nil), nil
 		}
 	}
 	// Concrete type: compare dynamic type against the asserted type name,
 	// ignoring a leading "*" since nanoGo represents a struct the same way
 	// whether it was declared by value or by pointer (see StructVal).
-	want := vm.typeStringCached(ex.Type)
+	want := vm.typeStringInEnv(ex.Type, env)
 	if _, pointer := dyn.(*PointerVal); !pointer {
 		want = strings.TrimPrefix(want, "*")
 	}

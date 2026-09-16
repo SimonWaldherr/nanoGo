@@ -47,11 +47,20 @@ func ParsePackageTestFiles(vfs *VFS, dir string) ([]*ast.File, *token.FileSet, e
 // and its test overlay are comparable (needed by interp/loader's test
 // runner and interp/index's static analysis).
 func ParsePackageDirFull(vfs *VFS, dir string) (files, testFiles []*ast.File, fset *token.FileSet, err error) {
+	return ParsePackageDirFullWithFileSet(vfs, dir, token.NewFileSet())
+}
+
+// ParsePackageDirFullWithFileSet assigns unique source positions across a
+// multi-package graph. The supplied FileSet must not be mutated during runs.
+func ParsePackageDirFullWithFileSet(vfs *VFS, dir string, shared *token.FileSet) (files, testFiles []*ast.File, fset *token.FileSet, err error) {
 	nonTest, testNames, err := listGoFileNames(vfs, dir)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	fset = token.NewFileSet()
+	fset = shared
+	if fset == nil {
+		fset = token.NewFileSet()
+	}
 	files, err = parseFilesInto(vfs, fset, dir, nonTest)
 	if err != nil {
 		return nil, nil, nil, err

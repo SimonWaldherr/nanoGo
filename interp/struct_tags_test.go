@@ -21,7 +21,7 @@ func main() {
  _, found = tag.Lookup("json")
  fmt.Println(found)
  data, err := json.Marshal(item)
- fmt.Println(data, err == nil)
+ fmt.Println(string(data), err == nil)
 }`)
 	want := "true true\ntrue false\na\\b true\ntrue\n{\"-\":\"visible\"} true\n"
 	if out != want {

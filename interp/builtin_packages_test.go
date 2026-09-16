@@ -146,7 +146,7 @@ func main() {
 	a := Account{ID: 7, Password: "secret"}
 	s, _ := json.Marshal(a)
 	f := reflect.TypeOf(a).Field(1)
-	fmt.Println(s)
+	fmt.Println(string(s))
 	fmt.Println(f.Tag.Get("json"), f.Tag.Get("validate"))
 }
 `)
@@ -327,7 +327,7 @@ func TestEveryBuiltinPackageIsUsableFromGuestCode(t *testing.T) {
 		{"sort", `a := []int{3, 1}; sort.Ints(a); ConsoleLog(strconv2(a[0]))`, "1"},
 		{"path", `ConsoleLog(path.Base("/x/y.go"))`, "y.go"},
 		{"unicode/utf8", `ConsoleLog(strconv2(utf8.RuneCountInString("ab")))`, "2"},
-		{"encoding/json", `s, _ := json.Marshal(map[string]int{"k": 1}); ConsoleLog(s)`, `{"k":1}`},
+		{"encoding/json", `s, _ := json.Marshal(map[string]int{"k": 1}); ConsoleLog(string(s))`, `{"k":1}`},
 		// nanoGo's regexp subset exposes MatchString/FindStringSubmatch only —
 		// there is no FindString, and time carries no Duration constants
 		// (Sleep and the timers take plain milliseconds). These snippets stay

@@ -65,7 +65,7 @@ import("fmt";"reflect";"encoding/json")
 type Item struct{Value int}
 func(p *Item) Get()int{return p.Value}
 type Getter interface{Get()int}
-func main(){p:=&Item{Value:7};var x any=p;g,ok:=x.(Getter);fmt.Println(ok,g.Get());fmt.Println(reflect.TypeOf(p).Kind()==reflect.Ptr,reflect.TypeOf(p).Elem().Name());fmt.Println(reflect.ValueOf(p).Elem().Field(0).Int());var n *Item;fmt.Println(reflect.ValueOf(n).IsNil(),reflect.ValueOf(n).Elem().IsValid());fmt.Println(reflect.DeepEqual(p,&Item{Value:7}));s,err:=json.Marshal(p);fmt.Println(s,err==nil)}`)
+func main(){p:=&Item{Value:7};var x any=p;g,ok:=x.(Getter);fmt.Println(ok,g.Get());fmt.Println(reflect.TypeOf(p).Kind()==reflect.Ptr,reflect.TypeOf(p).Elem().Name());fmt.Println(reflect.ValueOf(p).Elem().Field(0).Int());var n *Item;fmt.Println(reflect.ValueOf(n).IsNil(),reflect.ValueOf(n).Elem().IsValid());fmt.Println(reflect.DeepEqual(p,&Item{Value:7}));s,err:=json.Marshal(p);fmt.Println(string(s),err==nil)}`)
 	if out != "true 7\ntrue Item\n7\ntrue false\ntrue\n{\"Value\":7} true\n" {
 		t.Fatalf("got %q", out)
 	}

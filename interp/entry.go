@@ -28,6 +28,8 @@ func (vm *Interpreter) WithExecution(ctx context.Context, fset *token.FileSet, f
 		exec.finish()
 		exec.wg.Wait()
 		err = exec.finalError(err)
+		vm.completeResults(exec, err)
+		err = vm.executionDiagnostic(exec, err)
 		message := "ok"
 		if err != nil {
 			message = err.Error()

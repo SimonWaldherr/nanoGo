@@ -18,8 +18,10 @@ var ErrHostChannelClosed = errors.New("nanogo: host channel closed")
 // The host owns closure. Guest code cannot close either endpoint, so untrusted
 // code cannot tear down the transport or send after a close race.
 type HostChannel struct {
-	inbound  chan any
-	outbound chan any
+	// BridgeLimits bounds individual messages. Configure before concurrent use.
+	BridgeLimits BridgeLimits
+	inbound      chan any
+	outbound     chan any
 
 	inputDone  chan struct{}
 	outputDone chan struct{}
@@ -49,7 +51,7 @@ func (c *HostChannel) Send(ctx context.Context, value any) error {
 	if c == nil || channelDone(c.inputDone) {
 		return ErrHostChannelClosed
 	}
-	v, err := bridgeToGuest(value)
+	v, err := BridgeToGuestWithLimits(value, c.BridgeLimits)
 	if err != nil {
 		return err
 	}
@@ -62,13 +64,19 @@ func (c *HostChannel) Send(ctx context.Context, value any) error {
 // guest; slices and maps still go through bridgeToGuest and therefore retain
 // the normal deep-copy boundary.
 func bridgeBatchToGuest(values []any) ([]any, error) {
+	return bridgeBatchToGuestWithLimits(values, BridgeLimits{})
+}
+func bridgeBatchToGuestWithLimits(values []any, limits BridgeLimits) ([]any, error) {
 	var converted []any
 	for i, value := range values {
+		if err := validateBridge(value, limits, false); err != nil {
+			return nil, err
+		}
 		switch value.(type) {
 		case nil, bool, string, int, int64, float64:
 			continue
 		}
-		guestValue, err := bridgeToGuest(value)
+		guestValue, err := bridgeToGuestUnchecked(value)
 		if err != nil {
 			return nil, err
 		}
@@ -115,7 +123,7 @@ func (c *HostChannel) SendBatch(ctx context.Context, values []any) (int, error) 
 	if c == nil || channelDone(c.inputDone) {
 		return 0, ErrHostChannelClosed
 	}
-	converted, err := bridgeBatchToGuest(values)
+	converted, err := bridgeBatchToGuestWithLimits(values, c.BridgeLimits)
 	if err != nil {
 		return 0, err
 	}
@@ -155,7 +163,7 @@ func (c *HostChannel) Receive(ctx context.Context) (any, error) {
 	// send/close panic, so draining buffered values is explicit.
 	select {
 	case value := <-c.outbound:
-		return bridgeToHost(value)
+		return BridgeToHostWithLimits(value, c.BridgeLimits)
 	default:
 	}
 	if channelDone(c.outputDone) {
@@ -165,13 +173,13 @@ func (c *HostChannel) Receive(ctx context.Context) (any, error) {
 	if ctxDone == nil {
 		select {
 		case value := <-c.outbound:
-			return bridgeToHost(value)
+			return BridgeToHostWithLimits(value, c.BridgeLimits)
 		case <-c.outputDone:
 			// A value that was queued just before CloseOutput won the race must
 			// still be observable before the endpoint reports closed.
 			select {
 			case value := <-c.outbound:
-				return bridgeToHost(value)
+				return BridgeToHostWithLimits(value, c.BridgeLimits)
 			default:
 			}
 			return nil, ErrHostChannelClosed
@@ -179,13 +187,13 @@ func (c *HostChannel) Receive(ctx context.Context) (any, error) {
 	}
 	select {
 	case value := <-c.outbound:
-		return bridgeToHost(value)
+		return BridgeToHostWithLimits(value, c.BridgeLimits)
 	case <-c.outputDone:
 		// A value that was queued just before CloseOutput won the race must
 		// still be observable before the endpoint reports closed.
 		select {
 		case value := <-c.outbound:
-			return bridgeToHost(value)
+			return BridgeToHostWithLimits(value, c.BridgeLimits)
 		default:
 		}
 		return nil, ErrHostChannelClosed
@@ -225,7 +233,7 @@ func (c *HostChannel) receiveBatch(ctx context.Context, values []any, max int) (
 	for len(values) < max {
 		select {
 		case value := <-c.outbound:
-			converted, err := bridgeToHost(value)
+			converted, err := BridgeToHostWithLimits(value, c.BridgeLimits)
 			if err != nil {
 				return values, err
 			}
@@ -303,20 +311,26 @@ func validGuestIdentifier(name string) bool {
 	return true
 }
 
-func bridgeToGuest(value any) (any, error) {
+func bridgeToGuestUnchecked(value any) (any, error) {
 	switch v := value.(type) {
 	case nil, bool, string, int, int64, float64:
 		return v, nil
 	case []byte:
+		if v == nil {
+			return &SliceVal{ElementType: "byte"}, nil
+		}
 		out := &SliceVal{ElementType: "byte", Data: make([]any, len(v))}
 		for i := range v {
 			out.Data[i] = int(v[i])
 		}
 		return out, nil
 	case []any:
+		if v == nil {
+			return &SliceVal{ElementType: "any"}, nil
+		}
 		out := &SliceVal{ElementType: "any", Data: make([]any, len(v))}
 		for i, item := range v {
-			converted, err := bridgeToGuest(item)
+			converted, err := bridgeToGuestUnchecked(item)
 			if err != nil {
 				return nil, err
 			}
@@ -324,33 +338,48 @@ func bridgeToGuest(value any) (any, error) {
 		}
 		return out, nil
 	case []string:
+		if v == nil {
+			return &SliceVal{ElementType: "string"}, nil
+		}
 		out := &SliceVal{ElementType: "string", Data: make([]any, len(v))}
 		for i := range v {
 			out.Data[i] = v[i]
 		}
 		return out, nil
 	case []int:
+		if v == nil {
+			return &SliceVal{ElementType: "int"}, nil
+		}
 		out := &SliceVal{ElementType: "int", Data: make([]any, len(v))}
 		for i := range v {
 			out.Data[i] = v[i]
 		}
 		return out, nil
 	case []float64:
+		if v == nil {
+			return &SliceVal{ElementType: "float64"}, nil
+		}
 		out := &SliceVal{ElementType: "float64", Data: make([]any, len(v))}
 		for i := range v {
 			out.Data[i] = v[i]
 		}
 		return out, nil
 	case []bool:
+		if v == nil {
+			return &SliceVal{ElementType: "bool"}, nil
+		}
 		out := &SliceVal{ElementType: "bool", Data: make([]any, len(v))}
 		for i := range v {
 			out.Data[i] = v[i]
 		}
 		return out, nil
 	case map[string]any:
+		if v == nil {
+			return &MapVal{KeyType: "string", ElementType: "any"}, nil
+		}
 		out := &MapVal{KeyType: "string", ElementType: "any", Data: make(map[string]any, len(v))}
 		for key, item := range v {
-			converted, err := bridgeToGuest(item)
+			converted, err := bridgeToGuestUnchecked(item)
 			if err != nil {
 				return nil, err
 			}
@@ -360,12 +389,18 @@ func bridgeToGuest(value any) (any, error) {
 		}
 		return out, nil
 	case map[string]string:
+		if v == nil {
+			return &MapVal{KeyType: "string", ElementType: "string"}, nil
+		}
 		out := &MapVal{KeyType: "string", ElementType: "string", Data: make(map[string]any, len(v))}
 		for key, value := range v {
 			out.Data[key] = value
 		}
 		return out, nil
 	case map[string]int:
+		if v == nil {
+			return &MapVal{KeyType: "string", ElementType: "int"}, nil
+		}
 		out := &MapVal{KeyType: "string", ElementType: "int", Data: make(map[string]any, len(v))}
 		for key, value := range v {
 			out.Data[key] = value
@@ -376,8 +411,10 @@ func bridgeToGuest(value any) (any, error) {
 	}
 }
 
-func bridgeToHost(value any) (any, error) {
+func bridgeToHostUnchecked(value any) (any, error) {
 	switch v := value.(type) {
+	case NamedValue:
+		return bridgeToHostUnchecked(v.Value)
 	case nil, bool, string, int, int64, float64:
 		return v, nil
 	case *SliceVal:
@@ -389,39 +426,57 @@ func bridgeToHost(value any) (any, error) {
 		// byte/int/string payloads most tools exchange with nanoGo.
 		switch v.ElementType {
 		case "byte", "uint8":
+			if v.Data == nil {
+				return []byte(nil), nil
+			}
 			out := make([]byte, len(v.Data))
 			for i, item := range v.Data {
 				out[i] = byte(ToInt(item))
 			}
 			return out, nil
 		case "int":
+			if v.Data == nil {
+				return []int(nil), nil
+			}
 			out := make([]int, len(v.Data))
 			for i, item := range v.Data {
 				out[i] = ToInt(item)
 			}
 			return out, nil
 		case "float64":
+			if v.Data == nil {
+				return []float64(nil), nil
+			}
 			out := make([]float64, len(v.Data))
 			for i, item := range v.Data {
 				out[i] = ToFloat(item)
 			}
 			return out, nil
 		case "bool":
+			if v.Data == nil {
+				return []bool(nil), nil
+			}
 			out := make([]bool, len(v.Data))
 			for i, item := range v.Data {
 				out[i] = ToBool(item)
 			}
 			return out, nil
 		case "string":
+			if v.Data == nil {
+				return []string(nil), nil
+			}
 			out := make([]string, len(v.Data))
 			for i, item := range v.Data {
 				out[i] = ToString(item)
 			}
 			return out, nil
 		}
+		if v.Data == nil {
+			return []any(nil), nil
+		}
 		out := make([]any, len(v.Data))
 		for i, item := range v.Data {
-			converted, err := bridgeToHost(item)
+			converted, err := bridgeToHostUnchecked(item)
 			if err != nil {
 				return nil, err
 			}
@@ -429,9 +484,15 @@ func bridgeToHost(value any) (any, error) {
 		}
 		return out, nil
 	case *MapVal:
+		if v == nil {
+			return nil, nil
+		}
+		if v.Data == nil {
+			return map[string]any(nil), nil
+		}
 		out := make(map[string]any, len(v.Data))
 		for hashed, item := range v.Data {
-			converted, err := bridgeToHost(item)
+			converted, err := bridgeToHostUnchecked(item)
 			if err != nil {
 				return nil, err
 			}
@@ -439,6 +500,9 @@ func bridgeToHost(value any) (any, error) {
 		}
 		return out, nil
 	case *StructVal:
+		if v == nil {
+			return nil, nil
+		}
 		out := make(map[string]any, v.fieldCount())
 		var bridgeErr error
 		v.forEachField(func(name string, item any) {
@@ -448,7 +512,7 @@ func bridgeToHost(value any) (any, error) {
 			if strings.HasPrefix(name, "__") {
 				return
 			}
-			converted, err := bridgeToHost(item)
+			converted, err := bridgeToHostUnchecked(item)
 			if err != nil {
 				bridgeErr = err
 				return

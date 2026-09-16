@@ -20,6 +20,20 @@ func TestStandardGo(t *testing.T) {
 		t.Fatal("Go toolchain required for compatibility tests")
 	}
 	cases := map[string]string{
+		"unicode_slice_conversions": `func main(){b:=[]byte("Grüße 🌍");fmt.Println(len(b),string(b),b[3]);r:=[]rune("Grüße 🌍");fmt.Println(len(r),r[2],r[6]);var n=[]byte(nil);fmt.Println(n==nil,len(n))}`,
+		"aliases_and_named_scalars": `type Count int
+type Alias = Count
+type Ordinary = int
+func take(n Count){fmt.Println(n)}
+func main(){var c Count;take(3);c=Count(4);var x any=c;_,a:=x.(Count);_,b:=x.(Alias);_,d:=x.(int);fmt.Println(a,b,d);x=c+1;_,a=x.(Count);fmt.Println(a);var z Ordinary;var y any=z;_,a=y.(int);fmt.Println(a)}`,
+		"untyped_numeric_parameters": `const scale=3
+func half(x float64)float64{return x/2}
+func total(xs ...float64)float64{n:=0.0;for _,x:=range xs{n+=x};return n/2}
+func main(){fmt.Println(half(1),half(scale),half(1+2),half(float64(3)));f:=func(x float64)float64{return x/2};fmt.Println(f(3),total(1,2,3));defer fmt.Println(half(5));defer func(x float64){fmt.Println(x/2)}(3)}`,
+		"typed_nil_containers": `func count(s []int,m map[string]int){fmt.Println(s==nil,m==nil,len(s),len(m));for range s{fmt.Println("bad")};for range m{fmt.Println("bad")};s=append(s,9)}
+func main(){var s []int;var m map[string]int;count(s,m);count(nil,nil);fmt.Println(s==nil,m["missing"]);s=append(s,4);fmt.Println(s==nil,s[0]);s=nil;fmt.Println(s==nil,len(s));empty:=[]int{};fmt.Println(empty==nil);defer func(){fmt.Println(recover()!=nil)}();m["x"]=1}`,
+		"nested_composite_literals": `type Point struct{X,Y float64}
+func main(){a:=[][]float64{{0,0},{1,1}};fmt.Println(a[0][0],a[1][1]/2);m:=map[string][]int{"x":{1,2}};fmt.Println(m["x"][1]);ps:=[]Point{{X:1,Y:2},{3,4}};fmt.Println(ps[0].X/2,ps[1].Y/2);var zs []Point;zs=append(zs,Point{X:5});fmt.Println(zs[0].Y)}`,
 		"negative_shifts": `func check(mode int){x:=8;n:=-1;defer func(){fmt.Println(recover()!=nil,x)}();switch mode{case 0:_=x<<n;case 1:_=x>>n;case 2:x<<=n;case 3:x>>=n};fmt.Println("not reached")}
 func main(){for i:=0;i<4;i++{check(i)};x:=8;n:=1000;fmt.Println(x<<n,x>>n);x=-8;fmt.Println(x>>n)}`,
 		"variadic_sharing": `func change(xs ...int){xs[0]=9}

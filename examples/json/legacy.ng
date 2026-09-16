@@ -1,0 +1,13 @@
+package main
+
+import (
+    "fmt"
+    json "nanogo/jsonlegacy"
+)
+
+func main() {
+    text := json.Marshal(map[string]int{"answer": 42})
+    value := json.Unmarshal(text)
+    fmt.Println(text)
+    fmt.Println(value)
+}

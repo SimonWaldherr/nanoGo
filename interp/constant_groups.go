@@ -17,6 +17,7 @@ func (vm *Interpreter) evalConstantGroup(decl *ast.GenDecl, env *Env) error {
 			return NewRuntimeError("const initializer count mismatch")
 		}
 		vm.declare("iota", index, local)
+		vm.declare(constantBindingPrefix+"iota", true, local)
 		values := make([]any, len(expressions))
 		for i, expr := range expressions {
 			value, err := vm.evalExpr(expr, local)
@@ -33,6 +34,10 @@ func (vm *Interpreter) evalConstantGroup(decl *ast.GenDecl, env *Env) error {
 				continue
 			}
 			vm.declare(name.Name, values[i], env)
+			if valueType != nil {
+				vm.declare(declaredTypePrefix+name.Name, vm.typeStringInEnv(valueType, env), env)
+			}
+			vm.declare(constantBindingPrefix+name.Name, valueType == nil && vm.untypedConstant(expressions[i], local), env)
 			if vm.trackingVariables() {
 				vm.recordVariable(name.Name, values[i], name, env)
 			}

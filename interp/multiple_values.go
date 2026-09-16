@@ -53,13 +53,19 @@ func (vm *Interpreter) readNamedResults(names []string, env *Env) any {
 // guest panics and cancellation on the unwind path. Native facades also use
 // RuntimeError for ordinary API failures, so those retain the legacy ABI.
 func (vm *Interpreter) evalResultAssignment(expr ast.Expr, count int, env *Env) ([]any, error) {
-	value, err := vm.evalExpr(expr, env)
+	// Preserve explicit singleton tuples from strict native APIs until arity is checked.
+	value, err := vm.evalExprNode(expr, env)
+	if err != nil {
+		attachRuntimeErrorLocation(err, vm.traceLocation(expr.Pos()))
+	}
 	if err != nil {
 		switch err.(type) {
 		case *panicError:
 			return nil, err
 		}
-		if count != 2 || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrStepLimit) || errors.Is(err, ErrGoroutineLimit) {
+		var strict *strictHostError
+		var limit *LimitError
+		if count != 2 || errors.As(err, &strict) || errors.As(err, &limit) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrStepLimit) || errors.Is(err, ErrGoroutineLimit) {
 			return nil, err
 		}
 		return []any{value, err}, nil
@@ -101,4 +107,16 @@ func (vm *Interpreter) declareResultAssignment(spec *ast.ValueSpec, env *Env) (b
 		}
 	}
 	return true, nil
+}
+
+// evalSingleExpr rejects an explicit tuple used as one assignment value.
+func (vm *Interpreter) evalSingleExpr(expr ast.Expr, env *Env) (any, error) {
+	value, err := vm.evalExpr(expr, env)
+	if err != nil {
+		return nil, err
+	}
+	if _, tuple := resultTuple(value); tuple {
+		return nil, NewRuntimeError("assignment count mismatch")
+	}
+	return value, nil
 }

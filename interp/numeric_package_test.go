@@ -78,7 +78,7 @@ func TestNumericJSONAndHostBridge(t *testing.T) {
 	vm.RegisterNative("capture", func(args []any) (any, error) { var err error; host, err = BridgeToHost(args[0]); return nil, err })
 	err := vm.Run(`package main
 import ("numeric";"encoding/json";"fmt")
-func main(){m:=numeric.Money("9007199254740993.01","EUR");capture(m);s,_:=json.Marshal(m);fmt.Println(s)}`)
+func main(){m:=numeric.Money("9007199254740993.01","EUR");capture(m);s,_:=json.Marshal(m);fmt.Println(string(s))}`)
 	if err != nil {
 		t.Fatal(err)
 	}

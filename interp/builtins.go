@@ -31,8 +31,9 @@ func typeString(e ast.Expr) string {
 		// Direction is ignored for runtime dynamics.
 		return "chan " + typeString(t.Value)
 	case *ast.SelectorExpr:
-		// No full package typing; reduce to identifier (e.g., sync.WaitGroup -> WaitGroup)
-		return typeString(t.Sel)
+		return typeString(t.X) + "." + t.Sel.Name
+	case *ast.InterfaceType:
+		return "interface{}"
 	}
 	return ""
 }
@@ -113,11 +114,11 @@ func zeroValue(typ string) any {
 			return &PointerVal{ElementType: typ[1:], ref: lvalueRef{kind: lvalueNil}}
 		}
 		if strings.HasPrefix(typ, "[]") {
-			return &SliceVal{ElementType: typ[2:], Data: []any{}}
+			return &SliceVal{ElementType: typ[2:]}
 		}
 		if strings.HasPrefix(typ, "map[") {
 			k, v := parseMapType(typ)
-			return &MapVal{KeyType: k, ElementType: v, Data: map[string]any{}}
+			return &MapVal{KeyType: k, ElementType: v}
 		}
 		if strings.HasPrefix(typ, "chan ") {
 			return &ChannelVal{ElementType: typ[5:]}
@@ -129,10 +130,35 @@ func zeroValue(typ string) any {
 // zeroValueForType resolves scalar named types such as `type Pin uint8`.
 // Their dynamic value is the underlying scalar, while the source retains the
 // named type for declarations and conversions.
-func (vm *Interpreter) zeroValueForType(typ string) any {
+func (vm *Interpreter) zeroValueForType(typ string) any { return vm.zeroValueForTypeDepth(typ, 0) }
+func (vm *Interpreter) zeroValueForTypeDepth(typ string, depth int) any {
+	if depth >= 128 {
+		vm.rejectValueAllocation("typeDepth", 128, uint64(depth+1))
+		return nil
+	}
+	if length, elem, ok := parseArrayType(typ); ok {
+		if length > vm.MaxContainerSize && vm.MaxContainerSize > 0 {
+			vm.rejectValueAllocation("containerSize", uint64(vm.MaxContainerSize), uint64(length))
+			return nil
+		}
+		if err := vm.chargeAllocation(uint64(length)); err != nil {
+			return nil
+		}
+		data := make([]any, length)
+		for i := range data {
+			data[i] = vm.zeroValueForTypeDepth(elem, depth+1)
+			if e := vm.activeExecution; e != nil && e.stopped.Load() {
+				return nil
+			}
+		}
+		return &SliceVal{ElementType: elem, Data: data, Fixed: true}
+	}
 	if td := vm.types[typ]; td != nil {
 		if td.Kind == "alias" {
-			return zeroValue(td.Underlying)
+			return vm.zeroValueForTypeDepth(td.Underlying, depth+1)
+		}
+		if td.Kind == "named" {
+			return NamedValue{TypeName: td.Name, Value: vm.zeroValueForTypeDepth(td.Underlying, depth+1)}
 		}
 		if td.Kind == "interface" {
 			// A named interface's zero value is nil, same as "any"/"error"
@@ -140,10 +166,13 @@ func (vm *Interpreter) zeroValueForType(typ string) any {
 			return nil
 		}
 		if td.Kind == "struct" {
+			if err := vm.chargeAllocation(uint64(len(td.Fields))); err != nil {
+				return nil
+			}
 			value := vm.newPackedStruct(td)
 			if !td.allIntFields {
 				for i, field := range td.Fields {
-					value.packedFields[i] = vm.zeroValueForType(field.Type)
+					value.packedFields[i] = vm.zeroValueForTypeDepth(field.Type, depth+1)
 				}
 			}
 			return value
@@ -154,7 +183,13 @@ func (vm *Interpreter) zeroValueForType(typ string) any {
 
 func (vm *Interpreter) coerceToType(val any, typ string) any {
 	if td := vm.types[typ]; td != nil && td.Kind == "alias" {
-		typ = td.Underlying
+		return vm.coerceToType(val, td.Underlying)
+	}
+	if td := vm.types[typ]; td != nil && td.Kind == "named" {
+		return NamedValue{TypeName: td.Name, Value: vm.coerceToType(unwrapNamedValue(val), td.Underlying)}
+	}
+	if val == nil && (strings.HasPrefix(typ, "[]") || strings.HasPrefix(typ, "map[") || strings.HasPrefix(typ, "*") || strings.HasPrefix(typ, "chan ")) {
+		return vm.zeroValueForType(typ)
 	}
 	return coerceToType(val, typ)
 }
@@ -221,6 +256,9 @@ func (vm *Interpreter) builtinMakeSizes(typ string, length, capacity, argc int) 
 		if capacity > vm.maxContainerSize() {
 			return nil, NewRuntimeError("make: size exceeds interpreter limit")
 		}
+		if err := vm.chargeAllocation(uint64(capacity)); err != nil {
+			return nil, err
+		}
 		data := make([]any, length, capacity)
 		// []any/interface{} is already nil-initialized by make. Avoid a
 		// second full pass for this common dynamically typed container.
@@ -237,6 +275,9 @@ func (vm *Interpreter) builtinMakeSizes(typ string, length, capacity, argc int) 
 			return nil, NewRuntimeError("make: size exceeds interpreter limit")
 		}
 		k, v := parseMapType(typ)
+		if err := vm.chargeAllocation(uint64(length)); err != nil {
+			return nil, err
+		}
 		return &MapVal{KeyType: k, ElementType: v, Data: make(map[string]any, length)}, nil
 	}
 	// Channels: make(chan T[, cap])
@@ -247,6 +288,9 @@ func (vm *Interpreter) builtinMakeSizes(typ string, length, capacity, argc int) 
 		}
 		if length > vm.maxContainerSize() {
 			return nil, NewRuntimeError("make: size exceeds interpreter limit")
+		}
+		if err := vm.chargeAllocation(uint64(length)); err != nil {
+			return nil, err
 		}
 		if length == 0 {
 			return &ChannelVal{ElementType: elem, C: make(chan any)}, nil
@@ -289,6 +333,15 @@ func (vm *Interpreter) builtinAppend(slice any, elems ...any) (any, error) {
 	if len(elems) > vm.maxContainerSize()-len(s.Data) {
 		return nil, NewRuntimeError("append: size exceeds interpreter limit")
 	}
+	if len(elems) > cap(s.Data)-len(s.Data) {
+		if err := vm.chargeAllocation(uint64(len(s.Data) + len(elems))); err != nil {
+			return nil, err
+		}
+	}
+	// append returns a new slice header. Existing variables and parameters
+	// keep their length even when the backing array remains shared.
+	header := *s
+	s = &header
 	if isByteType(s.ElementType) {
 		for _, e := range elems {
 			s.Data = append(s.Data, ToInt(e)&0xFF)
