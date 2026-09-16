@@ -4723,7 +4723,7 @@ func (vm *Interpreter) callFrameFreeFunction(fn *Function, recv *any, args []any
 // acquireFastEnv initializes a recycled scope. Callers must only use it when
 // static analysis proves no closure can retain that scope past completion.
 func (vm *Interpreter) acquireFastEnv(parent *Env) *Env {
-	if pooled := vm.fastEnvPool.Get(); pooled != nil {
+	if pooled := fastEnvPool.Get(); pooled != nil {
 		env := pooled.(*Env)
 		env.Parent = parent
 		if parent != nil {
@@ -4749,7 +4749,7 @@ func (vm *Interpreter) releaseFastEnv(env *Env) {
 	clearInlineVars(env)
 	env.Parent = nil
 	env.frame = nil
-	vm.fastEnvPool.Put(env)
+	fastEnvPool.Put(env)
 }
 
 // analyzeFunctionMetadata returns function-call optimization metadata:

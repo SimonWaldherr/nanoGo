@@ -52,6 +52,12 @@ type Env struct {
 	frame  *callFrame
 }
 
+// fastEnvPool recycles cleared call/block scopes that cannot escape. Keeping
+// the pool outside Interpreter avoids retaining a completed VM (and its VFS,
+// packages and callbacks) through the runtime's global list of active pools.
+// No guest value, lexical parent or call frame may remain in a pooled scope.
+var fastEnvPool sync.Pool
+
 // intVar is one binding in Env's small integer table. A tiny linear scan beats a
 // map[string]int here: function-call and block scopes almost always hold
 // only a handful of int locals (loop counters, a couple of params), and for
@@ -428,10 +434,6 @@ type Interpreter struct {
 	// it says at least one hook exists. Maintained by refreshStmtHooks, which
 	// every installer calls after storing.
 	stmtHooks atomic.Bool
-	// fastEnvPool recycles call scopes for frame-free functions that cannot
-	// create closures. Recursive and call-heavy guest code otherwise creates
-	// one heap object per invocation even though each scope dies on return.
-	fastEnvPool sync.Pool
 	// stackFramesRequired becomes true once parsed guest code may inspect the
 	// dynamic call stack (debug.Stack/debug.Vars). It keeps every caller on
 	// the full call path for that interpreter, preserving complete stack
