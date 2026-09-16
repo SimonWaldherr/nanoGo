@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"math"
+	"strconv"
 	"strings"
 )
 
@@ -170,47 +171,60 @@ func (vm *Interpreter) evalCallArgument(fn *Function, index int, expr ast.Expr, 
 		return value, nil
 	}
 	underlying := typ
+	untyped := vm.untypedConstant(expr, env)
 	if td := vm.types[typ]; td != nil && td.Kind == "named" {
-		underlying = td.Underlying
 		if named, ok := value.(NamedValue); ok && named.TypeName == typ {
 			return value, nil
 		}
-		if !vm.untypedConstant(expr, env) {
+		if !untyped {
 			return nil, NewRuntimeError("explicit conversion required for named argument " + typ)
 		}
-		if isBuiltinType(underlying) {
-			if _, floating := value.(float64); floating && !strings.HasPrefix(underlying, "float") && !representableInteger(ToFloat(value), underlying) {
-				return nil, NewRuntimeError("constant is not representable as " + typ)
+		// A definition may name another named type. Validate against the final
+		// scalar representation, but retain the outer type's identity below.
+		for depth := 0; td != nil && (td.Kind == "named" || td.Kind == "alias"); depth++ {
+			if depth == 100 {
+				return nil, NewRuntimeError("argument type nesting exceeds limit")
 			}
-			return vm.coerceToType(value, typ), nil
+			underlying = td.Underlying
+			td = vm.types[underlying]
 		}
 	}
-	if isBuiltinType(underlying) && !vm.untypedConstant(expr, env) && !sameScalarType(vm.expressionType(expr, value, env), typ) {
+	if isBuiltinType(underlying) && !untyped && !sameScalarType(vm.expressionType(expr, value, env), typ) {
 		return nil, NewRuntimeError("explicit conversion required for argument of type " + typ)
 	}
 	switch underlying {
 	case "float32", "float64":
 		if n, ok := value.(float64); ok {
-			if underlying == "float32" && math.Abs(n) > math.MaxFloat32 && vm.untypedConstant(expr, env) {
+			// Go rounds constants to float32 before deciding whether they
+			// overflow. Values slightly above MaxFloat32 may still round down.
+			if underlying == "float32" && math.IsInf(float64(float32(n)), 0) && untyped {
 				return nil, NewRuntimeError("constant overflows float32")
 			}
-			return vm.coerceToType(value, underlying), nil
+			return vm.coerceToType(value, typ), nil
 		}
-		if _, ok := value.(int); ok && vm.untypedConstant(expr, env) {
-			return vm.coerceToType(value, underlying), nil
+		if _, ok := value.(int); ok && untyped {
+			return vm.coerceToType(value, typ), nil
 		}
 	case "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte", "rune":
 		if _, ok := value.(int); ok {
-			if vm.untypedConstant(expr, env) {
-				if !representableInteger(ToFloat(value), underlying) {
+			if untyped {
+				if !representableInteger(value, underlying) {
 					return nil, NewRuntimeError("constant overflows " + typ)
 				}
-				return vm.coerceToType(value, underlying), nil
+				return vm.coerceToType(value, typ), nil
 			}
 			return value, nil
 		}
-		if n, ok := value.(float64); ok && vm.untypedConstant(expr, env) && representableInteger(n, underlying) {
-			return vm.coerceToType(value, underlying), nil
+		if _, ok := value.(float64); ok && untyped && representableInteger(value, underlying) {
+			return vm.coerceToType(value, typ), nil
+		}
+	case "bool":
+		if _, ok := value.(bool); ok {
+			return vm.coerceToType(value, typ), nil
+		}
+	case "string":
+		if _, ok := value.(string); ok {
+			return vm.coerceToType(value, typ), nil
 		}
 	default:
 		return value, nil
@@ -218,12 +232,11 @@ func (vm *Interpreter) evalCallArgument(fn *Function, index int, expr ast.Expr, 
 	return nil, NewRuntimeError(fmt.Sprintf("cannot use %s as %s argument; explicit conversion required", typeOfValue(vm, value), typ))
 }
 
-func representableInteger(n float64, typ string) bool {
-	if math.IsNaN(n) || math.IsInf(n, 0) || math.Trunc(n) != n {
-		return false
-	}
+func representableInteger(value any, typ string) bool {
 	bits := 64
 	switch typ {
+	case "int", "uint", "uintptr":
+		bits = strconv.IntSize
 	case "byte", "uint8", "int8":
 		bits = 8
 	case "uint16", "int16":
@@ -231,8 +244,23 @@ func representableInteger(n float64, typ string) bool {
 	case "rune", "uint32", "int32":
 		bits = 32
 	}
-	if strings.HasPrefix(typ, "uint") || typ == "byte" {
-		return n >= 0 && n < math.Ldexp(1, bits)
+	unsigned := strings.HasPrefix(typ, "uint") || typ == "byte"
+	switch n := value.(type) {
+	case int:
+		// Converting to float64 first would round MaxInt64 to 2^63,
+		// falsely rejecting a representable integer (and lose other bits).
+		if unsigned {
+			return n >= 0 && (bits >= strconv.IntSize || uint64(n) < uint64(1)<<bits)
+		}
+		return bits >= strconv.IntSize || (int64(n) >= -(int64(1)<<(bits-1)) && int64(n) < int64(1)<<(bits-1))
+	case float64:
+		if math.IsNaN(n) || math.IsInf(n, 0) || math.Trunc(n) != n {
+			return false
+		}
+		if unsigned {
+			return n >= 0 && n < math.Ldexp(1, bits)
+		}
+		return n >= -math.Ldexp(1, bits-1) && n < math.Ldexp(1, bits-1)
 	}
-	return n >= -math.Ldexp(1, bits-1) && n < math.Ldexp(1, bits-1)
+	return false
 }

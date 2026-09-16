@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,22 @@ func TestStandardGo(t *testing.T) {
 		t.Fatal("Go toolchain required for compatibility tests")
 	}
 	cases := map[string]string{
+		"integer_argument_boundaries": `type Signed int64
+type Small int8
+type Octet uint8
+type Derived Small
+type Alias = Signed
+const largest = ` + strconv.Itoa(int(^uint(0)>>1)) + `
+const smallest = -largest-1
+func signed(n int64){fmt.Println(n)}
+func named(n Signed){fmt.Println(n)}
+func alias(n Alias){fmt.Println(n)}
+func narrow(n Small,b Octet,d Derived){fmt.Println(n,b,d)}
+func main(){signed(largest);signed(smallest);named(largest);named(smallest);alias(largest);narrow(-128,255,127)}`,
+		"float32_argument_rounding": `type Single float32
+func plain(n float32)bool{return float64(n)>3.4028234e38 && float64(n)<3.4028236e38}
+func named(n Single)bool{return float64(n)>3.4028234e38 && float64(n)<3.4028236e38}
+func main(){fmt.Println(plain(3.4028235e38),named(3.4028235e38))}`,
 		"unicode_slice_conversions": `func main(){b:=[]byte("Grüße 🌍");fmt.Println(len(b),string(b),b[3]);r:=[]rune("Grüße 🌍");fmt.Println(len(r),r[2],r[6]);var n=[]byte(nil);fmt.Println(n==nil,len(n))}`,
 		"aliases_and_named_scalars": `type Count int
 type Alias = Count

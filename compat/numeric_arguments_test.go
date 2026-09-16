@@ -21,6 +21,14 @@ func TestNumericArgumentsRequireExplicitConversions(t *testing.T) {
 		`func f(x int8){};func main(){n:=1;f(n)}`,
 		`func f(x int){};func main(){var n int8=1;f(n)}`,
 		`type Count int;func f(x Count){};func main(){n:=1;f(n)}`,
+		`type Small int8;func f(x Small){};func main(){f(128)}`,
+		`type Small int8;func f(x Small){};func main(){f(-129)}`,
+		`type Octet uint8;func f(x Octet){};func main(){f(-1)}`,
+		`type Octet uint8;func f(x Octet){};func main(){f(256)}`,
+		`type Small int8;type Derived Small;func f(x Derived){};func main(){f(128)}`,
+		`type Single float32;func f(x Single){};func main(){f(3.4028236e38)}`,
+		`type Flag bool;func f(x Flag){};func main(){f(1)}`,
+		`type Text string;func f(x Text){};func main(){f(65)}`,
 	}
 	for _, body := range programs {
 		src := "package main\n" + body
