@@ -161,3 +161,69 @@ func BenchmarkCompoundAssignments(b *testing.B) {
 		})
 	}
 }
+
+// Use the ordinary RHS evaluator as an independent reference, including cached
+// literals and identifier operands at every possible checkpoint boundary.
+func TestCompoundAtomMatchesDynamicEvaluation(t *testing.T) {
+	for _, tc := range []struct {
+		statement string
+		x, y      any
+	}{
+		{"x += y", 1000, 12345}, {"x -= y", 1000, 12345},
+		{"x *= y", 2.5, 1.25}, {"x /= y", 1000, 0},
+		{"x %= y", 1000, 0}, {"x <<= y", 1000, -1},
+		{"x >>= y", 1000, -1}, {"x &^= y", 1000, 12},
+		{"x += y", 1000, 0.5}, {"x += y", 0.5, 1000},
+		{"x += y", "hello", "world"},
+		{"x += 12345", 1000, nil}, {"x *= 1.25", 2.5, nil},
+		{"x /= 0", 1000, nil}, {"x += x", 1000, nil},
+	} {
+		t.Run(tc.statement+fmt.Sprintf("/%T/%T", tc.x, tc.y), func(t *testing.T) {
+			file, err := parser.ParseFile(token.NewFileSet(), "atom.go", "package main;func main(){"+tc.statement+"}", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stmt := file.Decls[0].(*ast.FuncDecl).Body.List[0].(*ast.AssignStmt)
+			for limit := uint64(1); limit < 6; limit++ {
+				var results [2]string
+				for mode := range results {
+					vm := NewInterpreter()
+					vm.Limits.MaxSteps = limit
+					env := NewEnv(nil)
+					vm.declare("x", tc.x, env)
+					vm.declare("y", tc.y, env)
+					exec, err := vm.beginExecution(context.Background())
+					if err != nil {
+						t.Fatal(err)
+					}
+					exec.litCache, exec.floatLitCache, exec.valueLitCache, exec.typeStrCache = buildLitCaches(file)
+					var evalErr error
+					if mode == 0 {
+						_, evalErr = vm.evalStmtNode(stmt, env)
+					} else {
+						evalErr = vm.executionError()
+						if evalErr == nil {
+							var rhs any
+							rhs, evalErr = vm.evalExpr(stmt.Rhs[0], env)
+							if evalErr == nil {
+								current, _ := vm.get("x", env)
+								var value any
+								value, evalErr = vm.applyBinaryOp(compoundOperator(stmt.Tok), current, rhs)
+								if evalErr == nil {
+									vm.set("x", value, env)
+								}
+							}
+						}
+					}
+					exec.finish()
+					vm.endExecution(exec)
+					value, _ := vm.get("x", env)
+					results[mode] = fmt.Sprintf("%T:%v; %v; %d", value, value, evalErr, vm.LastStepCount())
+				}
+				if results[0] != results[1] {
+					t.Fatalf("limit %d: optimized=%s, reference=%s", limit, results[0], results[1])
+				}
+			}
+		})
+	}
+}

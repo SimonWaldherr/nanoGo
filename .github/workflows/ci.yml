@@ -29,6 +29,11 @@ jobs:
           # caching would only add a "no go.sum found" warning.
           cache: false
 
+      - name: Set up Node for browser and WASM tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Formatting (gofmt)
         run: make fmt-check
 
@@ -41,11 +46,14 @@ jobs:
       - name: Unit tests
         run: make test
 
+      - name: Compare supported semantics with standard Go
+        run: make test-compat
+
       - name: Browser regression tests
         run: make test-web
 
-      - name: CLI tests
-        run: go test ./cmd/cli
+      - name: Run Go WASM tests in Node
+        run: make test-wasm
 
       - name: Race detector
         run: make test-race
@@ -58,3 +66,14 @@ jobs:
 
       - name: Build WebAssembly playground
         run: make build-wasm
+
+      - name: Execute the WebAssembly artifact
+        run: make test-wasm-artifact
+
+      - name: Install Binaryen for the optimized build
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+
+      - name: Build and execute optimized WebAssembly
+        run: |
+          make build-wasm-optimized WASM_OUT=build/optimized/nanogo.wasm
+          make test-wasm-artifact WASM_OUT=build/optimized/nanogo.wasm

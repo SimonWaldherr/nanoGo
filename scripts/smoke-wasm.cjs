@@ -70,6 +70,14 @@ func main() {
   fmt.Println(pattern.MatchString("nanoGo"))
 }`, 'Grüße 🌍\n{"answer":42}\nHello nanoGo\ntrue');
 
+  run(`package main
+import "fmt"
+func main() {
+  x := 1000; y := 12345; x += y; x ^= y
+  f := 1.25; step := 0.5; f += step; f *= 2.0
+  fmt.Println(x, f)
+}`, '1048 3.5', true);
+
   const traced = run('package main\nfunc main() { x := 7; ConsoleLog(x) }', '7', true);
   run(`package main
 func main() {

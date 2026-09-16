@@ -2725,6 +2725,16 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			}
 		}
 
+		if len(st.Lhs) == 1 && len(st.Rhs) == 1 {
+			if id, ok := st.Lhs[0].(*ast.Ident); ok {
+				if op := compoundOperator(st.Tok); op != token.ILLEGAL {
+					if handled, err := vm.tryCompoundAtom(id, op, st.Rhs[0], env); handled {
+						return controlFlow{}, err
+					}
+				}
+			}
+		}
+
 		// The common counter/accumulator shapes (i := 0, sum = sum+i, ...) can
 		// retain their result in Env.intVars all the way through the assignment.
 		// Do this before allocating the generic RHS []any used by the complete
@@ -2954,31 +2964,8 @@ func (vm *Interpreter) evalStmtNode(s ast.Stmt, env *Env) (controlFlow, error) {
 			if len(st.Lhs) != 1 || len(rightVals) != 1 {
 				return controlFlow{}, NewRuntimeError("augmented assignment expects 1 lhs and 1 rhs")
 			}
-			var base token.Token
-			switch st.Tok {
-			case token.ADD_ASSIGN:
-				base = token.ADD
-			case token.SUB_ASSIGN:
-				base = token.SUB
-			case token.MUL_ASSIGN:
-				base = token.MUL
-			case token.QUO_ASSIGN:
-				base = token.QUO
-			case token.REM_ASSIGN:
-				base = token.REM
-			case token.AND_ASSIGN:
-				base = token.AND
-			case token.OR_ASSIGN:
-				base = token.OR
-			case token.XOR_ASSIGN:
-				base = token.XOR
-			case token.SHL_ASSIGN:
-				base = token.SHL
-			case token.SHR_ASSIGN:
-				base = token.SHR
-			case token.AND_NOT_ASSIGN:
-				base = token.AND_NOT
-			default:
+			base := compoundOperator(st.Tok)
+			if base == token.ILLEGAL {
 				return controlFlow{}, NewRuntimeError("unsupported assignment token")
 			}
 			if id, ok := st.Lhs[0].(*ast.Ident); ok {
