@@ -171,7 +171,7 @@ type jsonConversion struct {
 }
 
 func newJSONConversion(vm *Interpreter) *jsonConversion {
-	return &jsonConversion{vm: vm, types: map[string]reflect.Type{}, building: map[string]bool{}, active: map[any]bool{}, pointers: map[uintptr]*PointerVal{}, pointerValues: map[string]reflect.Value{}, maps: map[*MapVal]reflect.Value{}, slices: map[*SliceVal]reflect.Value{}}
+	return &jsonConversion{vm: vm}
 }
 
 func (c *jsonConversion) resolve(typ string) string {
@@ -197,46 +197,49 @@ func (c *jsonConversion) typ(name string, depth int) (reflect.Type, error) {
 	if typ := c.types[name]; typ != nil {
 		return typ, nil
 	}
-	if c.building[name] {
-		return nil, fmt.Errorf("json: recursive type %s is unsupported", name)
-	}
-	c.building[name] = true
-	defer delete(c.building, name)
 	var t reflect.Type
 	switch name {
 	case "any", "interface{}", "<nil>", "nil":
-		t = reflect.TypeFor[any]()
+		return reflect.TypeFor[any](), nil
 	case "bool":
-		t = reflect.TypeFor[bool]()
+		return reflect.TypeFor[bool](), nil
 	case "string":
-		t = reflect.TypeFor[string]()
+		return reflect.TypeFor[string](), nil
 	case "int":
-		t = reflect.TypeFor[int]()
+		return reflect.TypeFor[int](), nil
 	case "int8":
-		t = reflect.TypeFor[int8]()
+		return reflect.TypeFor[int8](), nil
 	case "int16":
-		t = reflect.TypeFor[int16]()
+		return reflect.TypeFor[int16](), nil
 	case "int32", "rune":
-		t = reflect.TypeFor[int32]()
+		return reflect.TypeFor[int32](), nil
 	case "int64":
-		t = reflect.TypeFor[int64]()
+		return reflect.TypeFor[int64](), nil
 	case "uint":
-		t = reflect.TypeFor[uint]()
+		return reflect.TypeFor[uint](), nil
 	case "uint8", "byte":
-		t = reflect.TypeFor[byte]()
+		return reflect.TypeFor[byte](), nil
 	case "uint16":
-		t = reflect.TypeFor[uint16]()
+		return reflect.TypeFor[uint16](), nil
 	case "uint32":
-		t = reflect.TypeFor[uint32]()
+		return reflect.TypeFor[uint32](), nil
 	case "uint64":
-		t = reflect.TypeFor[uint64]()
+		return reflect.TypeFor[uint64](), nil
 	case "uintptr":
-		t = reflect.TypeFor[uintptr]()
+		return reflect.TypeFor[uintptr](), nil
 	case "float32":
-		t = reflect.TypeFor[float32]()
+		return reflect.TypeFor[float32](), nil
 	case "float64":
-		t = reflect.TypeFor[float64]()
+		return reflect.TypeFor[float64](), nil
 	default:
+		if c.building[name] {
+			return nil, fmt.Errorf("json: recursive type %s is unsupported", name)
+		}
+		if c.building == nil {
+			c.building = make(map[string]bool)
+		}
+		c.building[name] = true
+		defer delete(c.building, name)
 		if strings.HasPrefix(name, "*") {
 			e, err := c.typ(name[1:], depth+1)
 			if err != nil {
@@ -313,6 +316,9 @@ func (c *jsonConversion) typ(name string, depth int) (reflect.Type, error) {
 			return nil, fmt.Errorf("json: unsupported type %s", name)
 		}
 	}
+	if c.types == nil {
+		c.types = make(map[string]reflect.Type)
+	}
 	c.types[name] = t
 	return t, nil
 }
@@ -374,16 +380,25 @@ func (c *jsonConversion) value(value any, t reflect.Type, depth int) (reflect.Va
 		if err != nil {
 			return zero, err
 		}
-		out := reflect.New(t).Elem()
-		out.Set(v)
-		return out, nil
+		// Set/SetMapIndex accept concrete values assignable to an interface.
+		// No temporary interface box is needed here.
+		return v, nil
 	}
 	if identity != nil {
 		if c.active[identity] {
 			return zero, fmt.Errorf("json: cyclic value is unsupported")
 		}
+		if c.active == nil {
+			c.active = make(map[any]bool)
+		}
 		c.active[identity] = true
 		defer delete(c.active, identity)
+	}
+	// Exact scalar representations need neither allocation nor conversion.
+	// Traversal counts, cancellation, string limits and cycle checks above
+	// still run before this fast path.
+	if rv := reflect.ValueOf(value); rv.IsValid() && rv.Type() == t {
+		return rv, nil
 	}
 	out := reflect.New(t).Elem()
 	switch t.Kind() {
@@ -405,8 +420,14 @@ func (c *jsonConversion) value(value any, t reflect.Type, depth int) (reflect.Va
 		}
 		out.Set(reflect.New(t.Elem()))
 		out.Elem().Set(v)
-		c.pointers[out.Pointer()] = p
-		c.pointerValues[key] = out
+		if c.preserveAliases {
+			if c.pointers == nil {
+				c.pointers = make(map[uintptr]*PointerVal)
+				c.pointerValues = make(map[string]reflect.Value)
+			}
+			c.pointers[out.Pointer()] = p
+			c.pointerValues[key] = out
+		}
 	case reflect.Struct:
 		s, ok := value.(*StructVal)
 		if !ok || s == nil {
@@ -456,7 +477,12 @@ func (c *jsonConversion) value(value any, t reflect.Type, depth int) (reflect.Va
 			}
 			storage.Index(i).Set(converted)
 		}
-		c.slices[s] = out
+		if c.preserveAliases {
+			if c.slices == nil {
+				c.slices = make(map[*SliceVal]reflect.Value)
+			}
+			c.slices[s] = out
+		}
 	case reflect.Map:
 		m, ok := value.(*MapVal)
 		if !ok || m == nil {
@@ -483,7 +509,12 @@ func (c *jsonConversion) value(value any, t reflect.Type, depth int) (reflect.Va
 			}
 			out.SetMapIndex(k, v)
 		}
-		c.maps[m] = out
+		if c.preserveAliases {
+			if c.maps == nil {
+				c.maps = make(map[*MapVal]reflect.Value)
+			}
+			c.maps[m] = out
+		}
 	default:
 		rv := reflect.ValueOf(value)
 		if !rv.IsValid() {
@@ -662,8 +693,8 @@ func (c *jsonConversion) guest(value reflect.Value, typ string, old any, depth i
 		if err := c.vm.chargeAllocation(uint64(value.Len())); err != nil {
 			return nil, err
 		}
-		s.Data = make([]any, value.Len())
 		var previous []any
+		reuseStorage := false
 		reused := fixed
 		if p, ok := old.(*SliceVal); ok && p != nil {
 			previous = p.Data[:cap(p.Data)]
@@ -673,6 +704,7 @@ func (c *jsonConversion) guest(value reflect.Value, typ string, old any, depth i
 			}
 			if reused && cap(previous) >= value.Len() {
 				s.Data = previous[:value.Len()]
+				reuseStorage = true
 			} else if retained.IsValid() && retained.Kind() == reflect.Slice {
 				// Replay precisely the writes performed before the host decoder
 				// replaced its backing array. Array decoding writes before grow;
@@ -686,6 +718,9 @@ func (c *jsonConversion) guest(value reflect.Value, typ string, old any, depth i
 					previous[i] = v
 				}
 			}
+		}
+		if !reuseStorage {
+			s.Data = make([]any, value.Len())
 		}
 		for i := 0; i < value.Len(); i++ {
 			var prior any

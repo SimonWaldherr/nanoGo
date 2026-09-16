@@ -21,6 +21,15 @@ func TestStandardGo(t *testing.T) {
 		t.Fatal("Go toolchain required for compatibility tests")
 	}
 	cases := map[string]string{
+		"explicit_string_conversions": `type Code int32
+func main(){
+fmt.Println(string(65),string(0x1F30D),string(-1),string(0xD800),string(0x110000))
+r:=[]rune{71,114,252,223,101,32,0x1F30D};fmt.Println(string(r))
+bad:=[]rune{-1,0xD800,0x110000};fmt.Println(string(bad))
+var empty []rune;fmt.Println(len(string(empty)))
+b:=[]byte{65,0,255};s:=string(b);b[0]=66;fmt.Println(len(s),s[0],s[1],s[2])
+fmt.Println(string(Code(65)))
+}`,
 		"integer_argument_boundaries": `type Signed int64
 type Small int8
 type Octet uint8

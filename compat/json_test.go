@@ -53,6 +53,9 @@ func main(){
  err=json.Unmarshal([]byte("null"),&original);fmt.Println(err==nil,original==nil,aliasMap["old"])
  bytes:=[]byte{0};aliasBytes:=bytes;err=json.Unmarshal([]byte("\"AQI=\""),&bytes);fmt.Println(err==nil,aliasBytes[0],bytes[0],bytes[1])
  var fromNamed int;err=json.Unmarshal(Bytes([]byte("7")),&fromNamed);fmt.Println(err==nil,fromNamed)
+ backing:=[]int{10,20,30,40};reuse:=backing[:2]
+ err=json.Unmarshal([]byte("[1,2,3]"),&reuse);fmt.Println(err==nil,len(reuse),backing[0],backing[2],backing[3])
+ err=json.Unmarshal([]byte("[9,\"bad\",7]"),&reuse);fmt.Println(err!=nil,backing[0],backing[1],backing[2],backing[3])
 }`
 	file := filepath.Join(t.TempDir(), "main.go")
 	if err := os.WriteFile(file, []byte(source), 0600); err != nil {

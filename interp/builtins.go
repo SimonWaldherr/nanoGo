@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // typeString builds a textual type for simple types used by nanoGo.
@@ -616,10 +617,66 @@ func builtinConvert(typ string, v any) any {
 	case "bool":
 		return ToBool(v)
 	case "string":
-		return ToString(v)
+		return convertToString(v)
 	default:
 		return v
 	}
+}
+
+// Explicit Go string conversions differ from console formatting: integers
+// encode a Unicode code point, while rune slices encode a sequence of them.
+func convertToString(value any) string {
+	value = unwrapNamedValue(value)
+	switch v := value.(type) {
+	case int:
+		return codePointString(int64(v))
+	case int64:
+		return codePointString(v)
+	case int32:
+		return codePointString(int64(v))
+	case int16:
+		return codePointString(int64(v))
+	case int8:
+		return codePointString(int64(v))
+	case uint:
+		return codePointString(int64(v))
+	case uint64:
+		return codePointString(int64(v))
+	case uint32:
+		return codePointString(int64(v))
+	case uint16:
+		return codePointString(int64(v))
+	case uint8:
+		return codePointString(int64(v))
+	case uintptr:
+		return codePointString(int64(v))
+	case *SliceVal:
+		if v != nil && (v.ElementType == "rune" || v.ElementType == "int32") {
+			size := 0
+			for _, element := range v.Data {
+				n := utf8.RuneLen(rune(ToInt(element)))
+				if n < 0 {
+					n = utf8.RuneLen(utf8.RuneError)
+				}
+				size += n
+			}
+			var out strings.Builder
+			out.Grow(size)
+			for _, element := range v.Data {
+				out.WriteRune(rune(ToInt(element)))
+			}
+			return out.String()
+		}
+	}
+	return ToString(value)
+}
+
+func codePointString(n int64) string {
+	// Check before narrowing: a large integer must not wrap to a valid rune.
+	if n < 0 || n > utf8.MaxRune {
+		return string(utf8.RuneError)
+	}
+	return string(rune(n))
 }
 
 func isBuiltinType(name string) bool {

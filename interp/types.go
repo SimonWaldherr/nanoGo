@@ -746,11 +746,31 @@ func ToString(v any) string {
 		return "false"
 	case *SliceVal:
 		if isByteType(x.ElementType) {
-			b := make([]byte, len(x.Data))
-			for i := range b {
-				b[i] = byte(ToInt(x.Data[i]) & 0xFF)
+			// Small strings already need only one heap allocation: a stack
+			// buffer avoids Builder setup while the returned string owns a copy.
+			if len(x.Data) <= 32 {
+				var scratch [32]byte
+				for i, value := range x.Data {
+					n, ok := value.(int)
+					if !ok {
+						n = ToInt(value)
+					}
+					scratch[i] = byte(n)
+				}
+				return string(scratch[:len(x.Data)])
 			}
-			return string(b)
+			var out strings.Builder
+			out.Grow(len(x.Data))
+			for _, value := range x.Data {
+				// Guest bytes normally use int storage. Keep the permissive
+				// host-value fallback without dispatching ToInt for every byte.
+				n, ok := value.(int)
+				if !ok {
+					n = ToInt(value)
+				}
+				out.WriteByte(byte(n))
+			}
+			return out.String()
 		}
 	}
 	return fmt.Sprintf("%v", v)
