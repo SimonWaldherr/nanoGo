@@ -1,0 +1,156 @@
+{
+  "date": "2026-09-16",
+  "go": "go1.27.1",
+  "platform": "darwin/arm64",
+  "cpu": "Apple M2 Max",
+  "command": "go test ./interp/loader -run '^$' -bench 'BenchmarkPreparedExecution|BenchmarkModuleCacheLoad' -benchmem -benchtime=200ms -count=3",
+  "samples": [
+    {
+      "name": "BenchmarkModuleCacheLoad-12",
+      "iterations": 926812,
+      "nsPerOp": 259.3,
+      "bytesPerOp": 496,
+      "allocationsPerOp": 6
+    },
+    {
+      "name": "BenchmarkModuleCacheLoad-12",
+      "iterations": 881595,
+      "nsPerOp": 258.6,
+      "bytesPerOp": 496,
+      "allocationsPerOp": 6
+    },
+    {
+      "name": "BenchmarkModuleCacheLoad-12",
+      "iterations": 928162,
+      "nsPerOp": 258.8,
+      "bytesPerOp": 496,
+      "allocationsPerOp": 6
+    },
+    {
+      "name": "BenchmarkPreparedExecution/Numerical/ColdPrepareAndRun-12",
+      "iterations": 4089,
+      "nsPerOp": 61960.0,
+      "bytesPerOp": 32711,
+      "allocationsPerOp": 280
+    },
+    {
+      "name": "BenchmarkPreparedExecution/Numerical/ColdPrepareAndRun-12",
+      "iterations": 4102,
+      "nsPerOp": 62122.0,
+      "bytesPerOp": 32711,
+      "allocationsPerOp": 280
+    },
+    {
+      "name": "BenchmarkPreparedExecution/Numerical/ColdPrepareAndRun-12",
+      "iterations": 4064,
+      "nsPerOp": 62081.0,
+      "bytesPerOp": 32709,
+      "allocationsPerOp": 280
+    },
+    {
+      "name": "BenchmarkPreparedExecution/Numerical/WarmFreshRun-12",
+      "iterations": 4718,
+      "nsPerOp": 53688.0,
+      "bytesPerOp": 15994,
+      "allocationsPerOp": 90
+    },
+    {
+      "name": "BenchmarkPreparedExecution/Numerical/WarmFreshRun-12",
+      "iterations": 4596,
+      "nsPerOp": 53367.0,
+      "bytesPerOp": 15994,
+      "allocationsPerOp": 90
+    },
+    {
+      "name": "BenchmarkPreparedExecution/Numerical/WarmFreshRun-12",
+      "iterations": 4705,
+      "nsPerOp": 53478.0,
+      "bytesPerOp": 15993,
+      "allocationsPerOp": 90
+    },
+    {
+      "name": "BenchmarkPreparedExecution/NestedSlices/ColdPrepareAndRun-12",
+      "iterations": 12304,
+      "nsPerOp": 19497.0,
+      "bytesPerOp": 35666,
+      "allocationsPerOp": 347
+    },
+    {
+      "name": "BenchmarkPreparedExecution/NestedSlices/ColdPrepareAndRun-12",
+      "iterations": 12294,
+      "nsPerOp": 20148.0,
+      "bytesPerOp": 35668,
+      "allocationsPerOp": 347
+    },
+    {
+      "name": "BenchmarkPreparedExecution/NestedSlices/ColdPrepareAndRun-12",
+      "iterations": 12250,
+      "nsPerOp": 19529.0,
+      "bytesPerOp": 35667,
+      "allocationsPerOp": 347
+    },
+    {
+      "name": "BenchmarkPreparedExecution/NestedSlices/WarmFreshRun-12",
+      "iterations": 25072,
+      "nsPerOp": 9560.0,
+      "bytesPerOp": 17658,
+      "allocationsPerOp": 125
+    },
+    {
+      "name": "BenchmarkPreparedExecution/NestedSlices/WarmFreshRun-12",
+      "iterations": 25045,
+      "nsPerOp": 9515.0,
+      "bytesPerOp": 17657,
+      "allocationsPerOp": 125
+    },
+    {
+      "name": "BenchmarkPreparedExecution/NestedSlices/WarmFreshRun-12",
+      "iterations": 24970,
+      "nsPerOp": 9507.0,
+      "bytesPerOp": 17658,
+      "allocationsPerOp": 125
+    },
+    {
+      "name": "BenchmarkPreparedExecution/Serialization/ColdPrepareAndRun-12",
+      "iterations": 9966,
+      "nsPerOp": 20264.0,
+      "bytesPerOp": 39152,
+      "allocationsPerOp": 428
+    },
+    {
+      "name": "BenchmarkPreparedExecution/Serialization/ColdPrepareAndRun-12",
+      "iterations": 10000,
+      "nsPerOp": 21372.0,
+      "bytesPerOp": 39158,
+      "allocationsPerOp": 428
+    },
+    {
+      "name": "BenchmarkPreparedExecution/Serialization/ColdPrepareAndRun-12",
+      "iterations": 10000,
+      "nsPerOp": 21460.0,
+      "bytesPerOp": 39162,
+      "allocationsPerOp": 428
+    },
+    {
+      "name": "BenchmarkPreparedExecution/Serialization/WarmFreshRun-12",
+      "iterations": 22263,
+      "nsPerOp": 12988.0,
+      "bytesPerOp": 20251,
+      "allocationsPerOp": 169
+    },
+    {
+      "name": "BenchmarkPreparedExecution/Serialization/WarmFreshRun-12",
+      "iterations": 20835,
+      "nsPerOp": 9798.0,
+      "bytesPerOp": 20246,
+      "allocationsPerOp": 169
+    },
+    {
+      "name": "BenchmarkPreparedExecution/Serialization/WarmFreshRun-12",
+      "iterations": 24403,
+      "nsPerOp": 9872.0,
+      "bytesPerOp": 20251,
+      "allocationsPerOp": 169
+    }
+  ]
+}

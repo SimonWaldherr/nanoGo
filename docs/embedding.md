@@ -231,3 +231,6 @@ Native benchmarks: `go test ./interp/loader -run '^$' -bench
 `scripts/benchmark-wasm.cjs` separately measures actual WASM compile/startup,
 first execution and repeated worker execution. Results are workload observations,
 not native-to-WASM equivalence or an asserted speedup over earlier releases.
+
+Local commands, results, benchmark samples, and unverified browser checks are
+recorded in [embedding-validation.md](embedding-validation.md).

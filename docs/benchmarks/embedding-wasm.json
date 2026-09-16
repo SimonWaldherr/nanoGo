@@ -1,0 +1,52 @@
+{
+  "runtime": "v26.8.2",
+  "platform": "darwin",
+  "arch": "arm64",
+  "wasmBytes": 14348155,
+  "moduleCompileMs": 12.220292,
+  "note": "Fresh worker is not a cold browser/process measurement. Warm requests still parse and execute with fresh interpreter state. Node WASM timings are not browser timings.",
+  "workloads": {
+    "numericalLoop": {
+      "freshWorkerStartupMs": 49.66570899999999,
+      "firstExecutionMs": 43.520292,
+      "warmExecutionMs": [
+        14.460459,
+        10.41470799999999,
+        11.116832999999986,
+        10.99670900000001,
+        10.250875000000008,
+        10.550000000000011,
+        10.14749999999998
+      ],
+      "warmMedianMs": 10.550000000000011
+    },
+    "nestedSlices": {
+      "freshWorkerStartupMs": 20.37625,
+      "firstExecutionMs": 19.846542,
+      "warmExecutionMs": [
+        11.352749999999986,
+        11.113416999999998,
+        10.929540999999972,
+        10.900416999999948,
+        10.785000000000025,
+        24.32908299999997,
+        10.697499999999991
+      ],
+      "warmMedianMs": 10.929540999999972
+    },
+    "jsonRoundTrip": {
+      "freshWorkerStartupMs": 21.054374999999993,
+      "firstExecutionMs": 11.79283399999997,
+      "warmExecutionMs": [
+        4.314707999999996,
+        3.8834580000000187,
+        4.09662499999996,
+        3.8365830000000187,
+        4.404165999999975,
+        3.9243339999999876,
+        4.052999999999997
+      ],
+      "warmMedianMs": 4.052999999999997
+    }
+  }
+}
