@@ -41,8 +41,11 @@ type vfsNode struct {
 	content  []byte
 	isDir    bool
 	readOnly bool
-	modTime  time.Time
-	mode     int
+	// Clones have private nodes but may share immutable content. A writer
+	// must detach a shared buffer before reusing its capacity.
+	sharedContent bool
+	modTime       time.Time
+	mode          int
 }
 
 // VFSFileInfo describes a file or directory entry returned by Stat / ReadDir.
@@ -220,8 +223,14 @@ func (fs *VFS) writeFile(p string, data []byte, mode int, takeOwnership bool) er
 		if takeOwnership {
 			node.content = data
 		} else {
+			if node.sharedContent {
+				// Drop capacity as well as length, including for empty writes.
+				// Another snapshot may still hold the old bytes.
+				node.content = nil
+			}
 			node.content = append(node.content[:0], data...)
 		}
+		node.sharedContent = false
 		node.modTime = time.Now()
 		node.mode = mode
 		fs.revision++

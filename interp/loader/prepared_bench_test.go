@@ -2,11 +2,15 @@ package loader
 
 import (
 	"context"
+	"fmt"
 	"testing"
+
+	"simonwaldherr.de/go/nanogo/interp"
 )
 
-// These are native measurements. WASM startup and execution are measured by
-// scripts/benchmark-wasm.cjs against the actual shipping artifact separately.
+// These benchmarks measure the selected Go target (native by default).
+// scripts/benchmark-wasm.cjs measures worker startup and execution against
+// the actual shipping WASM artifact separately.
 func BenchmarkPreparedExecution(b *testing.B) {
 	for _, work := range []struct{ name, body string }{
 		{"Numerical", `sum:=0;for i:=0;i<1000;i++{sum+=i};host.Emit("sum",sum)`},
@@ -40,6 +44,35 @@ func BenchmarkPreparedExecution(b *testing.B) {
 					}
 				}
 			})
+		})
+	}
+}
+
+// An untouched workspace asset should not be copied into each fresh run.
+func BenchmarkPreparedWorkspace(b *testing.B) {
+	for _, size := range []int{0, 1 << 20, 16 << 20} {
+		b.Run(fmt.Sprintf("AssetBytes=%d", size), func(b *testing.B) {
+			fs := interp.NewVFS()
+			for name, data := range map[string][]byte{
+				"/tmp/main.go":   []byte(`package main;func main(){host.Emit("answer",42)}`),
+				"/tmp/asset.bin": make([]byte, size),
+			} {
+				if err := fs.WriteFile(name, data, 0644); err != nil {
+					b.Fatal(err)
+				}
+			}
+			p, err := PrepareModule(fs, "/tmp", Options{ModulePath: "bench.local/app"})
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				r, err := p.Run(context.Background(), RunOptions{})
+				if err != nil || !r.Results.Committed {
+					b.Fatalf("run: %+v, %v", r, err)
+				}
+			}
 		})
 	}
 }
