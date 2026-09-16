@@ -114,6 +114,7 @@ test-wasm:
 # Exercise the exact published artifact, including optional Binaryen passes.
 test-wasm-artifact:
 	node scripts/smoke-wasm.cjs "$(WASM_OUT)" "$(WASM_EXEC_OUT)"
+	node scripts/smoke-offline.cjs "$(WASM_OUT)" "$(WASM_EXEC_OUT)"
 
 .PHONY: test-compat
 test-compat:

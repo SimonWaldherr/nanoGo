@@ -78,14 +78,17 @@ type traceEventJSON struct {
 // profile (see profileToJSON) for a "how often was this line executed"
 // heatmap.
 type runStats struct {
-	ElapsedMs float64                   `json:"elapsedMs"`
-	Steps     uint64                    `json:"steps"`
-	Error     string                    `json:"error,omitempty"`
-	Trace     []traceEventJSON          `json:"trace,omitempty"`
-	TraceCap  int                       `json:"traceCap,omitempty"`
-	Profile   []lineHit                 `json:"profile,omitempty"`
-	Variables []interp.VariableSnapshot `json:"variables,omitempty"`
-	Workspace *workspaceInfo            `json:"workspace,omitempty"`
+	Diagnostic       *interp.Diagnostic        `json:"diagnostic,omitempty"`
+	Results          []interp.ResultEvent      `json:"results,omitempty"`
+	ResultsCommitted bool                      `json:"resultsCommitted"`
+	ElapsedMs        float64                   `json:"elapsedMs"`
+	Steps            uint64                    `json:"steps"`
+	Error            string                    `json:"error,omitempty"`
+	Trace            []traceEventJSON          `json:"trace,omitempty"`
+	TraceCap         int                       `json:"traceCap,omitempty"`
+	Profile          []lineHit                 `json:"profile,omitempty"`
+	Variables        []interp.VariableSnapshot `json:"variables,omitempty"`
+	Workspace        *workspaceInfo            `json:"workspace,omitempty"`
 }
 
 // lineHit is one entry of a line-execution profile: how many times line's
@@ -336,6 +339,11 @@ func jsNanoGoRun(this js.Value, args []js.Value) any {
 	}
 
 	vm := newPlaygroundVM()
+	if optionsErr := configureExecution(vm, args); optionsErr != nil {
+		data, _ := json.Marshal(runStats{Error: optionsErr.Error(), Diagnostic: interp.DiagnosticFor(optionsErr, "host")})
+		return string(data)
+	}
+
 	variables := interp.NewVariableTracker()
 	vm.SetVariableTracker(variables)
 	vm.SetBreakpoints(breakpointLines)
@@ -364,8 +372,12 @@ func jsNanoGoRun(this js.Value, args []js.Value) any {
 	err := vm.Run(source)
 	stats.ElapsedMs = float64(time.Since(start).Microseconds()) / 1000
 	stats.Steps = vm.LastStepCount()
+	results := vm.LastResults()
+	stats.Results = results.Events
+	stats.ResultsCommitted = results.Committed
 	if err != nil {
 		stats.Error = err.Error()
+		stats.Diagnostic = interp.DiagnosticFor(err, "runtime")
 		runtime.ConsoleError("nanoGo error: " + err.Error())
 	}
 
@@ -406,13 +418,18 @@ func jsNanoGoRun(this js.Value, args []js.Value) any {
 func jsNanoGoRunWorkspace(this js.Value, args []js.Value) any {
 	files, modulePath, err := workspaceFilesValue(args)
 	if err != nil {
-		data, _ := json.Marshal(runStats{Error: err.Error()})
+		data, _ := json.Marshal(runStats{Error: err.Error(), Diagnostic: interp.DiagnosticFor(err, "host")})
 		return string(data)
 	}
 	wantTrace := len(args) >= 3 && args[2].Truthy()
 	wantProfile := len(args) >= 4 && args[3].Truthy()
 
 	vm := newPlaygroundVM()
+	if optionsErr := configureExecution(vm, args); optionsErr != nil {
+		data, _ := json.Marshal(runStats{Error: optionsErr.Error(), Diagnostic: interp.DiagnosticFor(optionsErr, "host")})
+		return string(data)
+	}
+
 	variables := interp.NewVariableTracker()
 	vm.SetVariableTracker(variables)
 	traceCapacity := 4096
@@ -431,6 +448,7 @@ func jsNanoGoRunWorkspace(this js.Value, args []js.Value) any {
 	prog, loadErr := loadWorkspace(vm, files, modulePath)
 	if loadErr != nil {
 		stats.Error = loadErr.Error()
+		stats.Diagnostic = interp.DiagnosticFor(loadErr, "load")
 		data, _ := json.Marshal(stats)
 		return string(data)
 	}
@@ -439,8 +457,12 @@ func jsNanoGoRunWorkspace(this js.Value, args []js.Value) any {
 	err = loader.RunProgram(context.Background(), vm, prog, "main")
 	stats.ElapsedMs = float64(time.Since(start).Microseconds()) / 1000
 	stats.Steps = vm.LastStepCount()
+	results := vm.LastResults()
+	stats.Results = results.Events
+	stats.ResultsCommitted = results.Committed
 	if err != nil {
 		stats.Error = err.Error()
+		stats.Diagnostic = interp.DiagnosticFor(err, "runtime")
 		runtime.ConsoleError("nanoGo workspace error: " + err.Error())
 	}
 	activeCanvas.Flush()
@@ -452,9 +474,10 @@ func jsNanoGoRunWorkspace(this js.Value, args []js.Value) any {
 }
 
 type workspaceCheckResult struct {
-	OK        bool           `json:"ok"`
-	Error     string         `json:"error,omitempty"`
-	Workspace *workspaceInfo `json:"workspace,omitempty"`
+	Diagnostic *interp.Diagnostic `json:"diagnostic,omitempty"`
+	OK         bool               `json:"ok"`
+	Error      string             `json:"error,omitempty"`
+	Workspace  *workspaceInfo     `json:"workspace,omitempty"`
 }
 
 // jsNanoGoWorkspaceCheck parses and resolves a workspace without executing
@@ -463,13 +486,13 @@ type workspaceCheckResult struct {
 func jsNanoGoWorkspaceCheck(this js.Value, args []js.Value) any {
 	files, modulePath, err := workspaceFilesValue(args)
 	if err != nil {
-		data, _ := json.Marshal(workspaceCheckResult{Error: err.Error()})
+		data, _ := json.Marshal(workspaceCheckResult{Error: err.Error(), Diagnostic: interp.DiagnosticFor(err, "load")})
 		return string(data)
 	}
 	vm := newPlaygroundVM()
 	prog, err := loadWorkspace(vm, files, modulePath)
 	if err != nil {
-		data, _ := json.Marshal(workspaceCheckResult{Error: err.Error()})
+		data, _ := json.Marshal(workspaceCheckResult{Error: err.Error(), Diagnostic: interp.DiagnosticFor(err, "load")})
 		return string(data)
 	}
 	data, _ := json.Marshal(workspaceCheckResult{OK: true, Workspace: workspaceInfoFromProgram(prog, len(files))})
@@ -485,7 +508,7 @@ func jsNanoGoAst(this js.Value, args []js.Value) any {
 	}
 	res, err := interp.InspectSource(args[0].String())
 	if err != nil {
-		b, _ := json.Marshal(map[string]string{"error": err.Error()})
+		b, _ := json.Marshal(map[string]any{"error": err.Error(), "diagnostic": interp.DiagnosticFor(err, "runtime")})
 		return string(b)
 	}
 	b, jsonErr := json.Marshal(res)
@@ -505,7 +528,7 @@ func jsNanoGoCallGraph(this js.Value, args []js.Value) any {
 	}
 	res, err := interp.AnalyzeCallGraph(args[0].String())
 	if err != nil {
-		b, _ := json.Marshal(map[string]string{"error": err.Error()})
+		b, _ := json.Marshal(map[string]any{"error": err.Error(), "diagnostic": interp.DiagnosticFor(err, "runtime")})
 		return string(b)
 	}
 	b, jsonErr := json.Marshal(res)
@@ -519,13 +542,14 @@ func jsNanoGoCallGraph(this js.Value, args []js.Value) any {
 // evaluator checkpoints, not CPU time — identical across machines for the
 // same program. Wall times are informational.
 type benchStats struct {
-	Iterations int       `json:"iterations"`
-	StepsPerOp uint64    `json:"stepsPerOp"`
-	AvgMs      float64   `json:"avgMs"`
-	MinMs      float64   `json:"minMs"`
-	MaxMs      float64   `json:"maxMs"`
-	RunsMs     []float64 `json:"runsMs"`
-	Error      string    `json:"error,omitempty"`
+	Diagnostic *interp.Diagnostic `json:"diagnostic,omitempty"`
+	Iterations int                `json:"iterations"`
+	StepsPerOp uint64             `json:"stepsPerOp"`
+	AvgMs      float64            `json:"avgMs"`
+	MinMs      float64            `json:"minMs"`
+	MaxMs      float64            `json:"maxMs"`
+	RunsMs     []float64          `json:"runsMs"`
+	Error      string             `json:"error,omitempty"`
 	// Profile is accumulated across every iteration (one shared LineProfile
 	// reused for all N fresh interpreters), so a line inside a hot loop
 	// shows N× the hits a cold one-off line does — the benchmark's own
@@ -571,6 +595,7 @@ func jsNanoGoBench(this js.Value, args []js.Value) any {
 		elapsedMs := float64(time.Since(start).Microseconds()) / 1000
 		if err != nil {
 			stats.Error = err.Error()
+			stats.Diagnostic = interp.DiagnosticFor(err, "runtime")
 			break
 		}
 		stats.StepsPerOp = vm.LastStepCount()
@@ -683,7 +708,7 @@ func jsNanoGoTest(this js.Value, args []js.Value) any {
 	}
 	results, err := loader.RunSourceTestsMatching(context.Background(), vm, args[0].String(), match)
 	if err != nil {
-		data, _ := json.Marshal(map[string]string{"error": err.Error()})
+		data, _ := json.Marshal(map[string]any{"error": err.Error(), "diagnostic": interp.DiagnosticFor(err, "runtime")})
 		return string(data)
 	}
 	result.Total = len(results)
@@ -701,13 +726,13 @@ func jsNanoGoTest(this js.Value, args []js.Value) any {
 func jsNanoGoTestWorkspace(this js.Value, args []js.Value) any {
 	files, modulePath, err := workspaceFilesValue(args)
 	if err != nil {
-		data, _ := json.Marshal(map[string]string{"error": err.Error()})
+		data, _ := json.Marshal(map[string]any{"error": err.Error(), "diagnostic": interp.DiagnosticFor(err, "runtime")})
 		return string(data)
 	}
 	vm := newPlaygroundVM()
 	prog, err := loadWorkspace(vm, files, modulePath)
 	if err != nil {
-		data, _ := json.Marshal(map[string]string{"error": err.Error()})
+		data, _ := json.Marshal(map[string]any{"error": err.Error(), "diagnostic": interp.DiagnosticFor(err, "runtime")})
 		return string(data)
 	}
 	match := ""
@@ -727,7 +752,7 @@ func jsNanoGoTestWorkspace(this js.Value, args []js.Value) any {
 		seen[pkg.Name] = struct{}{}
 		tests, testErr := loader.RunPackageTestsMatching(context.Background(), vm, prog, pkg.Name, match)
 		if testErr != nil {
-			data, _ := json.Marshal(map[string]string{"error": testErr.Error()})
+			data, _ := json.Marshal(map[string]any{"error": testErr.Error(), "diagnostic": interp.DiagnosticFor(testErr, "runtime")})
 			return string(data)
 		}
 		appendTestResults(&result, tests)
@@ -742,23 +767,27 @@ func jsNanoGoTestWorkspace(this js.Value, args []js.Value) any {
 // so the playground UI can detect which features are available.
 func jsNanoGoVersion(this js.Value, args []js.Value) any {
 	info := map[string]any{
-		"version":           "0.3.0",
-		"sdk":               "nanogo-sdk/0.3",
-		"runtime":           "wasm",
-		"hasFormat":         true,
-		"hasVet":            true,
-		"hasTests":          true,
-		"hasOS":             true,
-		"hasAst":            true,
-		"hasBench":          true,
-		"hasTrace":          true,
-		"hasStats":          true,
-		"hasCallGraph":      true,
-		"hasProfile":        true,
-		"hasWorkspace":      true,
-		"hasModuleCheck":    true,
-		"hasWorkspaceTests": true,
-		"hasLiveDebug":      true,
+		"version":              "0.3.0",
+		"sdk":                  "nanogo-sdk/0.3",
+		"runtime":              "wasm",
+		"hasDiagnostics":       true,
+		"hasStructuredResults": true,
+		"hasStandardJSON":      true,
+		"protocolVersion":      2,
+		"hasFormat":            true,
+		"hasVet":               true,
+		"hasTests":             true,
+		"hasOS":                true,
+		"hasAst":               true,
+		"hasBench":             true,
+		"hasTrace":             true,
+		"hasStats":             true,
+		"hasCallGraph":         true,
+		"hasProfile":           true,
+		"hasWorkspace":         true,
+		"hasModuleCheck":       true,
+		"hasWorkspaceTests":    true,
+		"hasLiveDebug":         true,
 		"workspace": map[string]any{
 			"multiFile":           true,
 			"localImports":        true,

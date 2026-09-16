@@ -70,7 +70,7 @@ test('client resolves module-relative default worker and waits for ready', async
 test('client forwards asset overrides and serializes same-type requests', async t => {
   const {worker, pending} = await setup(t, {workerURL: '/sdk/worker.js', wasmURL:'release.wasm', wasmExecURL:'go.js'});
   assert.equal(worker.url, '/sdk/worker.js');
-  assert.deepEqual(worker.sent[0], {type:'init', wasmURL:'release.wasm', wasmExecURL:'go.js'});
+  assert.deepEqual(worker.sent[0], {type:'init', protocolVersion:2, wasmURL:'release.wasm', wasmExecURL:'go.js'});
   worker.emit({type:'ready'});
   const client = await pending;
   const first = client.format('first'), second = client.format('second');
@@ -168,4 +168,141 @@ test('invalid initialization timeout rejects before starting a worker', async t 
   for (const initTimeoutMs of [0, -1, Infinity, NaN]) {
     await assert.rejects(createNanoGo({initTimeoutMs}), /positive finite/);
   }
+});
+
+test('supplied assets snapshot byte views and negotiate protocol without URL fallbacks', async t => {
+  const {createNanoGo, PROTOCOL_VERSION} = await import('../nanogo.mjs');
+  const sent = [];
+  const worker = { postMessage: message => sent.push(message), terminate() {} };
+  const source = new Uint8Array([9, 0, 97, 115, 109, 9]);
+  const pending = createNanoGo({offline: true, wasmBytes: source.subarray(1, 5),
+    workerFactory: () => ({worker, wasmExecProvided: true})});
+  source[1] = 99;
+  assert.deepEqual(Array.from(new Uint8Array(sent[0].wasmBytes)), [0, 97, 115, 109]);
+  assert.equal(sent[0].offline, true);
+  assert.equal(sent[0].wasmExecProvided, true);
+  assert.equal(sent[0].protocolVersion, PROTOCOL_VERSION);
+  worker.onmessage({data: {type:'ready', protocolVersion: PROTOCOL_VERSION}});
+  const client = await pending;
+  assert.equal(client.protocolVersion, PROTOCOL_VERSION);
+  client.dispose();
+});
+
+test('offline validation rejects missing assets and conflicting settings before creating workers', async () => {
+  const {createNanoGo} = await import('../nanogo.mjs');
+  let created = 0;
+  const workerFactory = () => { created++; throw new Error('unexpected worker'); };
+  for (const options of [
+    {offline:true},
+    {offline:true, workerFactory},
+    {wasmBytes:'not bytes', workerFactory},
+    {wasmBytes:new Uint8Array(), wasmURL:'x', workerFactory},
+    {workerFactory, workerURL:'x'},
+    {wasmExecProvided:true, wasmExecURL:'x', workerFactory},
+    {wasmModule:{}, workerFactory}
+  ]) await assert.rejects(createNanoGo(options), TypeError);
+  assert.equal(created, 0);
+});
+
+test('offline missing runtime cleans up a supplied worker without posting init', async () => {
+  const {createNanoGo} = await import('../nanogo.mjs');
+  let terminated = 0, cleaned = 0;
+  await assert.rejects(createNanoGo({offline:true, wasmBytes:new Uint8Array([0]), workerFactory: () => ({
+    worker: {postMessage() {throw new Error('unexpected message');}, terminate() {terminated++;}},
+    dispose() {cleaned++;}
+  })}), /runtime/);
+  assert.equal(terminated, 1);
+  assert.equal(cleaned, 1);
+});
+
+test('unsupported protocol rejects startup and cleans factory resources once', async () => {
+  const {createNanoGo} = await import('../nanogo.mjs');
+  let terminated = 0, cleaned = 0;
+  const worker = {postMessage() {}, terminate() {terminated++;}};
+  const pending = createNanoGo({workerFactory: () => ({worker, dispose() {cleaned++;}})});
+  const rejected = assert.rejects(pending, /protocol version/);
+  worker.onmessage({data:{type:'ready', protocolVersion:999}});
+  await rejected;
+  assert.equal(terminated, 1);
+  assert.equal(cleaned, 1);
+});
+
+test('legacy workers remain supported for URLs but cannot silently ignore supplied assets', async () => {
+  const {createNanoGo} = await import('../nanogo.mjs');
+  const worker = {postMessage() {}, terminate() {}};
+  const pending = createNanoGo({wasmBytes:new Uint8Array([0]), workerFactory: () => worker});
+  const rejected = assert.rejects(pending, /protocol version/);
+  worker.onmessage({data:{type:'ready'}});
+  await rejected;
+});
+
+test('inline factory owns blob URLs until disposal and releases failed construction', async t => {
+  const {createInlineWorkerFactory, createNanoGo} = await import('../nanogo.mjs');
+  const revoked = [], blobs = [];
+  t.mock.method(URL, 'createObjectURL', blob => {blobs.push(blob); return 'blob:fixture';});
+  t.mock.method(URL, 'revokeObjectURL', url => revoked.push(url));
+  let worker;
+  t.mock.method(globalThis, 'Worker', function(url) {
+    assert.equal(url, 'blob:fixture');
+    worker = {postMessage() {}, terminate() {}};
+    return worker;
+  });
+  const factory = createInlineWorkerFactory({workerSource:'// worker', wasmExecSource:'// runtime'});
+  const pending = createNanoGo({offline:true, wasmBytes:new Uint8Array([0]), workerFactory:factory});
+  assert.match(await blobs[0].text(), /\/\/ runtime\n[\s\S]*\/\/ worker/);
+  worker.onmessage({data:{type:'ready',protocolVersion:2}});
+  const client = await pending;
+  assert.deepEqual(revoked, []);
+  client.dispose(); client.dispose();
+  assert.deepEqual(revoked, ['blob:fixture']);
+  t.mock.method(globalThis, 'Worker', function() {throw new Error('worker denied');});
+  assert.throws(factory, /worker denied/);
+  assert.deepEqual(revoked, ['blob:fixture','blob:fixture']);
+});
+
+test('input options require negotiated WASM capabilities', async t => {
+  const {worker, pending} = await setup(t);
+  worker.emit({type:'ready'});
+  const client = await pending;
+  await assert.rejects(client.run('source',{inputs:{x:1}}), /does not support inputs/);
+  assert.equal(worker.sent.length, 1);
+});
+
+test('diagnostics remain available on errors without parsing text', async t => {
+  const {worker, pending} = await setup(t);
+  worker.emit({type:'ready',protocolVersion:2,capabilities:{hasStructuredResults:true}});
+  const client = await pending;
+  const run = client.run('source',{inputs:{x:1},limits:{maxSteps:10}});
+  assert.deepEqual(worker.sent.at(-1).inputs, {x:1});
+  const diagnostic = {code:'limit_exceeded',phase:'limit',message:'too many steps',limit:{resource:'steps',maximum:10,used:11}};
+  const rejected = assert.rejects(run, error => error.diagnostic === diagnostic);
+  worker.emit({type:'done',stats:{error:'too many steps',diagnostic}});
+  await rejected;
+});
+
+test('compiled modules are forwarded without instantiating shared memory', async () => {
+  const {createNanoGo}=await import('../nanogo.mjs');
+  const wasmModule=await WebAssembly.compile(new Uint8Array([0,97,115,109,1,0,0,0]));
+  let init;
+  const worker={postMessage(message) {init=message;},terminate(){}};
+  const pending=createNanoGo({offline:true,wasmModule,workerFactory:()=>({worker,wasmExecProvided:true})});
+  assert.equal(init.wasmModule,wasmModule);
+  assert.equal(init.wasmBytes,undefined);
+  worker.onmessage({data:{type:'ready',protocolVersion:2}});
+  (await pending).dispose();
+});
+
+test('factory cleanup keeps its receiver and cannot strand queue rejection', async () => {
+  const {createNanoGo}=await import('../nanogo.mjs');
+  let cleaned=0;
+  const worker={postMessage(){},terminate(){throw new Error('termination failed');}};
+  const handle={worker,dispose(){assert.equal(this,handle);cleaned++;throw new Error('cleanup failed');}};
+  const pending=createNanoGo({workerFactory:()=>handle});
+  worker.onmessage({data:{type:'ready',protocolVersion:2}});
+  const client=await pending;
+  const active=assert.rejects(client.run('a'),error=>error.diagnostic.code==='execution.disposed');
+  const queued=assert.rejects(client.run('b'),/disposed/);
+  client.dispose();client.dispose();
+  await Promise.all([active,queued]);
+  assert.equal(cleaned,1);
 });

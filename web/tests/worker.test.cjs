@@ -167,3 +167,97 @@ for (const mode of ['stream', 'deferred']) {
     assert.deepEqual(host.sent.map(message => message.type), ['done']);
   });
 }
+
+for (const supplied of ['bytes', 'module']) {
+  test(`supplied ${supplied} and runtime start without fetch or importScripts`, async () => {
+    class Module {}
+    let instantiated;
+    const host = setup({setTimeout, clearTimeout,
+      fetch() {throw new Error('unexpected fetch');},
+      importScripts() {throw new Error('unexpected import');},
+      WebAssembly: {Module, instantiate:async asset => {
+        instantiated = asset;
+        return supplied === 'module' ? {} : {instance:{}};
+      }},
+      Go: class { importObject = {}; run() {
+        host.self.nanoGoRun = () => '{}'; host.self.nanoGoSignalReady();
+        return new Promise(() => {});
+      }}
+    });
+    const asset = supplied === 'bytes' ? 'wasmBytes:new Uint8Array([0,97,115,109])' : 'wasmModule:new WebAssembly.Module()';
+    await host.run(`initWasmWorker({protocolVersion:2,offline:true,wasmExecProvided:true,${asset}})`);
+    assert.ok(instantiated);
+    assert.equal(host.run('goReady'), true);
+  });
+}
+
+test('supplied startup rejects missing runtime and malformed assets without network', async () => {
+  for (const options of [
+    '{offline:true}',
+    '{offline:true,wasmBytes:new Uint8Array([0])}',
+    '{offline:true,wasmBytes:new Uint8Array([0]),wasmExecProvided:true}',
+    '{wasmModule:{},wasmExecProvided:true}',
+    '{protocolVersion:999}'
+  ]) {
+    const host = setup({fetch() {throw new Error('unexpected network');}, importScripts() {throw new Error('unexpected network');}});
+    await assert.rejects(host.run(`initWasmWorker(${options})`), error => !error.message.includes('unexpected network'));
+  }
+});
+
+test('WASM compilation failures in supplied mode are fatal startup failures', async () => {
+  const host = setup({
+    Go: class { importObject = {}; },
+    WebAssembly: {instantiate:async () => {throw new Error('invalid magic bytes');}}
+  });
+  await host.run(`self.onmessage({data:{type:'init',offline:true,wasmExecProvided:true,wasmBytes:new Uint8Array([0])}})`);
+  assert.equal(host.sent[0].fatal, true);
+  assert.match(host.sent[0].text, /invalid magic bytes/);
+});
+
+test('execution inputs and limits reach direct and workspace exports as JSON', async () => {
+  const host = setup();
+  host.run(`goReady = true;
+    self.nanoGoVersion = () => JSON.stringify({hasStructuredResults:true});
+    self.nanoGoRun = (...args) => { self.args = args; return '{}'; };
+    self.nanoGoRunWorkspace = self.nanoGoRun;`);
+  for (const type of ['run','workspace-run']) {
+    await host.run(`self.onmessage({data:{type:'${type}',source:'test',files:[],inputs:{name:'Grüße',items:[1,null]},limits:{maxSteps:10}}})`);
+    assert.deepEqual(JSON.parse(host.self.args[4]), {inputs:{name:'Grüße',items:[1,null]},limits:{maxSteps:10}});
+  }
+});
+
+test('execution options reject unsupported JSON and cycles without running guest code', async () => {
+  const host = setup();
+  host.run(`goReady = true; self.nanoGoVersion = () => JSON.stringify({hasStructuredResults:true});
+    self.nanoGoRun = () => { throw new Error('guest should not run'); };`);
+  for (const value of ['NaN','undefined','() => 1','new Date()','(() => {const a={}; a.self=a; return a;})()',
+    '(() => {let a={}; for(let i=0;i<65;i++) a={a}; return a;})()']) {
+    host.sent.length = 0;
+    await host.run(`self.onmessage({data:{type:'run',inputs:{value:${value}}}})`);
+    const done = host.sent.at(-1);
+    assert.equal(done.type, 'done');
+    assert.match(done.error, /Execution options/);
+    assert.doesNotMatch(done.error, /guest should not run/);
+  }
+});
+
+test('legacy WASM rejects supplied inputs instead of ignoring them', async () => {
+  const host = setup();
+  host.run(`goReady=true; self.nanoGoRun=() => {throw new Error('should not run');};`);
+  await host.self.onmessage({data:{type:'run',inputs:{}}});
+  assert.match(host.sent.at(-1).error, /does not support inputs/);
+});
+
+test('tool failures preserve WASM diagnostic objects across worker replies', async () => {
+  const host = setup();
+  host.run(`goReady=true;
+    self.failure = {error:'parse failed',diagnostic:{code:'parse.syntax',phase:'parse',message:'parse failed',location:{file:'input.go',line:2,column:3}}};
+    self.nanoGoFormat = self.nanoGoVet = () => self.failure;
+    self.nanoGoTest = self.nanoGoAst = self.nanoGoCallGraph = () => JSON.stringify(self.failure);`);
+  for(const type of ['format','vet','test','ast','callgraph']) {
+    host.sent.length=0;
+    await host.self.onmessage({data:{type,source:'bad'}});
+    const response=host.sent.at(-1);
+    assert.equal((response.diagnostic || response.result?.diagnostic)?.code,'parse.syntax',type);
+  }
+});

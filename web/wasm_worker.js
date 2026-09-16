@@ -4,6 +4,7 @@
 let goReady = false;
 let _initPromise;
 let _runtimeFailure;
+const PROTOCOL_VERSION = 2;
 // Resolved by Go (via the `nanoGoSignalReady` host helper) once all
 // `nanoGo*` globals have been registered. This avoids the previous
 // busy-wait loop that polled every 10 ms for up to 3 seconds.
@@ -140,14 +141,42 @@ function workspaceInput(snapshot) {
   return snapshot.json;
 }
 
+// Only JSON data crosses this explicit host boundary. JSON.stringify alone
+// would silently omit functions/undefined and change NaN into null.
+function executionOptions(msg) {
+  if (msg.inputs === undefined && msg.limits === undefined) return undefined;
+  if (!getCapabilities().hasStructuredResults) throw new Error('This WASM build does not support inputs and limits');
+  const visiting = new Set();
+  function validate(value, depth) {
+    if (depth > 64) throw new TypeError('Execution options exceed maximum nesting depth 64');
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+    if (typeof value === 'number' && Number.isFinite(value)) return;
+    if (typeof value !== 'object' || value === null) throw new TypeError('Execution options must contain only JSON values');
+    if (visiting.has(value)) throw new TypeError('Execution options contain a cycle');
+    if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
+      throw new TypeError('Execution options require plain objects and arrays');
+    }
+    visiting.add(value);
+    for (const child of Array.isArray(value) ? value : Object.values(value)) validate(child, depth + 1);
+    visiting.delete(value);
+  }
+  const options = {
+    ...(msg.inputs !== undefined ? {inputs:msg.inputs} : {}),
+    ...(msg.limits !== undefined ? {limits:msg.limits} : {})
+  };
+  validate(options, 0);
+  return JSON.stringify(options);
+}
+
 self.onmessage = async function (ev) {
   const msg = ev.data;
   if (msg && msg.type === 'init') {
     try {
       await initWasmWorker(msg);
-      self.postMessage({ type: 'ready', capabilities: getCapabilities() });
+      self.postMessage({ type: 'ready', protocolVersion: PROTOCOL_VERSION, capabilities: getCapabilities() });
     } catch (e) {
-      self.postMessage({ type: 'error', fatal: true, text: 'WASM init failed: ' + (e && e.message ? e.message : String(e)) });
+      const text = 'WASM init failed: ' + (e && e.message ? e.message : String(e));
+      self.postMessage({ type: 'error', fatal: true, text, diagnostic:{code:'host.initialization',phase:'host',message:text} });
     }
     return;
   }
@@ -160,6 +189,7 @@ self.onmessage = async function (ev) {
     let stats = null;
     let error;
     try {
+      const options = executionOptions(msg);
       if (msg.mode === 'deferred') {
         // Buffer all worker->host messages until the run completes,
         // then flush them in order. Wrap in try/finally so a thrown
@@ -169,14 +199,14 @@ self.onmessage = async function (ev) {
         const buffer = [];
         self.postMessage = function (m) { buffer.push(m); };
         try {
-          stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace, !!msg.profile, msg.breakpoints || []));
+          stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace, !!msg.profile, msg.breakpoints || [], options));
         } finally {
           flushBatch();
           self.postMessage = origPost;
           for (const m of buffer) { postGuestPayload(origPost, m); }
         }
       } else {
-        stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace, !!msg.profile, msg.breakpoints || []));
+        stats = parseStats(self.nanoGoRun(msg.source, !!msg.trace, !!msg.profile, msg.breakpoints || [], options));
         flushBatch();
       }
     } catch (err) {
@@ -187,7 +217,8 @@ self.onmessage = async function (ev) {
     // Every initialized run has exactly one terminal response, after all
     // output (including thrown JS errors). Promise clients rely on this to
     // advance their queue without mixing consecutive executions.
-    self.postMessage({ type: 'done', elapsed: Date.now() - t0, stats, ...(error ? { error } : {}) });
+    self.postMessage({ type: 'done', elapsed: Date.now() - t0, stats,
+      ...(error ? { error, diagnostic:{code:'host.execution',phase:'host',message:error} } : {}) });
     return;
   }
   if (msg && msg.type === 'workspace-sync') {
@@ -260,7 +291,7 @@ self.onmessage = async function (ev) {
         self.postMessage({ type: 'workspace-done', error: 'workspace snapshot is unavailable; sync it before running' });
         return;
       }
-      const stats = parseStats(self.nanoGoRunWorkspace(workspaceInput(snapshot), snapshot.modulePath, !!msg.trace, !!msg.profile));
+      const stats = parseStats(self.nanoGoRunWorkspace(workspaceInput(snapshot), snapshot.modulePath, !!msg.trace, !!msg.profile, executionOptions(msg)));
       flushBatch();
       if (!stats) {
         self.postMessage({ type: 'workspace-done', error: 'workspace run returned no data' });
@@ -269,7 +300,7 @@ self.onmessage = async function (ev) {
       }
     } catch (err) {
       flushBatch();
-      self.postMessage({ type: 'workspace-done', error: String(err) });
+      self.postMessage({ type: 'workspace-done', error: String(err), diagnostic:{code:'host.execution',phase:'host',message:String(err)} });
     }
     return;
   }
@@ -331,7 +362,7 @@ self.onmessage = async function (ev) {
       if (!res) {
         self.postMessage({ type: 'ast-result', error: 'AST inspection returned no data' });
       } else if (res.error) {
-        self.postMessage({ type: 'ast-result', error: res.error });
+        self.postMessage({ type: 'ast-result', error: res.error, result:res });
       } else {
         self.postMessage({ type: 'ast-result', result: res });
       }
@@ -350,7 +381,7 @@ self.onmessage = async function (ev) {
       if (!res) {
         self.postMessage({ type: 'callgraph-result', error: 'call graph returned no data' });
       } else if (res.error) {
-        self.postMessage({ type: 'callgraph-result', error: res.error });
+        self.postMessage({ type: 'callgraph-result', error: res.error, result:res });
       } else {
         self.postMessage({ type: 'callgraph-result', result: res });
       }
@@ -399,7 +430,7 @@ self.onmessage = async function (ev) {
     try {
       const result = self.nanoGoFormat(msg.source || '');
       if (result && typeof result.error === 'string') {
-        self.postMessage({ type: 'format-result', error: result.error });
+        self.postMessage({ type: 'format-result', error: result.error, diagnostic:result.diagnostic });
       } else {
         self.postMessage({ type: 'format-result', source: result && result.source != null ? result.source : msg.source });
       }
@@ -418,7 +449,7 @@ self.onmessage = async function (ev) {
       if (!result) {
         self.postMessage({ type: 'test-result', error: 'test runner returned no result' });
       } else if (result.error) {
-        self.postMessage({ type: 'test-result', error: result.error });
+        self.postMessage({ type: 'test-result', error: result.error, result });
       } else {
         self.postMessage({ type: 'test-result', result });
       }
@@ -436,7 +467,7 @@ self.onmessage = async function (ev) {
       const raw = self.nanoGoVet(msg.source || '');
       // raw may be a JS array-like or an error object
       if (raw && typeof raw.error === 'string') {
-        self.postMessage({ type: 'vet-result', error: raw.error });
+        self.postMessage({ type: 'vet-result', error: raw.error, diagnostic:raw.diagnostic });
         return;
       }
       const issues = [];
@@ -492,6 +523,9 @@ async function instantiateWasm(url, imports) {
 }
 
 function initWasmWorker(options = {}) {
+  if (options.protocolVersion !== undefined && options.protocolVersion !== 1 && options.protocolVersion !== PROTOCOL_VERSION) {
+    return Promise.reject(new Error('Unsupported nanoGo client protocol version: ' + options.protocolVersion));
+  }
   // Concurrent init messages share both the download and the Go runtime.
   // A failed partially-started runtime must be replaced with a new worker.
   if (_runtimeFailure) return Promise.reject(_runtimeFailure);
@@ -500,7 +534,19 @@ function initWasmWorker(options = {}) {
 }
 
 async function startWasmWorker(options) {
-  importScripts(options.wasmExecURL || 'wasm_exec.js');
+  const supplied = Number(options.wasmBytes !== undefined) + Number(options.wasmModule !== undefined);
+  if (supplied > 1 || (supplied && options.wasmURL !== undefined)) {
+    throw new TypeError('Choose exactly one of wasmBytes, wasmModule, or wasmURL');
+  }
+  if (options.offline && (!supplied || options.wasmExecProvided !== true || options.wasmExecURL !== undefined)) {
+    throw new TypeError('offline mode requires supplied WASM and runtime');
+  }
+  if (options.wasmExecProvided === true) {
+    if (options.wasmExecURL !== undefined) throw new TypeError('Choose supplied runtime or wasmExecURL');
+    if (typeof Go !== 'function') throw new Error('Supplied Go runtime is unavailable');
+  } else {
+    importScripts(options.wasmExecURL || 'wasm_exec.js');
+  }
   const go = new Go();
 
   // Hook for Go to signal readiness once it has registered its globals.
@@ -522,7 +568,18 @@ async function startWasmWorker(options) {
 
   // Prefer streaming instantiation: starts compilation while bytes are
   // still arriving and avoids buffering the full module in memory.
-  const instance = await instantiateWasm(WASM_URL, go.importObject);
+  let instance;
+  if (options.wasmModule !== undefined) {
+    if (!(options.wasmModule instanceof WebAssembly.Module)) throw new TypeError('wasmModule must be a compiled WebAssembly.Module');
+    instance = await WebAssembly.instantiate(options.wasmModule, go.importObject);
+  } else if (options.wasmBytes !== undefined) {
+    if (!(options.wasmBytes instanceof ArrayBuffer) && !ArrayBuffer.isView(options.wasmBytes)) {
+      throw new TypeError('wasmBytes must be an ArrayBuffer or ArrayBuffer view');
+    }
+    instance = (await WebAssembly.instantiate(options.wasmBytes, go.importObject)).instance;
+  } else {
+    instance = await instantiateWasm(WASM_URL, go.importObject);
+  }
 
   // Run the Go program (this registers nanoGo* globals via syscall/js).
   const exited = Promise.resolve(go.run(instance)).then(() => {
