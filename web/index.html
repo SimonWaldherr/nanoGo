@@ -41,7 +41,7 @@
        the scripts intentionally load (deferred) before playground.js, near
        the end of <body>, so they execute before it runs. -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css" crossorigin="anonymous">
-  <link rel="stylesheet" href="styles.css?16">
+  <link rel="stylesheet" href="styles.css?17">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js" crossorigin="anonymous" defer></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/go/go.min.js" crossorigin="anonymous" defer></script>
   <!-- Highlights the cursor's current line; styles.css already themes
@@ -116,7 +116,7 @@
             <button id="embedCopyBtn" class="mini-btn">Copy snippet</button>
             <button id="embedCopyLinkBtn" class="mini-btn">Copy link only</button>
           </div>
-          <p class="embed-popup-hint">Third-party pages can also control the embed via <code>window.postMessage</code> — see the README's "Embedding" section.</p>
+          <p class="embed-popup-hint">Third-party pages can also control the embed via <code>window.postMessage</code> — see the integration guide in the repository.</p>
         </div>
         <a class="header-link" href="https://github.com/SimonWaldherr/nanogo" target="_blank" rel="noreferrer">
           🐙 <span class="btn-label">GitHub</span>
@@ -251,12 +251,35 @@ func main() {
       <!-- Output panel switcher -->
       <div class="output-tabs" role="tablist" aria-label="Output panels">
         <button class="output-tab active" data-output="console" role="tab">📋 Console</button>
+        <button class="output-tab" data-output="data" role="tab">↔ Data</button>
         <button class="output-tab" data-output="canvas" role="tab">🎨 Canvas</button>
         <button class="output-tab" data-output="dom" role="tab">🌐 HTML</button>
         <button class="output-tab" data-output="lab" role="tab">🧭 Lab</button>
         <button class="output-tab" data-output="ai" role="tab">✨ AI</button>
         <button class="output-tab" data-output="symbol" role="tab">🔎 Symbol</button>
         <button class="output-tab" data-output="inspector" role="tab">🔬 Inspector</button>
+      </div>
+
+      <!-- Inputs are host data; results never pass through the console. -->
+      <div class="output-panel" id="dataPanel">
+        <div class="output-header"><span>Inputs &amp; results</span><span class="example-badge">Structured data</span></div>
+        <div class="output-content data-content">
+          <p class="inspector-note">Pass named values to your program with <code>host.Input</code>. Collect output with <code>host.Emit</code>. Inputs stay in this tab and are not included in share links.</p>
+          <label for="runInputs">Inputs · JSON object</label>
+          <textarea id="runInputs" spellcheck="false" aria-describedby="inputError">{}</textarea>
+          <p id="inputError" class="data-error" role="alert"></p>
+          <label for="runStepLimit">Execution step budget</label>
+          <select id="runStepLimit">
+            <option value="">Runtime default</option>
+            <option value="100000">100,000</option>
+            <option value="1000000">1,000,000</option>
+            <option value="50000000">50,000,000</option>
+          </select>
+          <p class="inspector-note">Applies to Run and Project. Steps measure guest work, not elapsed time or memory. Stop terminates the worker.</p>
+          <div class="data-result-heading"><strong id="resultStatus" role="status" aria-live="polite">No execution yet</strong><button id="copyResultsBtn" class="mini-btn" disabled>Copy results</button></div>
+          <pre id="resultData" tabindex="0" aria-label="Named results">Run a program to see its results here.</pre>
+          <details open><summary>Diagnostics</summary><pre id="runDiagnostic" tabindex="0" aria-label="Execution diagnostic"></pre></details>
+        </div>
       </div>
 
       <!-- Canvas Output -->
@@ -507,7 +530,8 @@ Select an example from the sidebar to get started! 🚀</div>
 
   <!-- Scripts -->
   <script src="wasm_exec.js?1"></script>
-  <script src="playground.js?6"></script>
+  <script src="data-panel.js?1"></script>
+  <script src="playground.js?7"></script>
   <script src="lab.js?2"></script>
   <script src="live_debug.js?1"></script>
   <script src="ai.js?1"></script>

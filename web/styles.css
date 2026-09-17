@@ -972,3 +972,20 @@ body.mode-embed .canvas-container, body.mode-embed #output { min-height: 180px; 
   #log { height: min(38vh, 260px); }
   .inspector-content { max-height: 46vh; }
 }
+
+/* Structured execution data uses the existing theme palette. */
+.data-content { display: flex; flex-direction: column; gap: 12px; }
+.data-content label { font-weight: 600; }
+.data-content textarea, .data-content select, .data-content pre {
+  color: var(--text); background: var(--code-bg);
+  border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+  max-width: 100%; box-sizing: border-box;
+}
+.data-content textarea { width: 100%; min-height: 150px; resize: vertical; font: 13px/1.6 ui-monospace, monospace; }
+.data-content pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 340px; overflow: auto; font: 13px/1.6 ui-monospace, monospace; }
+.data-content p { margin: 0; }
+.data-error:empty, #runDiagnostic:empty { display: none; }
+.data-error { color: var(--text); border-left: 3px solid #e16969; padding-left: 10px; }
+.data-result-heading { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; padding-top: 8px; }
+.data-content summary { cursor: pointer; margin-bottom: 8px; }
+.data-content :focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }

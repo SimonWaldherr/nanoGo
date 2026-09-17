@@ -2,6 +2,7 @@ package interp
 
 import (
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -103,8 +104,20 @@ func TestWebExamples(t *testing.T) {
 	for name, source := range webExamples(t) {
 		t.Run(name, func(t *testing.T) {
 			vm, output := newWebExampleVM()
+			if name == "Inputs & Results" {
+				if err := vm.BindInputs(map[string]any{"values": []float64{12, 18, 24, 30}}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if err := vm.Run(renderExampleTemplate(source)); err != nil {
 				t.Fatalf("web example failed: %v", err)
+			}
+			if name == "Inputs & Results" {
+				results := vm.LastResults()
+				want := map[string]any{"count": 4, "sum": float64(84), "mean": float64(21)}
+				if !results.Committed || len(results.Events) != 1 || results.Events[0].Name != "summary" || !reflect.DeepEqual(results.Events[0].Value, want) {
+					t.Fatalf("unexpected structured summary: %#v", results)
+				}
 			}
 			if name == "Timer Ticker" {
 				for _, want := range []string{"Timer fired", "tick 0", "tick 1", "tick 2", "done"} {

@@ -1,5 +1,30 @@
 /* global window */
 window.EXAMPLES = {
+  "Inputs & Results": `package main
+
+import (
+  "encoding/json"
+  "fmt"
+  "nanogo/host"
+)
+
+func main() {
+  input, err := host.Input("values")
+  if err != nil { panic(err) }
+  data, err := json.Marshal(input)
+  if err != nil { panic(err) }
+  var values []float64
+  if err := json.Unmarshal(data, &values); err != nil { panic(err) }
+  total := 0.0
+  for _, value := range values { total += value }
+  mean := 0.0
+  if len(values) > 0 { mean = total / float64(len(values)) }
+  fmt.Println("Processed", len(values), "values; see Data for results.")
+  if err := host.Emit("summary", map[string]any{
+    "count": len(values), "sum": total, "mean": mean,
+  }); err != nil { panic(err) }
+}
+`,
   "Numbers & Geometry": `package main
 
 import (

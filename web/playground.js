@@ -30,6 +30,7 @@
 
       // Example categorization with output types and descriptions
       const EXAMPLE_CONFIG = {
+        'Inputs & Results': { output: 'data', description: 'Edit JSON inputs, compute a summary, and collect named results', badge: 'Embedding', tags: ['Data Processing', 'Fundamentals'] },
         'Basics': {
           output: 'console',
           description: 'Basic Go syntax, fmt package usage',
@@ -170,7 +171,7 @@
         if (examplesLoadPromise) return examplesLoadPromise;
         examplesLoadPromise = new Promise((resolve, reject) => {
           const script = document.createElement('script');
-          script.src = 'examples.js?11';
+          script.src = 'examples.js?12';
           script.async = true;
           script.dataset.nanogoExamples = 'true';
           script.onload = () => {
@@ -179,7 +180,7 @@
           };
           script.onerror = () => {
             examplesLoadPromise = null;
-            reject(new Error('Failed to load examples.js?11'));
+            reject(new Error('Failed to load examples.js?12'));
           };
           document.body.appendChild(script);
         });
@@ -567,8 +568,20 @@
         postWorkspaceRequest('workspace-test', { filter: testFilterEl ? testFilterEl.value.trim() : '' });
       }
 
+      function readExecutionOptions() {
+        try { return dataPanel.readOptions(); }
+        catch (error) {
+          showOutputPanel('data');
+          setStatus('Check inputs', 'error');
+          return null;
+        }
+      }
+
       function runWorkspace() {
+        if (dataPanel.running) return;
         if (!worker) { logMessage('Worker not ready', 'warn'); return; }
+        const executionOptions = readExecutionOptions();
+        if (!executionOptions) return;
         autoSwitchedOutputThisRun = false;
         activeRunSource = getSource();
         const c = document.getElementById('life');
@@ -584,7 +597,12 @@
         const wantTrace = !!(traceToggle && traceToggle.checked);
         const wantProfile = !!(heatmapToggle && heatmapToggle.checked);
         const t0 = performance.now();
-        postWorkspaceRequest('workspace-run', { trace: wantTrace, profile: wantProfile, t0 });
+        dataPanel.start();
+        try {
+          postWorkspaceRequest('workspace-run', { trace: wantTrace, profile: wantProfile, t0, ...executionOptions });
+        } catch (error) {
+          finishRun(null, null, error.message);
+        }
       }
 
       // A small command palette gives the playground IDE muscle memory: one
@@ -805,7 +823,9 @@
       const inspectorPanel = document.getElementById("inspectorPanel");
       const outputTabs = document.querySelectorAll('.output-tab');
 
+      const dataPanel = window.nanoGoDataPanel;
       let worker = null;
+      let sourceInitialized = false;
       let currentExample = null;
       let selectedTag = null;
       let theme = (urlParams.get('theme') || localStorage.getItem("nanogo_theme") || "dark");
@@ -1244,7 +1264,7 @@
       const labPanel = document.getElementById("labPanel");
       const aiPanel = document.getElementById("aiPanel");
       const symbolPanel = document.getElementById("symbolPanel");
-      const OUTPUT_PANELS = { canvas: canvasPanel, dom: domPanel, lab: labPanel, ai: aiPanel, symbol: symbolPanel, inspector: inspectorPanel, console: consolePanel };
+      const OUTPUT_PANELS = { data: document.getElementById('dataPanel'), canvas: canvasPanel, dom: domPanel, lab: labPanel, ai: aiPanel, symbol: symbolPanel, inspector: inspectorPanel, console: consolePanel };
 
       function showOutputPanel(type) {
         const key = OUTPUT_PANELS[type] ? type : 'console';
@@ -1401,15 +1421,18 @@
           handleWorkerMessage(m);
         };
         worker.onerror = (e) => {
+          dataPanel.stop('Worker failed · no completed results');
           setStatus('Worker error', 'error');
           logMessage('❌ Worker error: ' + e.message, 'error');
         };
         worker.postMessage({ type: 'init' });
       }
 
-      function finishRun(elapsed, stats) {
+      function finishRun(elapsed, stats, error, diagnostic) {
+        const failed = error || (stats && stats.error);
+        dataPanel.finish({elapsed, stats, error, diagnostic});
         const timeStr = elapsed != null ? ' (' + elapsed + 'ms)' : '';
-        logMessage('✅ Execution finished' + timeStr, 'system');
+        logMessage((failed ? 'Execution failed' : 'Execution completed') + timeStr, failed ? 'error' : 'system');
         if (execTimeEl) {
           let label = elapsed != null ? elapsed + 'ms' : '';
           if (stats && stats.steps) label += (label ? ' · ' : '') + formatSteps(stats.steps) + ' steps';
@@ -1427,7 +1450,7 @@
           applyBreakpointHits([]);
         }
         if (stats && stats.profile) applyHeatmap(stats.profile);
-        setStatus(stats && stats.error ? 'Execution failed' : 'Ready', stats && stats.error ? 'error' : 'ready');
+        setStatus(failed ? 'Execution failed' : 'Ready', failed ? 'error' : 'ready');
         workspaceDirty = false;
         renderWorkspaceTabs();
         if (workspaceRunBtn) { workspaceRunBtn.disabled = false; workspaceRunBtn.textContent = '▶ Project'; }
@@ -1473,11 +1496,17 @@
               if (exampleCountBadgeEl) exampleCountBadgeEl.textContent = String(EXAMPLE_NAMES.length);
               fillExamples();
               introduceExamplesDrawer();
-              loadCodeFromURL().then(() => {
-                setupEmbedPopout();
+              if (!sourceInitialized) {
+                sourceInitialized = true;
+                loadCodeFromURL().then(() => {
+                  setupEmbedPopout();
+                  postToHost({ type: 'nanogo:ready' });
+                  if (wantAutorun) runCode();
+                });
+              } else {
+                // Stop restarts the runtime, preserving source and edited inputs.
                 postToHost({ type: 'nanogo:ready' });
-                if (wantAutorun) runCode();
-              });
+              }
               break;
             case 'log':
               logMessage(String(m.text), 'output');
@@ -1486,6 +1515,7 @@
               logMessage('⚠️ WARN: ' + String(m.text), 'warn');
               break;
             case 'error':
+              if (m.fatal) dataPanel.finish({error: m.text, diagnostic: m.diagnostic});
               logMessage('❌ ERROR: ' + String(m.text), 'error');
               setStatus('Runtime error', 'error');
               if (execTimeEl) execTimeEl.textContent = '';
@@ -1568,12 +1598,13 @@
               break;
             case 'workspace-done':
               if (m.error) {
+                dataPanel.finish(m);
                 if (workspaceRunBtn) { workspaceRunBtn.disabled = false; workspaceRunBtn.textContent = '▶ Project'; }
                 setStatus('Workspace error', 'error');
                 logMessage('📁 Workspace run error: ' + m.error, 'error');
               } else {
                 if (m.stats && m.stats.workspace) showWorkspaceResult({ workspace: m.stats.workspace });
-                finishRun(m.elapsed, m.stats);
+                finishRun(m.elapsed, m.stats, m.error, m.diagnostic);
               }
               break;
             case 'test-result':
@@ -1641,7 +1672,7 @@
             case 'done': {
               const elapsed = m.elapsed != null ? m.elapsed : null;
               const stats = m.stats || null;
-              finishRun(elapsed, stats);
+              finishRun(elapsed, stats, m.error, m.diagnostic);
               postToHost({ type: 'nanogo:done', elapsed, stats });
               break;
             }
@@ -1651,12 +1682,15 @@
       }
 
       function runCode() {
+        if (dataPanel.running) return;
         try {
           if (!worker) throw new Error('worker not initialized');
           if (isWorkspaceProject()) {
             runWorkspace();
             return;
           }
+          const executionOptions = readExecutionOptions();
+          if (!executionOptions) return;
           clearErrorHighlight();
           autoSwitchedOutputThisRun = false;
 
@@ -1689,8 +1723,10 @@
           refreshBreakpointMarkers();
           clearHeatmap();
           const t0 = performance.now();
-          worker.postMessage({ type: 'run', source, mode: mode, trace: wantTrace, profile: wantProfile, breakpoints: breakpoints, t0 });
+          dataPanel.start();
+          worker.postMessage({ type: 'run', source, mode: mode, trace: wantTrace, profile: wantProfile, breakpoints: breakpoints, t0, ...executionOptions });
         } catch (err) {
+          dataPanel.stop('Execution could not start');
           setStatus('Runtime error', 'error');
           logMessage('❌ RUNTIME ERROR: ' + err.message, 'error');
         }
@@ -2680,6 +2716,7 @@
       }
 
       function stopExecution() {
+        dataPanel.stop('Stopped · no completed results');
         if (!worker) { logMessage('No worker running', 'warn'); return; }
         try {
           worker.terminate();
@@ -2869,6 +2906,9 @@
         }
         if (!getExampleSource(name)) return;
 
+        if (name === 'Inputs & Results') {
+          document.getElementById('runInputs').value = JSON.stringify({values:[12, 18, 24, 30]}, null, 2);
+        }
         currentExample = name;
         resetWorkspace(getExampleSource(name), 'main.go');
 

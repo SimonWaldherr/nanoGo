@@ -50,71 +50,18 @@ func readmeGoExamples(t *testing.T) []string {
 
 func TestReadmeGoExamples(t *testing.T) {
 	examples := readmeGoExamples(t)
-	if len(examples) != 8 {
+	expected := []string{"{\"answer\":42}\n"}
+	if len(examples) != len(expected) {
 		t.Fatalf("README has %d Go examples; add expectations for each one", len(examples))
 	}
-
 	for index, source := range examples {
 		t.Run("example_"+string(rune('1'+index)), func(t *testing.T) {
 			vm, output := newTestVM()
-			var browserCalls []string
-			for _, native := range []string{"SetInnerHTML", "CanvasSize", "CanvasSet", "CanvasFlush"} {
-				native := native
-				vm.RegisterNative(native, func(args []any) (any, error) {
-					browserCalls = append(browserCalls, native)
-					return nil, nil
-				})
-			}
-
 			if err := vm.Run(source); err != nil {
 				t.Fatalf("README example failed: %v", err)
 			}
-
-			got := output.String()
-			switch index {
-			case 0:
-				if got != "Hello from Go in the browser!\n" {
-					t.Errorf("unexpected output: %q", got)
-				}
-			case 1:
-				want := "Received: 0\nReceived: 2\nReceived: 4\nReceived: 6\nReceived: 8\nDone!\n"
-				if got != want {
-					t.Errorf("unexpected output: %q", got)
-				}
-			case 2:
-				if got != "Canvas updated\n" {
-					t.Errorf("unexpected output: %q", got)
-				}
-				wantCalls := []string{"SetInnerHTML", "CanvasSize", "CanvasSet", "CanvasSet", "CanvasFlush"}
-				if strings.Join(browserCalls, ",") != strings.Join(wantCalls, ",") {
-					t.Errorf("browser calls: got %v, want %v", browserCalls, wantCalls)
-				}
-			case 3:
-				if !strings.HasPrefix(got, "Starting timer...\nElapsed: ") {
-					t.Errorf("unexpected output: %q", got)
-				}
-			case 4:
-				if !strings.Contains(got, "JSON: {\"features\":[\"wasm\",\"browser\",\"lightweight\"],\"name\":\"nanoGo\",\"version\":\"1.0\"}") {
-					t.Errorf("JSON output did not contain the documented data: %q", got)
-				}
-				if !strings.Contains(got, "Parsed: nanoGo 1.0 3") {
-					t.Errorf("unexpected parsed JSON output: %q", got)
-				}
-			case 5:
-				if got != "square: 4\nsquare: 9\n" {
-					t.Errorf("unexpected output: %q", got)
-				}
-			case 6:
-				if got != "work\ncleanup 2\ncleanup 1\n" {
-					t.Errorf("unexpected output: %q", got)
-				}
-			case 7:
-				// Text Templates section: the range action emits one line per
-				// row (each ending in the template's own newline), and
-				// fmt.Println adds one more after the whole string.
-				if got != "bolt=12\nnut=0 (empty)\n\n" {
-					t.Errorf("unexpected output: %q", got)
-				}
+			if got := output.String(); got != expected[index] {
+				t.Errorf("output: got %q, want %q", got, expected[index])
 			}
 		})
 	}

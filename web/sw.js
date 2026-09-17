@@ -4,13 +4,14 @@
 // and returning visitors never keep stale assets. When served without that
 // substitution (local dev), the literal token is a valid, stable name — bump
 // the "uiN" suffix if you need to force a fresh local cache.
-const CACHE_NAME = 'nanogo-playground-ui11-__BUILD_ID__';
+const CACHE_NAME = 'nanogo-playground-ui12-__BUILD_ID__';
 const PRECACHE_URLS = [
   './',
   './index.html',
   './styles.css',
   './wasm_exec.js',
   './playground.js',
+  './data-panel.js',
   './wasm_worker.js',
   './examples.js',
   './lab.js',
@@ -43,6 +44,7 @@ function isLocalAsset(url) {
     url.pathname.endsWith('/styles.css') ||
     url.pathname.endsWith('/wasm_exec.js') ||
     url.pathname.endsWith('/playground.js') ||
+    url.pathname.endsWith('/data-panel.js') ||
     url.pathname.endsWith('/wasm_worker.js') ||
     url.pathname.endsWith('/examples.js') ||
     url.pathname.endsWith('/lab.js') ||
